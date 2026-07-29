@@ -1,0 +1,86 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# Unit test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+
+# Ruff / mypy caches
+.ruff_cache/
+.mypy_cache/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# SSH keys and credentials (defense-in-depth — never commit these)
+**/id_rsa
+**/id_ecdsa
+**/id_ed25519
+**/osc_ascend
+**/*.pem
+**/*.key
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+#Temporary documents
+docs/
+
+# Local-only until final
+README.md
+.vscode/
+.idea/
+
+frontend/node_modules/
+frontend/dist/
+frontend/playwright-report/
+frontend/test-results/
+frontend/e2e/**/*.png
+design_handoff_annotation_workspace/
+.claude/
+design_handoff_manager_console/
+.agents/
+PROJECT.md
+.devcontainer/
+.azure/
+*.md
+
+# Authoritative product and UI specifications are versioned.
+docs/
+docs/*
+design-system/*

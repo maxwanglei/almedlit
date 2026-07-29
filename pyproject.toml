@@ -1,0 +1,22 @@
+[project]
+name = "al-medlit"
+version = "0.1.0"
+description = "Workspace for AL-MedLit"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "al-medlit-backend",
+]
+
+[dependency-groups]
+dev = [
+    "al-medlit-backend[dev]",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["backend"]
+
+[tool.uv.sources]
+al-medlit-backend = { workspace = true }

@@ -1,0 +1,3 @@
+# This file is rendered into conf.d, which nginx includes from its `http` block.
+# Override AL_MEDLIT_AUTH_RATE for a trusted local/lab network when necessary.
+limit_req_zone $binary_remote_addr zone=al_medlit_auth:10m rate=${AL_MEDLIT_AUTH_RATE};

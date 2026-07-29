@@ -1,0 +1,161 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "al-medlit-backend"
+version = "0.1.0"
+description = "Backend for AL-MedLit biomedical NLP active-learning platform"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "alembic>=1.13",
+    "bcrypt<4",
+    "celery[redis]>=5.4",
+    "defusedxml>=0.7",
+    "fastapi>=0.110",
+    "httpx>=0.27",
+    "jsonschema>=4.23",
+    "minio>=7.2",
+    "passlib[bcrypt]>=1.7",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "psycopg2-binary>=2.9",
+    "pyjwt>=2.8",
+    "python-multipart>=0.0.9",
+    "sqlalchemy>=2.0",
+    "uvicorn[standard]>=0.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+]
+ml = [
+    "safetensors>=0.4",
+    "torch>=2.3",
+    "transformers>=4.42",
+]
+conventional = [
+    "scikit-learn>=1.5",
+    "sklearn-crfsuite>=0.5",
+    "skops>=0.10",
+]
+peft = [
+    "accelerate>=0.33",
+    "peft>=0.12",
+]
+# QLoRA is deliberately not part of the default worker image.  It must be
+# installed only in CUDA environments that pass the runtime quantization
+# preflight.
+qlora = [
+    "bitsandbytes>=0.43",
+]
+runtime-classical-cpu = [
+    "scikit-learn>=1.5",
+    "sklearn-crfsuite>=0.5",
+    "skops>=0.10",
+]
+runtime-torch-cpu = [
+    "safetensors>=0.4",
+    "torch>=2.3",
+]
+runtime-transformer-cpu = [
+    "safetensors>=0.4",
+    "torch>=2.3",
+    "transformers>=4.42",
+]
+runtime-peft-accelerator = [
+    "accelerate>=0.33",
+    "peft>=0.12",
+    "safetensors>=0.4",
+    "torch>=2.3",
+    "transformers>=4.42",
+]
+runtime-qlora-cuda = [
+    "accelerate>=0.33",
+    "bitsandbytes>=0.43",
+    "peft>=0.12",
+    "safetensors>=0.4",
+    "torch>=2.3",
+    "transformers>=4.42",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["al_medlit*"]
+
+[tool.uv]
+conflicts = [
+    [
+        { extra = "ml" },
+        { extra = "runtime-peft-accelerator" },
+    ],
+    [
+        { extra = "ml" },
+        { extra = "runtime-qlora-cuda" },
+    ],
+    [
+        { extra = "runtime-torch-cpu" },
+        { extra = "runtime-peft-accelerator" },
+    ],
+    [
+        { extra = "runtime-torch-cpu" },
+        { extra = "runtime-qlora-cuda" },
+    ],
+    [
+        { extra = "runtime-transformer-cpu" },
+        { extra = "runtime-peft-accelerator" },
+    ],
+    [
+        { extra = "runtime-transformer-cpu" },
+        { extra = "runtime-qlora-cuda" },
+    ],
+]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", extra = "ml" },
+    { index = "pytorch-cpu", extra = "runtime-torch-cpu" },
+    { index = "pytorch-cpu", extra = "runtime-transformer-cpu" },
+    { index = "pytorch-cu130", extra = "runtime-peft-accelerator" },
+    { index = "pytorch-cu130", extra = "runtime-qlora-cuda" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+pythonpath = ["."]
+markers = [
+    "postgres: requires a real PostgreSQL instance, started via Docker in this test suite",
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["B008"]  # FastAPI uses function calls in defaults
+
+[tool.ruff.lint.per-file-ignores]
+"migrations/**" = [
+    "B009",  # Alembic proxy access is common in generated migration scaffolding.
+    "E501",  # Generated migration operations can be long and are history files.
+    "I001",
+    "UP007",
+    "UP035",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["al_medlit"]

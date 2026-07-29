@@ -1,0 +1,355 @@
+# AL-MedLit — single canonical stack.
+#
+# One Postgres + Redis + MinIO topology with opt-in execution profiles:
+#   * laptop  (default) — backend + db + minio + frontend. Celery runs eager
+#                          in-process for core tasks. No ML packages are
+#                          installed in the API image.
+#   * lab               — adds Redis, a lightweight control worker, and beat.
+#   * runtime profiles  — add only the selected training stack:
+#                          classical-cpu, torch-cpu, transformer-cpu,
+#                          peft-accelerator, or qlora-cuda.
+#
+# Usage:
+#   cp .env.example .env                                    # set secrets
+#   docker compose --env-file .env -f infra/docker-compose.yml up
+#   docker compose --env-file .env -f infra/docker-compose.yml --profile lab up
+#   docker compose --env-file .env -f infra/docker-compose.yml \
+#     --profile lab --profile classical-cpu up
+#
+# Both profiles share the *same* code, schema, and migrations. The variable
+# is deployment topology, not storage technology.
+
+services:
+  # ------------------------------------------------------------------
+  # PostgreSQL  (every profile)
+  # ------------------------------------------------------------------
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: al_medlit
+      POSTGRES_USER: ${POSTGRES_USER:-al_medlit}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-al_medlit}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ------------------------------------------------------------------
+  # MinIO  (every profile — single canonical object store)
+  # ------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-al_medlit}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD required}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"   # MinIO console
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ------------------------------------------------------------------
+  # Redis  (lab profile only — broker for Celery workers)
+  # ------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    profiles: ["lab"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ------------------------------------------------------------------
+  # Backend API  (every profile)
+  # ------------------------------------------------------------------
+  backend:
+    build:
+      context: ..
+      dockerfile: infra/docker/backend.Dockerfile
+    restart: unless-stopped
+    environment:
+      AL_MEDLIT_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-al_medlit}:${POSTGRES_PASSWORD}@db:5432/al_medlit
+      AL_MEDLIT_JWT_SECRET: ${AL_MEDLIT_JWT_SECRET:?AL_MEDLIT_JWT_SECRET required}
+      AL_MEDLIT_BOOTSTRAP_ADMIN_USERNAME: ${AL_MEDLIT_BOOTSTRAP_ADMIN_USERNAME:-admin}
+      AL_MEDLIT_BOOTSTRAP_ADMIN_PASSWORD: ${AL_MEDLIT_BOOTSTRAP_ADMIN_PASSWORD:-}
+      AL_MEDLIT_ALLOW_SELF_REGISTRATION: ${AL_MEDLIT_ALLOW_SELF_REGISTRATION:-true}
+      AL_MEDLIT_DEPLOYMENT_PROFILE: ${AL_MEDLIT_DEPLOYMENT_PROFILE:-laptop}
+      AL_MEDLIT_LOCAL_ATTEMPT_ROOT: /var/lib/al-medlit/attempts
+      # Laptop profile: no broker container, run tasks eagerly in-process.
+      # Lab profile: either `make lab-up` or explicit `.env` overrides should
+      # switch these values to Redis-backed, non-eager execution.
+      AL_MEDLIT_CELERY_BROKER_URL: ${AL_MEDLIT_CELERY_BROKER_URL:-memory://}
+      AL_MEDLIT_CELERY_TASK_ALWAYS_EAGER: ${AL_MEDLIT_CELERY_TASK_ALWAYS_EAGER:-true}
+      AL_MEDLIT_STORAGE_ENDPOINT: minio:9000
+      AL_MEDLIT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-al_medlit}
+      AL_MEDLIT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      AL_MEDLIT_AUTO_MIGRATE_ON_STARTUP: ${AL_MEDLIT_AUTO_MIGRATE_ON_STARTUP:-true}
+    volumes:
+      - attempt_data:/var/lib/al-medlit/attempts
+    ports:
+      # Keep direct API access available to host-side local development without
+      # exposing a path that bypasses the frontend's authentication rate limit.
+      - "127.0.0.1:${AL_MEDLIT_BACKEND_HOST_PORT:-8001}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  # ------------------------------------------------------------------
+  # Frontend  (every profile)
+  # ------------------------------------------------------------------
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: ../infra/docker/frontend.Dockerfile
+    restart: unless-stopped
+    environment:
+      AL_MEDLIT_AUTH_RATE: ${AL_MEDLIT_AUTH_RATE:-10r/m}
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+  # ------------------------------------------------------------------
+  # Lightweight control worker — lifecycle polling and storage maintenance
+  # ------------------------------------------------------------------
+  worker-control:
+    build:
+      context: ..
+      dockerfile: infra/docker/backend.Dockerfile
+    restart: unless-stopped
+    profiles: ["lab"]
+    command: celery -A al_medlit.celery_app:app worker --loglevel=info --queues=control
+    environment:
+      AL_MEDLIT_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-al_medlit}:${POSTGRES_PASSWORD}@db:5432/al_medlit
+      AL_MEDLIT_JWT_SECRET: ${AL_MEDLIT_JWT_SECRET:?AL_MEDLIT_JWT_SECRET required}
+      AL_MEDLIT_DEPLOYMENT_PROFILE: ${AL_MEDLIT_DEPLOYMENT_PROFILE:-laptop}
+      AL_MEDLIT_LOCAL_ATTEMPT_ROOT: /var/lib/al-medlit/attempts
+      AL_MEDLIT_CELERY_BROKER_URL: redis://redis:6379/0
+      AL_MEDLIT_CELERY_TASK_ALWAYS_EAGER: "false"
+      AL_MEDLIT_STORAGE_ENDPOINT: minio:9000
+      AL_MEDLIT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-al_medlit}
+      AL_MEDLIT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - attempt_data:/var/lib/al-medlit/attempts
+    depends_on:
+      backend:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+  # ------------------------------------------------------------------
+  # Optional worker — classical CPU models
+  # ------------------------------------------------------------------
+  worker-classical:
+    build:
+      context: ..
+      dockerfile: infra/docker/worker.Dockerfile
+      args:
+        AL_MEDLIT_RUNTIME_EXTRA: runtime-classical-cpu
+    restart: unless-stopped
+    profiles: ["classical-cpu"]
+    environment:
+      AL_MEDLIT_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-al_medlit}:${POSTGRES_PASSWORD}@db:5432/al_medlit
+      AL_MEDLIT_JWT_SECRET: ${AL_MEDLIT_JWT_SECRET:?AL_MEDLIT_JWT_SECRET required}
+      AL_MEDLIT_DEPLOYMENT_PROFILE: ${AL_MEDLIT_DEPLOYMENT_PROFILE:-laptop}
+      AL_MEDLIT_LOCAL_ATTEMPT_ROOT: /var/lib/al-medlit/attempts
+      AL_MEDLIT_CELERY_BROKER_URL: redis://redis:6379/0
+      AL_MEDLIT_CELERY_TASK_ALWAYS_EAGER: "false"
+      AL_MEDLIT_STORAGE_ENDPOINT: minio:9000
+      AL_MEDLIT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-al_medlit}
+      AL_MEDLIT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      AL_MEDLIT_RUNTIME_PROFILE: classical-cpu
+      AL_MEDLIT_WORKER_QUEUE: classical-cpu
+      AL_MEDLIT_WORKER_IMAGE_DIGEST: ${AL_MEDLIT_CLASSICAL_CPU_IMAGE_DIGEST:-}
+      AL_MEDLIT_RUNTIME_REPORT_PATH: /var/lib/al-medlit/attempts/runtime-reports/classical-cpu.json
+    volumes:
+      - attempt_data:/var/lib/al-medlit/attempts
+    depends_on:
+      backend:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+  # ------------------------------------------------------------------
+  # Optional worker — PyTorch CPU models
+  # ------------------------------------------------------------------
+  worker-torch:
+    build:
+      context: ..
+      dockerfile: infra/docker/worker.Dockerfile
+      args:
+        AL_MEDLIT_RUNTIME_EXTRA: runtime-torch-cpu
+    restart: unless-stopped
+    profiles: ["torch-cpu"]
+    environment:
+      AL_MEDLIT_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-al_medlit}:${POSTGRES_PASSWORD}@db:5432/al_medlit
+      AL_MEDLIT_JWT_SECRET: ${AL_MEDLIT_JWT_SECRET:?AL_MEDLIT_JWT_SECRET required}
+      AL_MEDLIT_DEPLOYMENT_PROFILE: ${AL_MEDLIT_DEPLOYMENT_PROFILE:-laptop}
+      AL_MEDLIT_LOCAL_ATTEMPT_ROOT: /var/lib/al-medlit/attempts
+      AL_MEDLIT_CELERY_BROKER_URL: redis://redis:6379/0
+      AL_MEDLIT_CELERY_TASK_ALWAYS_EAGER: "false"
+      AL_MEDLIT_STORAGE_ENDPOINT: minio:9000
+      AL_MEDLIT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-al_medlit}
+      AL_MEDLIT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      AL_MEDLIT_RUNTIME_PROFILE: torch-cpu
+      AL_MEDLIT_WORKER_QUEUE: torch-cpu
+      AL_MEDLIT_WORKER_IMAGE_DIGEST: ${AL_MEDLIT_TORCH_CPU_IMAGE_DIGEST:-}
+      AL_MEDLIT_RUNTIME_REPORT_PATH: /var/lib/al-medlit/attempts/runtime-reports/torch-cpu.json
+    volumes:
+      - attempt_data:/var/lib/al-medlit/attempts
+    depends_on:
+      backend:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+  # ------------------------------------------------------------------
+  # Optional worker — transformer CPU models
+  # ------------------------------------------------------------------
+  worker-transformer:
+    build:
+      context: ..
+      dockerfile: infra/docker/worker.Dockerfile
+      args:
+        AL_MEDLIT_RUNTIME_EXTRA: runtime-transformer-cpu
+    restart: unless-stopped
+    profiles: ["transformer-cpu"]
+    environment:
+      AL_MEDLIT_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-al_medlit}:${POSTGRES_PASSWORD}@db:5432/al_medlit
+      AL_MEDLIT_JWT_SECRET: ${AL_MEDLIT_JWT_SECRET:?AL_MEDLIT_JWT_SECRET required}
+      AL_MEDLIT_DEPLOYMENT_PROFILE: ${AL_MEDLIT_DEPLOYMENT_PROFILE:-laptop}
+      AL_MEDLIT_LOCAL_ATTEMPT_ROOT: /var/lib/al-medlit/attempts
+      AL_MEDLIT_CELERY_BROKER_URL: redis://redis:6379/0
+      AL_MEDLIT_CELERY_TASK_ALWAYS_EAGER: "false"
+      AL_MEDLIT_STORAGE_ENDPOINT: minio:9000
+      AL_MEDLIT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-al_medlit}
+      AL_MEDLIT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      AL_MEDLIT_RUNTIME_PROFILE: transformer-cpu
+      AL_MEDLIT_WORKER_QUEUE: transformer-cpu
+      AL_MEDLIT_WORKER_IMAGE_DIGEST: ${AL_MEDLIT_TRANSFORMER_CPU_IMAGE_DIGEST:-}
+      AL_MEDLIT_RUNTIME_REPORT_PATH: /var/lib/al-medlit/attempts/runtime-reports/transformer-cpu.json
+    volumes:
+      - attempt_data:/var/lib/al-medlit/attempts
+    depends_on:
+      backend:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+  # ------------------------------------------------------------------
+  # Optional worker — LoRA accelerator models
+  # ------------------------------------------------------------------
+  worker-peft:
+    build:
+      context: ..
+      dockerfile: infra/docker/worker.Dockerfile
+      args:
+        AL_MEDLIT_RUNTIME_EXTRA: runtime-peft-accelerator
+    restart: unless-stopped
+    profiles: ["peft-accelerator"]
+    gpus: all
+    environment:
+      AL_MEDLIT_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-al_medlit}:${POSTGRES_PASSWORD}@db:5432/al_medlit
+      AL_MEDLIT_JWT_SECRET: ${AL_MEDLIT_JWT_SECRET:?AL_MEDLIT_JWT_SECRET required}
+      AL_MEDLIT_DEPLOYMENT_PROFILE: ${AL_MEDLIT_DEPLOYMENT_PROFILE:-laptop}
+      AL_MEDLIT_LOCAL_ATTEMPT_ROOT: /var/lib/al-medlit/attempts
+      AL_MEDLIT_CELERY_BROKER_URL: redis://redis:6379/0
+      AL_MEDLIT_CELERY_TASK_ALWAYS_EAGER: "false"
+      AL_MEDLIT_STORAGE_ENDPOINT: minio:9000
+      AL_MEDLIT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-al_medlit}
+      AL_MEDLIT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      AL_MEDLIT_RUNTIME_PROFILE: peft-accelerator
+      AL_MEDLIT_WORKER_QUEUE: peft-accelerator
+      AL_MEDLIT_WORKER_IMAGE_DIGEST: ${AL_MEDLIT_PEFT_ACCELERATOR_IMAGE_DIGEST:-}
+      AL_MEDLIT_RUNTIME_REPORT_PATH: /var/lib/al-medlit/attempts/runtime-reports/peft-accelerator.json
+    volumes:
+      - attempt_data:/var/lib/al-medlit/attempts
+    depends_on:
+      backend:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+  # ------------------------------------------------------------------
+  # Optional worker — QLoRA CUDA models
+  # ------------------------------------------------------------------
+  worker-qlora:
+    build:
+      context: ..
+      dockerfile: infra/docker/worker.Dockerfile
+      args:
+        AL_MEDLIT_RUNTIME_EXTRA: runtime-qlora-cuda
+    restart: unless-stopped
+    profiles: ["qlora-cuda"]
+    gpus: all
+    environment:
+      AL_MEDLIT_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-al_medlit}:${POSTGRES_PASSWORD}@db:5432/al_medlit
+      AL_MEDLIT_JWT_SECRET: ${AL_MEDLIT_JWT_SECRET:?AL_MEDLIT_JWT_SECRET required}
+      AL_MEDLIT_DEPLOYMENT_PROFILE: ${AL_MEDLIT_DEPLOYMENT_PROFILE:-laptop}
+      AL_MEDLIT_LOCAL_ATTEMPT_ROOT: /var/lib/al-medlit/attempts
+      AL_MEDLIT_CELERY_BROKER_URL: redis://redis:6379/0
+      AL_MEDLIT_CELERY_TASK_ALWAYS_EAGER: "false"
+      AL_MEDLIT_STORAGE_ENDPOINT: minio:9000
+      AL_MEDLIT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-al_medlit}
+      AL_MEDLIT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      AL_MEDLIT_RUNTIME_PROFILE: qlora-cuda
+      AL_MEDLIT_WORKER_QUEUE: qlora-cuda
+      AL_MEDLIT_WORKER_IMAGE_DIGEST: ${AL_MEDLIT_QLORA_CUDA_IMAGE_DIGEST:-}
+      AL_MEDLIT_RUNTIME_REPORT_PATH: /var/lib/al-medlit/attempts/runtime-reports/qlora-cuda.json
+    volumes:
+      - attempt_data:/var/lib/al-medlit/attempts
+    depends_on:
+      backend:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+  # ------------------------------------------------------------------
+  # Celery beat — reconciles local and SLURM attempts without an open UI
+  # ------------------------------------------------------------------
+  scheduler:
+    build:
+      context: ..
+      dockerfile: infra/docker/backend.Dockerfile
+    restart: unless-stopped
+    profiles: ["lab"]
+    command: celery -A al_medlit.celery_app:app beat --loglevel=info
+    environment:
+      AL_MEDLIT_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-al_medlit}:${POSTGRES_PASSWORD}@db:5432/al_medlit
+      AL_MEDLIT_JWT_SECRET: ${AL_MEDLIT_JWT_SECRET:?AL_MEDLIT_JWT_SECRET required}
+      AL_MEDLIT_DEPLOYMENT_PROFILE: ${AL_MEDLIT_DEPLOYMENT_PROFILE:-laptop}
+      AL_MEDLIT_LOCAL_ATTEMPT_ROOT: /var/lib/al-medlit/attempts
+      AL_MEDLIT_CELERY_BROKER_URL: redis://redis:6379/0
+      AL_MEDLIT_CELERY_TASK_ALWAYS_EAGER: "false"
+      AL_MEDLIT_STORAGE_ENDPOINT: minio:9000
+      AL_MEDLIT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-al_medlit}
+      AL_MEDLIT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - attempt_data:/var/lib/al-medlit/attempts
+    depends_on:
+      backend:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+volumes:
+  pg_data:
+  minio_data:
+  attempt_data:

@@ -1,0 +1,2 @@
+# Thin runtime wrapper around pyproject.toml.
+.

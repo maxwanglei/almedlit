@@ -1,0 +1,43 @@
+{
+  "name": "al-medlit-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AL-MedLit annotation UI — React + TypeScript",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "lint": "eslint src --ext ts,tsx",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "test:e2e:list": "playwright test --list"
+  },
+  "dependencies": {
+    "@astryxdesign/core": "^0.1.1",
+    "@astryxdesign/theme-neutral": "^0.1.1",
+    "immer": "^10.1.0",
+    "lucide-react": "^1.18.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router-dom": "^7.18.1",
+    "zustand": "^4.5.0"
+  },
+  "devDependencies": {
+    "@astryxdesign/cli": "^0.1.1",
+    "@axe-core/playwright": "^4.12.1",
+    "@playwright/test": "^1.61.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "eslint": "^8.57.0",
+    "eslint-plugin-react-hooks": "^4.6.2",
+    "jsdom": "^29.1.1",
+    "typescript": "^5.4.0",
+    "vite": "^8.1.5",
+    "vitest": "^4.1.8"
+  }
+}

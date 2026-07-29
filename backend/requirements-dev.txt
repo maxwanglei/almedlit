@@ -1,0 +1,2 @@
+# Thin development wrapper around pyproject.toml optional dependencies.
+.[dev]
