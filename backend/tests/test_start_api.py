@@ -96,7 +96,7 @@ def test_start_api_exits_when_migration_fails(monkeypatch):
     assert exc_info.value.code == 3
 
 
-def test_security_checks_register_models_before_db_query(monkeypatch):
+def test_security_checks_require_a_ready_schema_before_db_query(monkeypatch):
     from al_medlit.auth import service as auth_service
     from al_medlit.core import config, database
 
@@ -114,15 +114,15 @@ def test_security_checks_register_models_before_db_query(monkeypatch):
         def __exit__(self, exc_type, exc, traceback) -> None:
             calls.append("session-exit")
 
-    def fake_register_models() -> None:
-        calls.append("register-models")
+    def fake_ensure_schema_ready() -> None:
+        calls.append("schema-ready")
 
     def fake_assert_no_vulnerable_bootstrap_admin(db) -> None:
         assert db == "db"
         calls.append("bootstrap-check")
 
     monkeypatch.setattr(config, "settings", FakeSettings())
-    monkeypatch.setattr(database, "register_models", fake_register_models)
+    monkeypatch.setattr(database, "ensure_schema_ready", fake_ensure_schema_ready)
     monkeypatch.setattr(database, "SessionLocal", lambda: FakeSession())
     monkeypatch.setattr(
         auth_service,
@@ -134,7 +134,7 @@ def test_security_checks_register_models_before_db_query(monkeypatch):
 
     assert calls == [
         "validate",
-        "register-models",
+        "schema-ready",
         "session-enter",
         "bootstrap-check",
         "session-exit",

@@ -17,10 +17,14 @@ export function statusVariant(
   if (["failed", "blocked", "rejected", "unavailable"].includes(normalized)) {
     return "error";
   }
-  if (["pilot", "queued", "running", "in_progress", "pending"].includes(normalized)) {
+  if (
+    ["partial", "pilot", "queued", "running", "in_progress", "pending"].includes(
+      normalized,
+    )
+  ) {
     return "warning";
   }
-  if (["draft", "planned", "experimental"].includes(normalized)) {
+  if (["draft", "foundation", "planned", "experimental"].includes(normalized)) {
     return "info";
   }
   return "neutral";

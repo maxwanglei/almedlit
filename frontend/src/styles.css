@@ -1719,6 +1719,111 @@
   line-height: 1.5;
 }
 
+.platform-roadmap-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.platform-roadmap-card {
+  min-width: 0;
+  min-height: 286px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--paper);
+}
+
+.platform-roadmap-card > header {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+}
+
+.platform-roadmap-icon {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  display: grid;
+  place-items: center;
+  color: var(--status-info-text);
+  border: 1px solid var(--status-info-border);
+  border-radius: var(--radius-sm);
+  background: var(--status-info-surface);
+}
+
+.platform-roadmap-card > header > div {
+  min-width: 0;
+  display: flex;
+  flex: 1;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.platform-roadmap-card h3 {
+  margin: 2px 0 0;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.platform-roadmap-card > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.platform-roadmap-card ul {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0 0 0 17px;
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.platform-roadmap-card li::marker {
+  color: var(--status-info-text);
+}
+
+.platform-roadmap-card > footer {
+  margin-top: auto;
+  padding-top: 11px;
+  border-top: 1px solid var(--line);
+}
+
+.platform-capability-availability {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.platform-capability-availability > span {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: var(--status-neutral-border);
+}
+
+.platform-capability-availability[data-available="true"] {
+  color: var(--status-success-text);
+}
+
+.platform-capability-availability[data-available="true"] > span {
+  background: var(--status-success-text);
+}
+
 .platform-loading {
   min-height: 260px;
   display: grid;
@@ -1753,6 +1858,10 @@
 @media (max-width: 1000px) {
   .platform-stats,
   .platform-policy-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .platform-roadmap-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -1864,6 +1973,14 @@
 
   .platform-module-links {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .platform-roadmap-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .platform-roadmap-card {
+    min-height: 0;
   }
 
   .platform-module-links > :is(button, a) {

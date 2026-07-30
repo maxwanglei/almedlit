@@ -16,7 +16,7 @@ const TEAM_PRESETS: { key: string; label: string; blurb: string }[] = [
   {
     key: "annotate_train_al",
     label: "+ Active Learning",
-    blurb: "Add the active-learning loop.",
+    blurb: "Enable the planned active-learning capability.",
   },
   { key: "full", label: "Full", blurb: "Everything your deployment supports." },
 ];

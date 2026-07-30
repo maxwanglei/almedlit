@@ -29,10 +29,10 @@ def _run_migrations() -> None:
 def _run_security_checks() -> None:
     from al_medlit.auth import service as auth_service
     from al_medlit.core.config import settings
-    from al_medlit.core.database import SessionLocal, register_models
+    from al_medlit.core.database import SessionLocal, ensure_schema_ready
 
     settings.validate_runtime_secrets()
-    register_models()
+    ensure_schema_ready()
     with SessionLocal() as db:
         auth_service.assert_no_vulnerable_bootstrap_admin(db)
 

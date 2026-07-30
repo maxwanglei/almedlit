@@ -93,6 +93,9 @@ def test_migration_then_seed_bootstrap_sqlite(tmp_path):
     migrate_result = _run_backend_command("-m", "alembic", "upgrade", "head", env=env)
     assert migrate_result.returncode == 0, migrate_result.stderr
 
+    schema_check = _run_backend_command("-m", "alembic", "check", env=env)
+    assert schema_check.returncode == 0, schema_check.stderr
+
     seed_result = _run_backend_command("-m", "scripts.seed_demo", env=env)
     assert seed_result.returncode == 0, seed_result.stderr
     assert "Seeded demo project" in seed_result.stdout
