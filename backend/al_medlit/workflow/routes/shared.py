@@ -1,5 +1,7 @@
 """HTTP routes for the canonical learning workflow."""
 
+from collections.abc import Iterable
+
 from sqlalchemy.orm import Session
 
 from al_medlit.auth.models import User
@@ -30,6 +32,7 @@ def _write(
     *,
     min_role: str | None = "manager",
     module: str | tuple[str, ...],
+    related_user_ids: Iterable[int] = (),
 ) -> None:
     access.authorize_project_write(
         db,
@@ -37,6 +40,7 @@ def _write(
         project_id,
         min_role=min_role,
         module=module,
+        related_user_ids=related_user_ids,
     )
 
 

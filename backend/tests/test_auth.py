@@ -166,6 +166,93 @@ def test_authenticate_user_allows_rotated_bootstrap_admin_password(db, monkeypat
     assert service.authenticate_user(db, "admin", "rotated-admin-password") is not None
 
 
+def test_bootstrap_password_check_hashes_once_per_stored_hash(monkeypatch):
+    """The check runs on every authenticated request; bcrypt must not."""
+    from al_medlit.auth import service
+    from al_medlit.auth.models import User
+    from al_medlit.auth.security import hash_password
+    from al_medlit.core.config import settings
+
+    monkeypatch.setattr(settings, "bootstrap_admin_username", "admin")
+    service._hash_matches_forbidden_bootstrap_password.cache_clear()
+
+    calls = []
+    real_verify_password = service.verify_password
+
+    def counting_verify_password(password, password_hash):
+        calls.append(password_hash)
+        return real_verify_password(password, password_hash)
+
+    monkeypatch.setattr(service, "verify_password", counting_verify_password)
+
+    user = User(
+        username="admin",
+        password_hash=hash_password("rotated-admin-password"),
+        display_name="Admin",
+        is_active=True,
+        is_superuser=True,
+    )
+
+    assert service.user_has_forbidden_bootstrap_password(user) is False
+    first_call_count = len(calls)
+    assert first_call_count > 0
+
+    for _ in range(3):
+        assert service.user_has_forbidden_bootstrap_password(user) is False
+    assert len(calls) == first_call_count
+
+
+def test_bootstrap_password_check_reevaluates_a_rotated_hash(monkeypatch):
+    from al_medlit.auth import service
+    from al_medlit.auth.models import User
+    from al_medlit.auth.security import hash_password
+    from al_medlit.core.config import DEFAULT_BOOTSTRAP_ADMIN_PASSWORD, settings
+
+    monkeypatch.setattr(settings, "bootstrap_admin_username", "admin")
+    service._hash_matches_forbidden_bootstrap_password.cache_clear()
+
+    user = User(
+        username="admin",
+        password_hash=hash_password(DEFAULT_BOOTSTRAP_ADMIN_PASSWORD),
+        display_name="Admin",
+        is_active=True,
+        is_superuser=True,
+    )
+    assert service.user_has_forbidden_bootstrap_password(user) is True
+
+    # Rotating the password produces a new hash, so the cached verdict for the
+    # old hash must not be reused.
+    user.password_hash = hash_password("rotated-admin-password")
+    assert service.user_has_forbidden_bootstrap_password(user) is False
+
+
+def test_bootstrap_password_check_skips_bcrypt_for_other_users(monkeypatch):
+    from al_medlit.auth import service
+    from al_medlit.auth.models import User
+    from al_medlit.core.config import settings
+
+    monkeypatch.setattr(settings, "bootstrap_admin_username", "admin")
+    service._hash_matches_forbidden_bootstrap_password.cache_clear()
+
+    def fail_on_verify(password, password_hash):
+        raise AssertionError("verify_password must not run for non-bootstrap users")
+
+    monkeypatch.setattr(service, "verify_password", fail_on_verify)
+
+    assert (
+        service.user_has_forbidden_bootstrap_password(
+            User(username="alice", password_hash="x", is_active=True, is_superuser=True)
+        )
+        is False
+    )
+    assert (
+        service.user_has_forbidden_bootstrap_password(
+            User(username="admin", password_hash="x", is_active=True, is_superuser=False)
+        )
+        is False
+    )
+
+
 def test_explicit_bootstrap_admin_command_creates_superuser(db, monkeypatch):
     from al_medlit.auth import service
     from al_medlit.core.config import settings
@@ -235,6 +322,70 @@ def test_explicit_bootstrap_admin_is_idempotent_for_existing_superuser(db, monke
     assert verify_password("strong-admin-password", second.password_hash) is True
     assert member is not None
     assert member.role == "admin"
+
+
+def test_bootstrap_admin_password_change_invalidates_existing_sessions(
+    client,
+    db,
+    monkeypatch,
+):
+    from al_medlit.auth.security import create_access_token
+    from al_medlit.core.config import settings
+    from scripts.bootstrap_admin import bootstrap_admin
+
+    monkeypatch.setattr(settings, "bootstrap_admin_username", "rotated-root")
+    monkeypatch.setattr(settings, "bootstrap_admin_password", "first-admin-password")
+    user = bootstrap_admin(db)
+    original_version = user.session_version
+    original_token = create_access_token(
+        user.id,
+        session_version=user.session_version,
+    )
+
+    # Reapplying the same password is idempotent and does not revoke sessions.
+    same_password = bootstrap_admin(db)
+    assert same_password.session_version == original_version
+
+    monkeypatch.setattr(settings, "bootstrap_admin_password", "second-admin-password")
+    rotated = bootstrap_admin(db)
+    assert rotated.session_version == original_version + 1
+    assert client.get(
+        "/api/auth/me",
+        headers={"Authorization": f"Bearer {original_token}"},
+    ).status_code == 401
+
+
+def test_authenticate_user_requests_a_user_row_lock(db, monkeypatch):
+    from sqlalchemy.orm import Query
+
+    from al_medlit.auth import service
+    from al_medlit.auth.models import User
+    from al_medlit.auth.security import hash_password
+
+    user = User(
+        username="locked-login",
+        password_hash=hash_password("locked-login-password"),
+        display_name="Locked Login",
+        is_active=True,
+    )
+    db.add(user)
+    db.commit()
+    lock_calls = 0
+    real_with_for_update = Query.with_for_update
+
+    def track_with_for_update(query, *args, **kwargs):
+        nonlocal lock_calls
+        lock_calls += 1
+        return real_with_for_update(query, *args, **kwargs)
+
+    monkeypatch.setattr(Query, "with_for_update", track_with_for_update)
+
+    assert service.authenticate_user(
+        db,
+        "locked-login",
+        "locked-login-password",
+    ) is not None
+    assert lock_calls == 1
 
 
 def test_explicit_bootstrap_admin_command_requires_password(db, monkeypatch):

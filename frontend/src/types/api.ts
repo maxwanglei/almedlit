@@ -1018,15 +1018,134 @@ export interface WorkspaceMember {
 }
 
 export interface WorkspaceInvite {
+  id: number;
   token: string;
   role: WorkspaceRole;
   workspace_id: number;
+  expires_at: string | null;
+}
+
+export interface WorkspaceInviteSummary {
+  id: number;
+  workspace_id: number;
+  role: WorkspaceRole;
+  created_by: number;
+  created_by_username: string;
+  expires_at: string | null;
+  created_at: string;
+}
+
+export interface InvitePreview {
+  workspace_name: string;
+  workspace_kind: string;
+  role: WorkspaceRole;
+  expires_at: string | null;
+}
+
+export interface InviteAcceptPayload {
+  username?: string;
+  password?: string;
+  display_name?: string;
 }
 
 export interface WorkspaceJoinRequest {
   id: number;
   workspace_id: number;
   user_id: number;
+  username: string;
+  display_name: string;
+  email: string | null;
   status: string;
   message: string | null;
+  created_at: string;
+}
+
+export interface WorkspaceGovernance {
+  workspace_id: number;
+  workspace_kind: string;
+  join_code: string | null;
+  default_invite_expiry_minutes: number;
+}
+
+export interface AdminMembership {
+  workspace_id: number;
+  workspace_name: string;
+  workspace_kind: string;
+  role: WorkspaceRole;
+}
+
+export interface AdminUserSummary {
+  id: number;
+  username: string;
+  display_name: string;
+  email: string | null;
+  is_active: boolean;
+  is_initialized: boolean;
+  is_superuser: boolean;
+  last_login_at: string | null;
+  membership_count: number;
+  created_at?: string;
+}
+
+export interface AdminUserDetail extends AdminUserSummary {
+  memberships: AdminMembership[];
+}
+
+export interface AdminUserListParams {
+  search?: string;
+  status?: "active" | "inactive" | "all";
+  workspaceId?: number;
+  page?: number;
+  pageSize?: number;
+}
+
+export interface AdminUserCreate {
+  username: string;
+  display_name?: string;
+  email?: string;
+}
+
+export interface AdminUserPage {
+  items: AdminUserSummary[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface AccountActionLink {
+  url: string;
+  expires_at: string;
+  purpose: AccountActionPurpose;
+}
+
+export interface AdminUserCreateResult {
+  user: AdminUserSummary;
+  action: AccountActionLink;
+}
+
+export interface AdminSettings {
+  allow_self_registration: boolean;
+  default_invite_expiry_minutes: number;
+  account_action_expiry_minutes: number;
+  deployment_profile: string;
+  storage_backend: string;
+  storage_encryption: string;
+  task_execution: string;
+  jwt_lifetime_minutes: number;
+}
+
+export type AdminSettingsUpdate = Pick<
+  AdminSettings,
+  | "allow_self_registration"
+  | "default_invite_expiry_minutes"
+  | "account_action_expiry_minutes"
+>;
+
+export type AccountActionPurpose = "activation" | "password_reset";
+
+export interface AccountActionPreview {
+  purpose: AccountActionPurpose;
+  username: string;
+  display_name: string;
+  expires_at: string;
 }

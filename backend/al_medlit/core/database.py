@@ -30,6 +30,7 @@ def get_db() -> Generator[Session, None, None]:
 def register_models() -> None:
     """Import model modules so SQLAlchemy metadata is fully registered."""
 
+    from al_medlit.administration import models as _administration_models  # noqa: F401
     from al_medlit.annotation import models as _annotation_models  # noqa: F401
     from al_medlit.auth import models as _auth_models  # noqa: F401
     from al_medlit.co_learning.error_guideline_learning import models as _egl_models  # noqa: F401

@@ -18,11 +18,14 @@ from al_medlit.workspace.schemas import (
     CapabilityUpdate,
     InviteAccept,
     InviteCreate,
+    InvitePreview,
     InviteRead,
+    InviteSummaryRead,
     JoinRequestCreate,
     JoinRequestRead,
     RoleUpdate,
     WorkspaceCreate,
+    WorkspaceGovernanceRead,
     WorkspaceMemberRead,
     WorkspaceRead,
 )
@@ -114,6 +117,61 @@ def create_invite(
     return invite
 
 
+@router.get("/{workspace_id}/invites", response_model=list[InviteSummaryRead])
+def list_invites(
+    workspace_id: int,
+    _member: WorkspaceMember = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+):
+    return service.list_open_invites(db, workspace_id)
+
+
+@router.delete(
+    "/{workspace_id}/invites/{invite_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def revoke_invite(
+    workspace_id: int,
+    invite_id: int,
+    admin: WorkspaceMember = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+):
+    service.revoke_invite(
+        db,
+        workspace_id,
+        invite_id,
+        actor_user_id=admin.user_id,
+    )
+    db.commit()
+
+
+@router.get("/{workspace_id}/governance", response_model=WorkspaceGovernanceRead)
+def get_workspace_governance(
+    workspace_id: int,
+    _member: WorkspaceMember = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+):
+    return service.workspace_governance(db, workspace_id)
+
+
+@router.post(
+    "/{workspace_id}/join-code/rotate",
+    response_model=WorkspaceGovernanceRead,
+)
+def rotate_join_code(
+    workspace_id: int,
+    admin: WorkspaceMember = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+):
+    service.rotate_join_code(
+        db,
+        workspace_id,
+        actor_user_id=admin.user_id,
+    )
+    db.commit()
+    return service.workspace_governance(db, workspace_id)
+
+
 @router.post("/by-code/{join_code}/join-requests", response_model=JoinRequestRead)
 def apply_to_join(
     join_code: str,
@@ -189,6 +247,25 @@ def update_capability(
 invite_router = APIRouter(prefix="/invites", tags=["invites"])
 
 
+@invite_router.get("/{token}", response_model=InvitePreview)
+def preview_invite(token: str, db: Session = Depends(get_db)):
+    """Describe an open invite so the acceptance page can name the workspace.
+
+    Unauthenticated by necessity — the invitee may not have an account yet.
+    ``get_open_invite`` already rejects used and expired tokens, and the public
+    edge throttles this route alongside the other unauthenticated invite and
+    auth endpoints.
+    """
+    invite = service.get_open_invite(db, token)
+    workspace = service.require_workspace(db, invite.workspace_id)
+    return InvitePreview(
+        workspace_name=workspace.name,
+        workspace_kind=workspace.kind,
+        role=invite.role,
+        expires_at=invite.expires_at,
+    )
+
+
 @invite_router.post("/{token}/accept")
 def accept_invite(
     token: str,
@@ -213,7 +290,13 @@ def accept_invite(
 
     service.accept_invite(db, invite, user)
     db.commit()
-    return {"access_token": create_access_token(str(user.id)), "token_type": "bearer"}
+    return {
+        "access_token": create_access_token(
+            str(user.id),
+            session_version=user.session_version,
+        ),
+        "token_type": "bearer",
+    }
 
 
 join_request_router = APIRouter(prefix="/join-requests", tags=["join-requests"])

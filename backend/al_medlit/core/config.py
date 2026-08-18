@@ -3,10 +3,26 @@ from pathlib import Path
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine.url import make_url
 
 DEFAULT_JWT_SECRET = "change-me-in-production-change-me"
 DEFAULT_BOOTSTRAP_ADMIN_PASSWORD = "change-me-now"
 FORBIDDEN_BOOTSTRAP_ADMIN_PASSWORDS = frozenset({DEFAULT_BOOTSTRAP_ADMIN_PASSWORD})
+
+# Placeholder and vendor-default credentials that must never reach a deployed
+# datastore. These are the values shipped in .env.example and the local
+# development defaults below, all of which are public knowledge.
+FORBIDDEN_DEPLOYMENT_SECRETS = frozenset(
+    {
+        "",
+        "change-me",
+        "changeme",
+        "al_medlit",
+        "password",
+        "postgres",
+        "minioadmin",
+    }
+)
 
 
 class Settings(BaseSettings):
@@ -103,6 +119,36 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "AL_MEDLIT_BOOTSTRAP_ADMIN_PASSWORD must be at most 72 UTF-8 bytes"
             )
+
+    def validate_deployment_secrets(self) -> None:
+        """Reject known placeholder credentials for networked datastores.
+
+        Called from the container entrypoint rather than the FastAPI lifespan:
+        the local development defaults (SQLite, local object storage) are
+        legitimately weak, and only a networked deployment needs this gate.
+        """
+
+        if self.storage_backend == "minio":
+            secret = self.storage_secret_key.strip()
+            if secret.lower() in FORBIDDEN_DEPLOYMENT_SECRETS:
+                raise RuntimeError(
+                    "AL_MEDLIT_STORAGE_SECRET_KEY (MINIO_ROOT_PASSWORD) is a known "
+                    "placeholder value. Set a strong unique secret before starting "
+                    "the API; generate one with: openssl rand -hex 32"
+                )
+
+        url = make_url(self.database_url)
+        # A URL without a host is a local file database (SQLite) and carries no
+        # password to validate.
+        if url.host:
+            db_password = (url.password or "").strip()
+            if db_password.lower() in FORBIDDEN_DEPLOYMENT_SECRETS:
+                raise RuntimeError(
+                    "The database password in AL_MEDLIT_DATABASE_URL "
+                    "(POSTGRES_PASSWORD) is a known placeholder value. Set a "
+                    "strong unique password before starting the API; generate one "
+                    "with: openssl rand -hex 32"
+                )
 
 
 settings = Settings()

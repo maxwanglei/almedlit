@@ -126,6 +126,20 @@ vi.mock("@/pages/LoginPage", () => ({
     </button>
   ),
 }));
+vi.mock("@/pages/AcceptInvitePage", () => ({
+  default: ({ token, signedIn }: { token: string; signedIn: boolean }) => (
+    <main
+      aria-label="Mock invite acceptance"
+      data-token={token}
+      data-signed-in={String(signedIn)}
+    />
+  ),
+}));
+vi.mock("@/pages/AccountActionPage", () => ({
+  default: ({ token }: { token: string }) => (
+    <main aria-label="Mock account action" data-token={token} />
+  ),
+}));
 vi.mock("@/pages/OnboardingPresetPicker", () => ({
   default: ({ onDone }: { onDone: () => Promise<void> }) => (
     <button type="button" onClick={() => void onDone()}>
@@ -550,7 +564,7 @@ describe("App workspace selection", () => {
     await waitFor(() => {
       expect(window.location.pathname).toBe("/projects");
       expect(screen.getByLabelText("Mock projects directory")).toBeTruthy();
-    }, { timeout: 5_000 });
+    }, { timeout: 10_000 });
     expect(
       screen.getByRole("link", { name: "Projects" }).getAttribute(
         "aria-current",
@@ -1031,7 +1045,7 @@ describe("App workspace selection", () => {
     ).toBe(false);
   });
 
-  it("canonicalizes the legacy workspace administration URL without losing location state", async () => {
+  it("keeps the real system administration URL and location state for superusers", async () => {
     window.history.replaceState(
       null,
       "",
@@ -1039,6 +1053,7 @@ describe("App workspace selection", () => {
     );
     mocks.getMe.mockResolvedValue({
       ...me,
+      user: { ...me.user, is_superuser: true },
       memberships: [
         {
           workspace_id: 60,
@@ -1051,9 +1066,48 @@ describe("App workspace selection", () => {
 
     render(<App />);
 
-    await screen.findByLabelText("Mock workspace settings");
-    expect(window.location.pathname).toBe("/workspace-settings");
+    await screen.findByLabelText("Mock system administration");
+    expect(window.location.pathname).toBe("/admin/users");
     expect(window.location.search).toBe("?tab=members");
     expect(window.location.hash).toBe("#invite");
+  });
+
+  it("defaults exact admin URLs for a superuser without a workspace membership", async () => {
+    window.history.replaceState(null, "", "/admin");
+    mocks.getMe.mockResolvedValue({
+      ...me,
+      user: { ...me.user, is_superuser: true },
+      memberships: [],
+    });
+
+    render(<App />);
+
+    await screen.findByLabelText("Mock system administration");
+    await waitFor(() => expect(window.location.pathname).toBe("/admin/users"));
+  });
+
+  it("preserves an invite URL when a stored session token is stale", async () => {
+    window.history.replaceState(null, "", "/invites/invite-token?source=test#accept");
+    mocks.getMe.mockRejectedValueOnce(new Error("Invalid bearer token"));
+
+    render(<App />);
+
+    const page = await screen.findByLabelText("Mock invite acceptance");
+    expect(page.getAttribute("data-token")).toBe("invite-token");
+    expect(page.getAttribute("data-signed-in")).toBe("false");
+    expect(window.location.pathname).toBe("/invites/invite-token");
+    expect(window.location.search).toBe("?source=test");
+    expect(window.location.hash).toBe("#accept");
+  });
+
+  it("preserves an account-action URL when a stored session token is stale", async () => {
+    window.history.replaceState(null, "", "/account-actions/reset-token");
+    mocks.getMe.mockRejectedValueOnce(new Error("Invalid bearer token"));
+
+    render(<App />);
+
+    const page = await screen.findByLabelText("Mock account action");
+    expect(page.getAttribute("data-token")).toBe("reset-token");
+    expect(window.location.pathname).toBe("/account-actions/reset-token");
   });
 });

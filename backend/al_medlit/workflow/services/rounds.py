@@ -62,6 +62,26 @@ _SENSITIVE_TRAINING_CONFIG_FRAGMENTS = {
 }
 
 
+def _lock_and_validate_active_round_annotators(
+    db: Session,
+    annotator_user_ids: list[int],
+) -> None:
+    if not annotator_user_ids:
+        return
+    annotators = (
+        db.query(User)
+        .filter(User.id.in_(annotator_user_ids))
+        .order_by(User.id)
+        .populate_existing()
+        .with_for_update()
+        .all()
+    )
+    active_annotator_ids = {user.id for user in annotators if user.is_active}
+    inactive_or_missing = sorted(set(annotator_user_ids) - active_annotator_ids)
+    if inactive_or_missing:
+        raise ValidationError("All round annotators must be active users")
+
+
 
 
 def create_annotation_round(
@@ -85,6 +105,10 @@ def create_annotation_round(
         )
     project = _project(db, data.project_id)
     if data.annotator_user_ids:
+        # Account deactivation locks the User row before withdrawing mutable
+        # work. Use the same boundary here so a new explicit round assignment
+        # cannot race in after offboarding has completed.
+        _lock_and_validate_active_round_annotators(db, data.annotator_user_ids)
         member_user_ids = {
             user_id
             for (user_id,) in db.query(WorkspaceMember.user_id)
@@ -564,13 +588,39 @@ def list_round_submissions(
 def transition_annotation_round(
     db: Session, project_id: int, annotation_round_id: int, status: str
 ) -> models.AnnotationRound:
-    annotation_round = _scoped(
+    candidate = _scoped(
         db,
         models.AnnotationRound,
         annotation_round_id,
         project_id,
         "Annotation round",
     )
+    candidate_annotator_ids = list(candidate.annotator_user_ids or [])
+    if status == "open":
+        # Deactivation and round creation also lock users before mutable work.
+        # Acquire the explicit assignees in canonical order, then refresh and
+        # lock the round so an offboarding transaction cannot race this open.
+        _lock_and_validate_active_round_annotators(db, candidate_annotator_ids)
+    annotation_round = (
+        db.query(models.AnnotationRound)
+        .filter(
+            models.AnnotationRound.id == annotation_round_id,
+            models.AnnotationRound.project_id == project_id,
+        )
+        .populate_existing()
+        .with_for_update()
+        .first()
+    )
+    if annotation_round is None:
+        raise NotFoundError("Annotation round not found")
+    if status == "open":
+        if list(annotation_round.annotator_user_ids or []) != candidate_annotator_ids:
+            raise ConflictError("Annotation round assignments changed; retry the transition")
+        if not annotation_round.open_to_all_annotators and not candidate_annotator_ids:
+            raise ValidationError(
+                "Annotation rounds require explicit active annotators or "
+                "open_to_all_annotators"
+            )
     allowed = {
         "draft": {"open", "cancelled"},
         "open": {"closed", "cancelled"},

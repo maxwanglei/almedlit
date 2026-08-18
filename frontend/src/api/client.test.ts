@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { clearToken, getToken, setToken, subscribeTokenChanges } from "@/auth/session";
 
 import {
+  acceptInvite,
   archiveArtifactPackage,
   archiveBaseModel,
   downloadArtifactPackageFile,
@@ -11,6 +12,7 @@ import {
   getMe,
   getProjectIaa,
   importBaseModel,
+  listAdminUsers,
   listBaseModels,
   setBaseModelReadiness,
   uploadBaseModel,
@@ -110,6 +112,51 @@ describe("API authentication failures", () => {
         headers: expect.objectContaining({ Authorization: "Bearer old-token" }),
       }),
     );
+  });
+
+  it("omits the all-user status filter and sends explicit active filters", async () => {
+    const page = { items: [], total: 0, page: 1, page_size: 20 };
+    const fetchMock = vi.fn().mockImplementation(
+      async () =>
+        new Response(JSON.stringify(page), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await listAdminUsers({ status: "all", page: 1, pageSize: 20 });
+    await listAdminUsers({ status: "active", page: 2, pageSize: 20 });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "/api/admin/users?page=1&page_size=20",
+    );
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      "/api/admin/users?status=active&page=2&page_size=20",
+    );
+  });
+
+  it("stages existing-account invite authorization until redemption succeeds", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ access_token: "accepted-token" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await acceptInvite("invite-token", {}, "staged-login-token");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/invites/invite-token/accept",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          Authorization: "Bearer staged-login-token",
+        }),
+      }),
+    );
+    expect(getToken()).toBe("accepted-token");
   });
 
   it("downloads submission bytes with the bearer token", async () => {

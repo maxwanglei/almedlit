@@ -5,7 +5,9 @@ server {
     # Authentication endpoints are intentionally throttled at the public edge.
     # The API container is bound to loopback by Compose, so remote clients cannot
     # bypass this limit while local host-side development can still reach port 8000.
-    location ~ ^/api/(?:auth/(?:login|register)|invites/[^/]+/accept)$ {
+    # Invite and account-action previews are covered too; leaving a public
+    # token lookup unthrottled would create a token-guessing oracle.
+    location ~ ^/api/(?:auth/(?:login|register)|invites/[^/]+(?:/accept)?|account-actions/[^/]+)$ {
         limit_req zone=al_medlit_auth burst=10 nodelay;
         limit_req_status 429;
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from sqlalchemy.orm import Session
 
 from al_medlit.auth.models import User
@@ -173,6 +175,7 @@ def authorize_project_write(
     *,
     min_role: str | None = "manager",
     module: str | tuple[str, ...],
+    related_user_ids: Iterable[int] = (),
 ) -> WorkspaceMember:
     """Authorize a mutation while holding the actor's membership lock."""
 
@@ -181,6 +184,7 @@ def authorize_project_write(
         user,
         project_id,
         min_role=min_role,
+        related_user_ids=related_user_ids,
     )
     enforce_project_module(db, project_id, module)
     return member

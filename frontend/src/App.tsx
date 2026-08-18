@@ -55,8 +55,10 @@ import {
   workspaceSettingsDestination,
   type ModuleNavigationContext,
 } from "@/navigation/moduleNavigation";
+import AcceptInvitePage from "@/pages/AcceptInvitePage";
 import LoginPage from "@/pages/LoginPage";
 import OnboardingPresetPicker from "@/pages/OnboardingPresetPicker";
+import AddWorkspaceDialog from "@/components/AddWorkspaceDialog";
 import {
   getRoundWorkContext,
   listWorkspaceRoundWorkContexts,
@@ -80,6 +82,7 @@ import type {
 } from "@/types/api";
 
 const AnnotatorWorkspace = lazy(() => import("@/pages/AnnotatorWorkspace"));
+const AccountActionPage = lazy(() => import("@/pages/AccountActionPage"));
 const ModelsWorkspace = lazy(() => import("@/platform/ModelsWorkspace"));
 const PlatformDialog = lazy(() => import("@/platform/PlatformDialog"));
 const ProjectPlatform = lazy(() => import("@/platform/ProjectPlatform"));
@@ -266,6 +269,32 @@ function isEntryPath(pathname: string): boolean {
   return normalizedPathname === "/" || normalizedPathname === "/my-work";
 }
 
+/** Extract the token from `/invites/:token`, or null when not that route. */
+function inviteTokenFromPath(pathname: string): string | null {
+  const segments = normalizePathname(pathname).split("/").filter(Boolean);
+  if (segments.length !== 2 || segments[0] !== "invites") {
+    return null;
+  }
+  try {
+    return decodeURIComponent(segments[1]) || null;
+  } catch {
+    return segments[1] || null;
+  }
+}
+
+/** Extract the token from `/account-actions/:token`, or null otherwise. */
+function accountActionTokenFromPath(pathname: string): string | null {
+  const segments = normalizePathname(pathname).split("/").filter(Boolean);
+  if (segments.length !== 2 || segments[0] !== "account-actions") {
+    return null;
+  }
+  try {
+    return decodeURIComponent(segments[1]) || null;
+  } catch {
+    return segments[1] || null;
+  }
+}
+
 function isIndividualWorkspace(membership: MeMembership | null | undefined): boolean {
   return membership?.workspace_kind === "individual";
 }
@@ -322,11 +351,14 @@ function Application(): React.ReactElement {
   const [blockedCaps, setBlockedCaps] = useState<Record<string, string>>({});
   const [projectsReady, setProjectsReady] = useState(false);
   const [isSuperuser, setIsSuperuser] = useState(false);
+  const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false);
   const [sessionGeneration, setSessionGeneration] = useState(0);
   const sessionGenerationRef = useRef(0);
   const pendingWorkspaceSwitchRef = useRef(false);
   const observedTokenRef = useRef<string | null>(getToken());
   const pathname = normalizePathname(location.pathname);
+  const inviteToken = inviteTokenFromPath(location.pathname);
+  const accountActionToken = accountActionTokenFromPath(location.pathname);
   const workspaceRoute = resolveWorkspaceRoute(pathname);
   const routeSearch = new URLSearchParams(location.search);
   const queryProjectValue = routeSearch.get("projectId");
@@ -500,6 +532,7 @@ function Application(): React.ReactElement {
     setBlockedCaps({});
     setProjectsReady(false);
     setIsSuperuser(false);
+    setWorkspaceDialogOpen(false);
     setWorkbench(null);
     setResolvedRoundContext(null);
     setRoundContexts([]);
@@ -511,7 +544,12 @@ function Application(): React.ReactElement {
     setRoundResolutionError(null);
     setPlatformDialog(null);
     pendingWorkspaceSwitchRef.current = false;
-    navigatePathRef.current("/", "replace");
+    const publicTokenPath =
+      inviteTokenFromPath(window.location.pathname) !== null ||
+      accountActionTokenFromPath(window.location.pathname) !== null;
+    if (token !== null || !publicTokenPath) {
+      navigatePathRef.current("/", "replace");
+    }
   }, []);
 
   async function refreshWorkspaceConfiguration(
@@ -581,6 +619,44 @@ function Application(): React.ReactElement {
     setRoundResolutionError(null);
     setPlatformDialog(null);
     pendingWorkspaceSwitchRef.current = true;
+  }
+
+  function handleWorkspaceCreated(workspaceId: number): void {
+    if (currentUserId !== null) {
+      storePreferredWorkspaceId(currentUserId, workspaceId);
+    }
+    pendingWorkspaceSwitchRef.current = true;
+    sessionGenerationRef.current += 1;
+    setSessionGeneration(sessionGenerationRef.current);
+    useProjectWorkspaceStore.getState().reset();
+    useEvidenceBlockStore.getState().reset();
+    setSessionReady(false);
+    setActiveWorkspaceId(null);
+    setActiveMembership(null);
+    setCaps([]);
+    setBlockedCaps({});
+    setProjectsReady(false);
+    setWorkbench(null);
+    setWorkspaceDialogOpen(false);
+  }
+
+  async function refreshMemberships(): Promise<void> {
+    const generation = sessionGenerationRef.current;
+    const me = await getMe();
+    if (generation !== sessionGenerationRef.current) {
+      throw new Error("The active account changed before memberships refreshed.");
+    }
+    setMemberships(me.memberships);
+    setCurrentUserId(me.user.id);
+    setCurrentUsername(me.user.username);
+    setIsSuperuser(me.user.is_superuser);
+    if (activeWorkspaceId !== null) {
+      const refreshedActiveMembership =
+        me.memberships.find(
+          (membership) => membership.workspace_id === activeWorkspaceId,
+        ) ?? null;
+      setActiveMembership(refreshedActiveMembership);
+    }
   }
 
   async function refreshProjectData(projectId: number): Promise<number | null> {
@@ -688,7 +764,13 @@ function Application(): React.ReactElement {
   }, [authed, sessionGeneration]);
 
   useEffect(() => {
-    if (!authed || !sessionReady || activeMembership === null) {
+    if (!authed || !sessionReady) {
+      return;
+    }
+    // Invite acceptance renders ahead of the workspace shell and is not a
+    // workspace route, so the redirect below must not pull a signed-in user
+    // off the invite before they can accept it.
+    if (inviteToken !== null) {
       return;
     }
 
@@ -714,6 +796,7 @@ function Application(): React.ReactElement {
   }, [
     activeMembership,
     authed,
+    inviteToken,
     location.hash,
     location.search,
     navigatePath,
@@ -1209,6 +1292,61 @@ function Application(): React.ReactElement {
     };
   }, [authed, selectedDocumentId, sessionReady, setBusy, setError, workspaceRoute]);
 
+  // Password activation/reset is public because the user may not have a usable
+  // account yet. Completion adopts the returned session and the token-change
+  // subscription reloads the authenticated shell.
+  if (accountActionToken !== null) {
+    return (
+      <Suspense
+        fallback={(
+          <main id="main-content" tabIndex={-1}>
+            <div className="status" role="status">Loading secure link…</div>
+          </main>
+        )}
+      >
+        <AccountActionPage
+          token={accountActionToken}
+          onCompleted={() => navigatePath("/", "replace")}
+        />
+      </Suspense>
+    );
+  }
+
+  // Invite acceptance is resolved before the auth gate below, which otherwise
+  // renders the login page for every unauthenticated path and discards the
+  // URL. An invitee typically has no account yet, so this route has to survive
+  // that gate.
+  if (inviteToken !== null) {
+    if (authed && !sessionReady) {
+      return (
+        <main id="main-content" tabIndex={-1}>
+          <div className="status" role="status" aria-live="polite">
+            Checking your session…
+          </div>
+        </main>
+      );
+    }
+    return (
+      <AcceptInvitePage
+        token={inviteToken}
+        signedIn={authed && sessionReady}
+        onAccepted={() => {
+          // A new or switched account already reset state through the token
+          // subscription. An existing signed-in user keeps their token, so bump
+          // the session generation to re-run the workspace load and pick up the
+          // new membership.
+          setSessionReady(false);
+          setJustRegistered(false);
+          setOnboarded(true);
+          sessionGenerationRef.current += 1;
+          setSessionGeneration(sessionGenerationRef.current);
+          setAuthed(true);
+          navigatePath("/", "replace");
+        }}
+      />
+    );
+  }
+
   if (!authed) {
     return (
       <LoginPage
@@ -1281,6 +1419,7 @@ function Application(): React.ReactElement {
       memberships={memberships}
       activeWorkspaceId={activeWorkspaceId}
       onWorkspaceChange={handleWorkspaceChange}
+      onManageWorkspaces={() => setWorkspaceDialogOpen(true)}
     />
   );
   const mobileWorkspaceSwitcher = (
@@ -1289,6 +1428,7 @@ function Application(): React.ReactElement {
       activeWorkspaceId={activeWorkspaceId}
       ariaLabel="Switch workspace"
       onWorkspaceChange={handleWorkspaceChange}
+      onManageWorkspaces={() => setWorkspaceDialogOpen(true)}
     />
   );
   const renderNotFound = (): React.ReactElement => (
@@ -1361,6 +1501,7 @@ function Application(): React.ReactElement {
         workspaceName={activeMembership.workspace_name}
         workspaceKind={activeMembership.workspace_kind}
         currentUserId={currentUserId}
+        onManageWorkspaces={() => setWorkspaceDialogOpen(true)}
         onCapabilitiesChanged={(nextCapabilities) => {
           setCaps(nextCapabilities.effective);
           setBlockedCaps(nextCapabilities.blocked);
@@ -1672,10 +1813,11 @@ function Application(): React.ReactElement {
   };
 
   return (
-    <Routes>
-      <Route
-        element={(
-          <AuthenticatedLayout
+    <>
+      <Routes>
+        <Route
+          element={(
+            <AuthenticatedLayout
             access={access}
             modules={moduleDestinations}
             currentModuleId={activeModuleId}
@@ -1692,8 +1834,8 @@ function Application(): React.ReactElement {
             redirecting={routeRedirect !== null}
             routeContext={routeContext}
           />
-        )}
-      >
+          )}
+        >
         <Route path="/" element={<MyWorkRoute />} />
         <Route path="/annotator/workbench" element={<MyWorkRoute />} />
         <Route path="/my-work">
@@ -1742,11 +1884,18 @@ function Application(): React.ReactElement {
           path="/workspace-settings"
           element={<WorkspaceSettingsRoute />}
         />
-        <Route path="/admin/users" element={<WorkspaceSettingsRoute />} />
         <Route path="/admin/*" element={<SystemAdministrationRoute />} />
         <Route path="/no-access" element={<NoAccessRoute />} />
         <Route path="*" element={<NotFoundRoute />} />
-      </Route>
-    </Routes>
+        </Route>
+      </Routes>
+      <AddWorkspaceDialog
+        open={workspaceDialogOpen}
+        requestGeneration={sessionGeneration}
+        onDismiss={() => setWorkspaceDialogOpen(false)}
+        onWorkspaceCreated={handleWorkspaceCreated}
+        onJoinRequested={refreshMemberships}
+      />
+    </>
   );
 }

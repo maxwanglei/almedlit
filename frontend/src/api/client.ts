@@ -56,7 +56,20 @@ import type {
   TaskAssignmentCreate,
   TaskAssignmentStatus,
   TaskAssignmentUpdate,
+  AccountActionLink,
+  AccountActionPreview,
+  AdminSettings,
+  AdminSettingsUpdate,
+  AdminUserCreate,
+  AdminUserCreateResult,
+  AdminUserDetail,
+  AdminUserListParams,
+  AdminUserPage,
+  InviteAcceptPayload,
+  InvitePreview,
+  WorkspaceGovernance,
   WorkspaceInvite,
+  WorkspaceInviteSummary,
   WorkspaceJoinRequest,
   WorkspaceMember,
   WorkspaceRole,
@@ -942,6 +955,37 @@ export function listWorkspaceMembers(workspaceId: number): Promise<WorkspaceMemb
   return request<WorkspaceMember[]>(`/workspaces/${workspaceId}/members`);
 }
 
+export function createWorkspace(name: string): Promise<{
+  id: number;
+  name: string;
+  kind: string;
+  capability_preset: string;
+}> {
+  return request("/workspaces", {
+    method: "POST",
+    body: JSON.stringify({ name }),
+  });
+}
+
+export function applyToWorkspace(
+  joinCode: string,
+  message?: string,
+): Promise<WorkspaceJoinRequest> {
+  return request<WorkspaceJoinRequest>(
+    `/workspaces/by-code/${encodeURIComponent(joinCode)}/join-requests`,
+    {
+      method: "POST",
+      body: JSON.stringify({ message: message?.trim() || null }),
+    },
+  );
+}
+
+export function getWorkspaceGovernance(
+  workspaceId: number,
+): Promise<WorkspaceGovernance> {
+  return request<WorkspaceGovernance>(`/workspaces/${workspaceId}/governance`);
+}
+
 export function updateWorkspaceMemberRole(
   workspaceId: number,
   userId: number,
@@ -962,11 +1006,67 @@ export function deleteWorkspaceMember(workspaceId: number, userId: number): Prom
 export function createWorkspaceInvite(
   workspaceId: number,
   role: WorkspaceRole,
+  expiresMinutes?: number,
 ): Promise<WorkspaceInvite> {
   return request<WorkspaceInvite>(`/workspaces/${workspaceId}/invites`, {
     method: "POST",
-    body: JSON.stringify({ role }),
+    body: JSON.stringify({
+      role,
+      ...(expiresMinutes === undefined ? {} : { expires_minutes: expiresMinutes }),
+    }),
   });
+}
+
+export function listWorkspaceInvites(
+  workspaceId: number,
+): Promise<WorkspaceInviteSummary[]> {
+  return request<WorkspaceInviteSummary[]>(`/workspaces/${workspaceId}/invites`);
+}
+
+export function revokeWorkspaceInvite(
+  workspaceId: number,
+  inviteId: number,
+): Promise<void> {
+  return request<void>(`/workspaces/${workspaceId}/invites/${inviteId}`, {
+    method: "DELETE",
+  });
+}
+
+export function rotateWorkspaceJoinCode(
+  workspaceId: number,
+): Promise<WorkspaceGovernance> {
+  return request<WorkspaceGovernance>(`/workspaces/${workspaceId}/join-code/rotate`, {
+    method: "POST",
+  });
+}
+
+export function getInvitePreview(token: string): Promise<InvitePreview> {
+  return request<InvitePreview>(`/invites/${encodeURIComponent(token)}`);
+}
+
+/**
+ * Redeem an invite and adopt the returned session.
+ *
+ * Pass username+password to create a brand-new account. Pass an empty payload
+ * when a bearer token is already stored — `request` attaches it automatically,
+ * and the backend then joins that existing user to the workspace.
+ */
+export async function acceptInvite(
+  token: string,
+  payload: InviteAcceptPayload = {},
+  bearerToken?: string,
+): Promise<void> {
+  const response = await request<{ access_token: string }>(
+    `/invites/${encodeURIComponent(token)}/accept`,
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+      ...(bearerToken
+        ? { headers: { Authorization: `Bearer ${bearerToken}` } }
+        : {}),
+    },
+  );
+  setToken(response.access_token);
 }
 
 export function listWorkspaceJoinRequests(
@@ -987,12 +1087,19 @@ export function rejectJoinRequest(requestId: number): Promise<WorkspaceJoinReque
   });
 }
 
-export async function login(username: string, password: string): Promise<void> {
+export async function authenticate(
+  username: string,
+  password: string,
+): Promise<string> {
   const response = await request<{ access_token: string }>("/auth/login", {
     method: "POST",
     body: JSON.stringify({ username, password }),
   });
-  setToken(response.access_token);
+  return response.access_token;
+}
+
+export async function login(username: string, password: string): Promise<void> {
+  setToken(await authenticate(username, password));
 }
 
 export interface RegisterOptions {
@@ -1021,4 +1128,97 @@ export async function register(
 
 export function getMe(): Promise<MeResponse> {
   return request<MeResponse>("/auth/me");
+}
+
+export function listAdminUsers(
+  options: AdminUserListParams = {},
+): Promise<AdminUserPage> {
+  const params = new URLSearchParams();
+  if (options.search?.trim()) params.set("search", options.search.trim());
+  if (options.status && options.status !== "all") {
+    params.set("status", options.status);
+  }
+  if (options.workspaceId !== undefined) {
+    params.set("workspace_id", String(options.workspaceId));
+  }
+  if (options.page !== undefined) params.set("page", String(options.page));
+  if (options.pageSize !== undefined) {
+    params.set("page_size", String(options.pageSize));
+  }
+  const query = params.toString();
+  return request<AdminUserPage>(`/admin/users${query ? `?${query}` : ""}`);
+}
+
+export function getAdminUser(userId: number): Promise<AdminUserDetail> {
+  return request<AdminUserDetail>(`/admin/users/${userId}`);
+}
+
+export function createAdminUser(
+  payload: AdminUserCreate,
+): Promise<AdminUserCreateResult> {
+  return request<AdminUserCreateResult>("/admin/users", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function setAdminUserStatus(
+  userId: number,
+  isActive: boolean,
+): Promise<AdminUserDetail> {
+  return request<AdminUserDetail>(`/admin/users/${userId}/status`, {
+    method: "PATCH",
+    body: JSON.stringify({ is_active: isActive }),
+  });
+}
+
+export function createAdminActivationLink(
+  userId: number,
+): Promise<AccountActionLink> {
+  return request<AccountActionLink>(`/admin/users/${userId}/activation-link`, {
+    method: "POST",
+  });
+}
+
+export function createAdminPasswordResetLink(
+  userId: number,
+): Promise<AccountActionLink> {
+  return request<AccountActionLink>(`/admin/users/${userId}/password-reset-link`, {
+    method: "POST",
+  });
+}
+
+export function getAdminSettings(): Promise<AdminSettings> {
+  return request<AdminSettings>("/admin/settings");
+}
+
+export function updateAdminSettings(
+  payload: AdminSettingsUpdate,
+): Promise<AdminSettings> {
+  return request<AdminSettings>("/admin/settings", {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getAccountActionPreview(
+  token: string,
+): Promise<AccountActionPreview> {
+  return request<AccountActionPreview>(
+    `/account-actions/${encodeURIComponent(token)}`,
+  );
+}
+
+export async function completeAccountAction(
+  token: string,
+  password: string,
+): Promise<void> {
+  const response = await request<{ access_token: string }>(
+    `/account-actions/${encodeURIComponent(token)}`,
+    {
+      method: "POST",
+      body: JSON.stringify({ password }),
+    },
+  );
+  setToken(response.access_token);
 }

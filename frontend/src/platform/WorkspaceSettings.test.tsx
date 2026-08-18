@@ -5,9 +5,13 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  createWorkspaceInvite,
   getWorkspaceCapabilities,
+  getWorkspaceGovernance,
+  listWorkspaceInvites,
   listWorkspaceJoinRequests,
   listWorkspaceMembers,
+  revokeWorkspaceInvite,
   setWorkspaceCapability,
 } from "@/api/client";
 
@@ -29,9 +33,13 @@ vi.mock("@/api/client", () => ({
   createWorkspaceInvite: vi.fn(),
   deleteWorkspaceMember: vi.fn(),
   getWorkspaceCapabilities: vi.fn(),
+  getWorkspaceGovernance: vi.fn(),
+  listWorkspaceInvites: vi.fn(),
   listWorkspaceJoinRequests: vi.fn(),
   listWorkspaceMembers: vi.fn(),
   rejectJoinRequest: vi.fn(),
+  revokeWorkspaceInvite: vi.fn(),
+  rotateWorkspaceJoinCode: vi.fn(),
   setWorkspaceCapability: vi.fn(),
   updateWorkspaceMemberRole: vi.fn(),
 }));
@@ -67,6 +75,13 @@ beforeEach(() => {
     effective: ["annotation"],
     blocked: {},
   });
+  vi.mocked(getWorkspaceGovernance).mockResolvedValue({
+    workspace_id: 4,
+    workspace_kind: "team",
+    join_code: "join-abc",
+    default_invite_expiry_minutes: 10080,
+  });
+  vi.mocked(listWorkspaceInvites).mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -92,6 +107,7 @@ describe("WorkspaceSettings", () => {
         workspaceName="Research team"
         workspaceKind="team"
         currentUserId={7}
+        onManageWorkspaces={vi.fn()}
         onCapabilitiesChanged={onCapabilitiesChanged}
       />,
     );
@@ -118,19 +134,69 @@ describe("WorkspaceSettings", () => {
         workspaceName="Personal"
         workspaceKind="individual"
         currentUserId={7}
+        onManageWorkspaces={vi.fn()}
         onCapabilitiesChanged={vi.fn()}
       />,
     );
 
-    await screen.findByRole("heading", { name: "Members" });
+    await screen.findByRole("heading", { name: "Owner" });
     expect(screen.queryByRole("heading", { name: "Invite" })).toBeNull();
     expect(
       screen.queryByRole("heading", { name: "Join requests" }),
     ).toBeNull();
-    expect(
-      (screen.getByLabelText("Role for Workspace Owner") as HTMLSelectElement)
-        .disabled,
-    ).toBe(true);
+    expect(screen.getByRole("cell", { name: "Owner" })).toBeTruthy();
+    expect(screen.queryByLabelText("Role for Workspace Owner")).toBeNull();
+    expect(screen.getByRole("button", { name: "Create or join a team" })).toBeTruthy();
+  });
+
+  it("removes a freshly generated invitation link when that invite is revoked", async () => {
+    const user = userEvent.setup();
+    const summary = {
+      id: 31,
+      workspace_id: 4,
+      role: "annotator" as const,
+      created_by: 7,
+      created_by_username: "owner",
+      expires_at: "2026-08-07T12:00:00Z",
+      created_at: "2026-07-31T12:00:00Z",
+    };
+    vi.mocked(createWorkspaceInvite).mockResolvedValue({
+      id: 31,
+      token: "fresh-invite-token",
+      workspace_id: 4,
+      role: "annotator",
+      expires_at: summary.expires_at,
+    });
+    vi.mocked(listWorkspaceInvites)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([summary]);
+    vi.mocked(revokeWorkspaceInvite).mockResolvedValue(undefined);
+
+    render(
+      <WorkspaceSettings
+        workspaceId={4}
+        workspaceName="Research team"
+        workspaceKind="team"
+        currentUserId={7}
+        onManageWorkspaces={vi.fn()}
+        onCapabilitiesChanged={vi.fn()}
+      />,
+    );
+
+    await screen.findByRole("heading", { name: "Invitations" });
+    await user.click(screen.getByRole("button", { name: "Create invitation" }));
+    expect(await screen.findByText(/fresh-invite-token/)).toBeTruthy();
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Revoke annotator invitation",
+      }),
+    );
+    await user.click(screen.getByRole("button", { name: "Revoke invitation" }));
+
+    await waitFor(() =>
+      expect(revokeWorkspaceInvite).toHaveBeenCalledWith(4, 31),
+    );
+    expect(screen.queryByText(/fresh-invite-token/)).toBeNull();
   });
 
   it("ignores a late response from the previously selected workspace", async () => {
@@ -158,6 +224,7 @@ describe("WorkspaceSettings", () => {
         workspaceName="Old workspace"
         workspaceKind="team"
         currentUserId={7}
+        onManageWorkspaces={vi.fn()}
         onCapabilitiesChanged={vi.fn()}
       />,
     );
@@ -168,13 +235,12 @@ describe("WorkspaceSettings", () => {
         workspaceName="New workspace"
         workspaceKind="individual"
         currentUserId={8}
+        onManageWorkspaces={vi.fn()}
         onCapabilitiesChanged={vi.fn()}
       />,
     );
 
-    expect(
-      await screen.findByLabelText("Role for New Workspace Owner"),
-    ).toBeTruthy();
+    expect(await screen.findByText("New Workspace Owner")).toBeTruthy();
 
     await act(async () => {
       oldMembers.resolve([
@@ -192,7 +258,7 @@ describe("WorkspaceSettings", () => {
       await oldMembers.promise;
     });
 
-    expect(screen.getByLabelText("Role for New Workspace Owner")).toBeTruthy();
+    expect(screen.getByText("New Workspace Owner")).toBeTruthy();
     expect(screen.queryByText("Old Workspace Owner")).toBeNull();
   });
 });

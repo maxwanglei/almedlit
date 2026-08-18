@@ -106,6 +106,9 @@ def test_security_checks_require_a_ready_schema_before_db_query(monkeypatch):
         def validate_runtime_secrets(self) -> None:
             calls.append("validate")
 
+        def validate_deployment_secrets(self) -> None:
+            calls.append("validate-deployment")
+
     class FakeSession:
         def __enter__(self):
             calls.append("session-enter")
@@ -134,6 +137,7 @@ def test_security_checks_require_a_ready_schema_before_db_query(monkeypatch):
 
     assert calls == [
         "validate",
+        "validate-deployment",
         "schema-ready",
         "session-enter",
         "bootstrap-check",

@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from fastapi import Depends, Request
 from sqlalchemy import and_, exists, or_, select, true
@@ -272,6 +272,7 @@ def lock_project_member_for_mutation(
     project_id: int,
     *,
     min_role: str | None = None,
+    related_user_ids: Iterable[int] = (),
 ) -> WorkspaceMember:
     """Lock and refresh the actor's project membership before a mutation.
 
@@ -289,7 +290,44 @@ def lock_project_member_for_mutation(
         raise NotFoundError("Project not found")
     workspace_id = project.workspace_id
 
-    actor = db.query(User).filter(User.id == user.id).populate_existing().with_for_update().first()
+    # Reject callers who do not currently have the requested project authority
+    # before locking any caller-supplied related users. This is only an early
+    # availability guard: the locked checks below remain authoritative so a
+    # concurrent deactivation, demotion, or membership removal cannot race the
+    # mutation.
+    early_actor = (
+        db.query(User)
+        .filter(User.id == user.id)
+        .populate_existing()
+        .first()
+    )
+    if early_actor is None or not early_actor.is_active:
+        raise ForbiddenError("Workspace mutation actor is not active")
+    if not early_actor.is_superuser:
+        early_member = (
+            db.query(WorkspaceMember)
+            .filter(
+                WorkspaceMember.workspace_id == workspace_id,
+                WorkspaceMember.user_id == early_actor.id,
+            )
+            .populate_existing()
+            .first()
+        )
+        if early_member is None:
+            raise ForbiddenError("You are not a member of this workspace")
+        if not _role_satisfies(early_member.role, min_role):
+            raise ForbiddenError("Insufficient workspace role")
+
+    lock_user_ids = {user.id, *related_user_ids}
+    locked_users = (
+        db.query(User)
+        .filter(User.id.in_(lock_user_ids))
+        .order_by(User.id)
+        .populate_existing()
+        .with_for_update()
+        .all()
+    )
+    actor = next((locked_user for locked_user in locked_users if locked_user.id == user.id), None)
     if actor is None or not actor.is_active:
         raise ForbiddenError("Workspace mutation actor is not active")
     if actor.is_superuser:

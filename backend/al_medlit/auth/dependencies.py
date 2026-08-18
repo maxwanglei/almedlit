@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from al_medlit.auth import service
 from al_medlit.auth.models import User
-from al_medlit.auth.security import decode_access_token
+from al_medlit.auth.security import decode_access_token_claims
 from al_medlit.core.database import get_db
 from al_medlit.core.exceptions import UnauthorizedError
 
@@ -19,11 +19,18 @@ def _is_public_path(method: str, path: str) -> bool:
     method = method.upper()
     if (method, path) in PUBLIC_PATHS:
         return True
-    return (
-        method == "POST"
-        and path.startswith("/api/invites/")
-        and path.endswith("/accept")
-    )
+    if path.startswith("/api/invites/"):
+        # An invitee may not have an account yet, so both reading an invite and
+        # accepting it must work unauthenticated. Nothing else under this prefix
+        # is public.
+        token = path.removeprefix("/api/invites/")
+        if method == "POST":
+            return token.endswith("/accept") and "/" not in token.removesuffix("/accept")
+        return method == "GET" and bool(token) and "/" not in token
+    if path.startswith("/api/account-actions/"):
+        token = path.removeprefix("/api/account-actions/")
+        return method in {"GET", "POST"} and bool(token) and "/" not in token
+    return False
 
 
 def _resolve_user_from_authorization(
@@ -34,8 +41,10 @@ def _resolve_user_from_authorization(
         raise UnauthorizedError("Missing bearer token")
     token = authorization.split(" ", 1)[1].strip()
     try:
-        subject = decode_access_token(token)
-    except jwt.PyJWTError as exc:
+        claims = decode_access_token_claims(token)
+        subject = str(claims["sub"])
+        session_version = int(claims.get("sv", 0))
+    except (jwt.PyJWTError, TypeError, ValueError) as exc:
         raise UnauthorizedError("Invalid or expired token") from exc
     try:
         user_id = int(subject)
@@ -43,6 +52,8 @@ def _resolve_user_from_authorization(
         raise UnauthorizedError("Invalid bearer token") from exc
     user = db.get(User, user_id)
     if user is None or not user.is_active:
+        raise UnauthorizedError("Invalid bearer token")
+    if session_version != user.session_version:
         raise UnauthorizedError("Invalid bearer token")
     if service.user_has_forbidden_bootstrap_password(user):
         raise UnauthorizedError("Invalid bearer token")

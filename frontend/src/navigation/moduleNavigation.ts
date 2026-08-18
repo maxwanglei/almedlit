@@ -118,7 +118,7 @@ export const GLOBAL_ROUTE_REGISTRY = [
     id: "administration",
     label: "Administration",
     title: "System administration",
-    path: "/admin/health",
+    path: "/admin/users",
     level: "global",
     requiredRoles: null,
     requiredCapability: null,
@@ -152,7 +152,7 @@ const PROJECT_SECTIONS = new Set([
   "guidelines",
 ]);
 const TRAINING_SECTIONS = new Set(["new", "data", "runtimes"]);
-const ADMIN_SECTIONS = new Set(["plugins", "health", "audit", "settings"]);
+const ADMIN_SECTIONS = new Set(["users", "plugins", "health", "audit", "settings"]);
 
 export function normalizePathname(pathname: string): string {
   if (pathname === "/") {
@@ -218,10 +218,7 @@ export function resolveWorkspaceRoute(pathname: string): WorkspaceRoute {
     }
   }
 
-  if (
-    normalizedPathname === "/workspace-settings" ||
-    normalizedPathname === "/admin/users"
-  ) {
+  if (normalizedPathname === "/workspace-settings") {
     return "/workspace-settings";
   }
 
@@ -341,9 +338,6 @@ export function compatibilityRedirectNotice(pathname: string): string | null {
   if (/^\/projects\/\d+\/models$/.test(normalizedPathname)) {
     return "Models is now an independent workspace. Models loaded.";
   }
-  if (normalizedPathname === "/admin/users") {
-    return "Workspace administration moved. Workspace Settings loaded.";
-  }
   return null;
 }
 
@@ -378,21 +372,13 @@ export function authorizedRedirectPath(
         ? "/projects"
         : normalizedPathname === "/trainer/training"
           ? "/training"
-          : normalizedPathname === "/admin/users"
-            ? WORKSPACE_SETTINGS_DESTINATION.path
-            : projectAliasTarget(normalizedPathname);
+          : projectAliasTarget(normalizedPathname);
 
   if (legacyTarget !== null) {
     const targetModule = currentModuleId(legacyTarget, context);
     if (
       targetModule !== null &&
       !availableModules(context).some((module) => module.id === targetModule)
-    ) {
-      return defaultModulePath(context);
-    }
-    if (
-      legacyTarget === WORKSPACE_SETTINGS_DESTINATION.path &&
-      !canPerform(context, "workspace:manage")
     ) {
       return defaultModulePath(context);
     }
@@ -414,7 +400,7 @@ export function authorizedRedirectPath(
   }
 
   if (normalizedPathname === "/admin") {
-    return "/admin/health";
+    return "/admin/users";
   }
   return null;
 }

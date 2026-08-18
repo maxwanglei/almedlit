@@ -1,4 +1,6 @@
-from sqlalchemy import Boolean, String
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from al_medlit.core.database import Base
@@ -18,6 +20,11 @@ class User(Base, IntPrimaryKeyMixin, TimestampMixin):
         default=False,
         nullable=False,
         index=True,
+    )
+    session_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_login_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
 
     memberships = relationship(

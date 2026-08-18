@@ -1,12 +1,18 @@
 import secrets
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from al_medlit.auth.models import User
 from al_medlit.auth.schemas import MembershipRead, MeResponse, UserRead
-from al_medlit.core.exceptions import ConflictError, ForbiddenError, NotFoundError
+from al_medlit.core.exceptions import (
+    ConflictError,
+    ForbiddenError,
+    NotFoundError,
+    ValidationError,
+)
 from al_medlit.workspace.models import (
     Workspace,
     WorkspaceInvite,
@@ -16,6 +22,8 @@ from al_medlit.workspace.models import (
 
 VALID_ROLES = ("annotator", "trainer", "manager", "admin")
 ROLE_RANK = {role: rank for rank, role in enumerate(VALID_ROLES)}
+MIN_INVITE_EXPIRY_MINUTES = 60
+MAX_INVITE_EXPIRY_MINUTES = 43_200
 
 
 def _validate_role(role: str) -> None:
@@ -31,6 +39,35 @@ def _aware(value: datetime) -> datetime:
 
 def _new_join_code() -> str:
     return secrets.token_urlsafe(12)[:40]
+
+
+def _record_admin_event(
+    db: Session,
+    *,
+    event_type: str,
+    actor_user_id: int | None = None,
+    target_user_id: int | None = None,
+    workspace_id: int | None = None,
+    details: dict | None = None,
+) -> None:
+    # Keep the workspace module independent of administration models while
+    # writing events in the same transaction as the governed mutation.
+    from al_medlit.administration.events import record_admin_event
+
+    record_admin_event(
+        db,
+        event_type=event_type,
+        actor_user_id=actor_user_id,
+        target_user_id=target_user_id,
+        workspace_id=workspace_id,
+        details=details,
+    )
+
+
+def _default_invite_expiry_minutes(db: Session) -> int:
+    from al_medlit.administration.policy import get_effective_policy
+
+    return get_effective_policy(db).default_invite_expiry_minutes
 
 
 def lock_workspace_for_update(db: Session, workspace_id: int) -> Workspace:
@@ -223,14 +260,25 @@ def add_member(db: Session, workspace_id: int, user_id: int, *, role: str) -> Wo
     return member
 
 
-def _admin_count(db: Session, workspace_id: int) -> int:
+def _active_admin_count(db: Session, workspace_id: int) -> int:
     return (
         db.query(WorkspaceMember)
+        .join(User, User.id == WorkspaceMember.user_id)
         .filter(
             WorkspaceMember.workspace_id == workspace_id,
             WorkspaceMember.role == "admin",
+            User.is_active.is_(True),
         )
         .count()
+    )
+
+
+def _is_active_user(db: Session, user_id: int) -> bool:
+    return (
+        db.query(User.id)
+        .filter(User.id == user_id, User.is_active.is_(True))
+        .first()
+        is not None
     )
 
 
@@ -247,7 +295,8 @@ def change_role(
     # concurrent admin demotions cannot both observe the same stale count. The
     # actor check must happen after this lock; the dependency's earlier role
     # read may have waited behind another request and become stale.
-    lock_workspace_for_update(db, workspace_id)
+    workspace = lock_workspace_for_update(db, workspace_id)
+    _require_team_workspace(workspace)
     require_actor_role_after_workspace_lock(
         db,
         workspace_id,
@@ -257,9 +306,24 @@ def change_role(
     member = _lock_member(db, workspace_id, user_id)
     if member is None:
         raise NotFoundError("Membership not found")
-    if member.role == "admin" and role != "admin" and _admin_count(db, workspace_id) <= 1:
+    previous_role = member.role
+    if (
+        previous_role == "admin"
+        and role != "admin"
+        and _is_active_user(db, user_id)
+        and _active_admin_count(db, workspace_id) <= 1
+    ):
         raise ConflictError("A team workspace must keep at least one admin")
     member.role = role
+    if previous_role != role:
+        _record_admin_event(
+            db,
+            event_type="workspace.member_role_changed",
+            actor_user_id=actor_user_id,
+            target_user_id=user_id,
+            workspace_id=workspace_id,
+            details={"previous_role": previous_role, "role": role},
+        )
     db.flush()
     return member
 
@@ -275,7 +339,8 @@ def remove_member(
     # invariant across concurrent removals and demotions. Assignment creation
     # also takes this lock before validating assignee membership, preventing a
     # removal and a new assignment from both succeeding on stale observations.
-    lock_workspace_for_update(db, workspace_id)
+    workspace = lock_workspace_for_update(db, workspace_id)
+    _require_team_workspace(workspace)
     require_actor_role_after_workspace_lock(
         db,
         workspace_id,
@@ -285,7 +350,11 @@ def remove_member(
     member = _lock_member(db, workspace_id, user_id)
     if member is None:
         raise NotFoundError("Membership not found")
-    if member.role == "admin" and _admin_count(db, workspace_id) <= 1:
+    if (
+        member.role == "admin"
+        and _is_active_user(db, user_id)
+        and _active_admin_count(db, workspace_id) <= 1
+    ):
         raise ConflictError("A team workspace must keep at least one admin")
 
     # Preserve the removed member's annotation history while ensuring no work
@@ -322,7 +391,16 @@ def remove_member(
         assignment.metadata_ = metadata
         assignment.status = "withdrawn"
 
+    removed_role = member.role
     db.delete(member)
+    _record_admin_event(
+        db,
+        event_type="workspace.member_removed",
+        actor_user_id=actor_user_id,
+        target_user_id=user_id,
+        workspace_id=workspace_id,
+        details={"role": removed_role},
+    )
     db.flush()
 
 
@@ -401,11 +479,16 @@ def create_invite(
     if creator_member is not None:
         if ROLE_RANK[role] > ROLE_RANK.get(creator_member.role, -1):
             raise ForbiddenError("Cannot invite a member with a higher role")
-    expires_at = (
-        datetime.now(UTC) + timedelta(minutes=expires_minutes)
+    expiry_minutes = (
+        expires_minutes
         if expires_minutes is not None
-        else None
+        else _default_invite_expiry_minutes(db)
     )
+    if not MIN_INVITE_EXPIRY_MINUTES <= expiry_minutes <= MAX_INVITE_EXPIRY_MINUTES:
+        raise ValidationError(
+            "Invite expiry must be between 60 and 43200 minutes"
+        )
+    expires_at = datetime.now(UTC) + timedelta(minutes=expiry_minutes)
     invite = WorkspaceInvite(
         workspace_id=workspace_id,
         token=secrets.token_urlsafe(24),
@@ -415,15 +498,126 @@ def create_invite(
     )
     db.add(invite)
     db.flush()
+    _record_admin_event(
+        db,
+        event_type="workspace.invite_created",
+        actor_user_id=created_by,
+        workspace_id=workspace_id,
+        details={
+            "invite_id": invite.id,
+            "role": role,
+            "expires_at": expires_at.isoformat(),
+        },
+    )
     return invite
+
+
+def list_open_invites(db: Session, workspace_id: int) -> list[WorkspaceInvite]:
+    workspace = require_workspace(db, workspace_id)
+    _require_team_workspace(workspace)
+    now = datetime.now(UTC)
+    return (
+        db.query(WorkspaceInvite)
+        .options(joinedload(WorkspaceInvite.creator))
+        .filter(
+            WorkspaceInvite.workspace_id == workspace_id,
+            WorkspaceInvite.accepted_at.is_(None),
+            WorkspaceInvite.revoked_at.is_(None),
+            or_(WorkspaceInvite.expires_at.is_(None), WorkspaceInvite.expires_at > now),
+        )
+        .order_by(WorkspaceInvite.id)
+        .all()
+    )
+
+
+def revoke_invite(
+    db: Session,
+    workspace_id: int,
+    invite_id: int,
+    *,
+    actor_user_id: int,
+) -> WorkspaceInvite:
+    workspace = lock_workspace_for_update(db, workspace_id)
+    _require_team_workspace(workspace)
+    require_actor_role_after_workspace_lock(
+        db,
+        workspace_id,
+        actor_user_id=actor_user_id,
+        minimum_role="admin",
+    )
+    invite = (
+        db.query(WorkspaceInvite)
+        .filter(
+            WorkspaceInvite.id == invite_id,
+            WorkspaceInvite.workspace_id == workspace_id,
+        )
+        .populate_existing()
+        .with_for_update()
+        .first()
+    )
+    if invite is None:
+        raise NotFoundError("Invite not found")
+    if invite.accepted_at is not None:
+        raise ConflictError("Accepted invites cannot be revoked")
+    if invite.revoked_at is None:
+        invite.revoked_at = datetime.now(UTC)
+        invite.revoked_by = actor_user_id
+        _record_admin_event(
+            db,
+            event_type="workspace.invite_revoked",
+            actor_user_id=actor_user_id,
+            workspace_id=workspace_id,
+            details={"invite_id": invite.id, "role": invite.role},
+        )
+        db.flush()
+    return invite
+
+
+def _require_invite_creator_authority(
+    db: Session,
+    invite: WorkspaceInvite,
+) -> None:
+    inviter_query = (
+        db.query(User)
+        .filter(User.id == invite.created_by)
+        .populate_existing()
+    )
+    inviter = inviter_query.first()
+    if inviter is None or not inviter.is_active:
+        raise ForbiddenError("Invite is no longer authorized by its creator")
+    if inviter.is_superuser:
+        return
+    inviter_member = (
+        db.query(WorkspaceMember)
+        .filter(
+            WorkspaceMember.workspace_id == invite.workspace_id,
+            WorkspaceMember.user_id == inviter.id,
+        )
+        .populate_existing()
+        .first()
+    )
+    if (
+        inviter_member is None
+        or ROLE_RANK.get(inviter_member.role, -1) < ROLE_RANK["admin"]
+        or ROLE_RANK.get(invite.role, len(ROLE_RANK))
+        > ROLE_RANK.get(inviter_member.role, -1)
+    ):
+        raise ForbiddenError("Invite is no longer authorized by its creator")
 
 
 def get_open_invite(db: Session, token: str) -> WorkspaceInvite:
     invite = db.query(WorkspaceInvite).filter(WorkspaceInvite.token == token).first()
-    if invite is None or invite.accepted_at is not None:
+    if (
+        invite is None
+        or invite.accepted_at is not None
+        or invite.revoked_at is not None
+    ):
         raise NotFoundError("Invite is invalid or already used")
     if invite.expires_at is not None and _aware(invite.expires_at) < datetime.now(UTC):
         raise NotFoundError("Invite has expired")
+    workspace = require_workspace(db, invite.workspace_id)
+    _require_team_workspace(workspace)
+    _require_invite_creator_authority(db, invite)
     return invite
 
 
@@ -432,9 +626,22 @@ def accept_invite(
     invite: WorkspaceInvite,
     user: User,
 ) -> WorkspaceMember:
+    # Lock the accepting account before any workspace row. Account deactivation
+    # uses the same User -> Workspace ordering, so an invite cannot commit for
+    # an account that was already inactive without introducing a lock cycle.
+    accepting_user = (
+        db.query(User)
+        .filter(User.id == user.id)
+        .populate_existing()
+        .with_for_update()
+        .first()
+    )
+    if accepting_user is None or not accepting_user.is_active:
+        raise ForbiddenError("An inactive user cannot accept a workspace invite")
+
     # Membership and role changes serialize on the workspace row. Take that
     # canonical lock before the invite lock so acceptance cannot race an
-    # inviter demotion/removal and deadlock with other workspace mutations.
+    # inviter demotion/removal or an invite revocation.
     workspace = lock_workspace_for_update(db, invite.workspace_id)
     locked_invite = (
         db.query(WorkspaceInvite)
@@ -446,7 +653,11 @@ def accept_invite(
         .with_for_update()
         .first()
     )
-    if locked_invite is None or locked_invite.accepted_at is not None:
+    if (
+        locked_invite is None
+        or locked_invite.accepted_at is not None
+        or locked_invite.revoked_at is not None
+    ):
         raise NotFoundError("Invite is invalid or already used")
     if locked_invite.expires_at is not None and _aware(locked_invite.expires_at) < datetime.now(
         UTC
@@ -458,45 +669,73 @@ def accept_invite(
     # the creator at acceptance time so removing, demoting, or deactivating the
     # inviter immediately invalidates outstanding invites. An active superuser
     # remains authorized without a workspace membership.
-    inviter = (
-        db.query(User)
-        .filter(User.id == locked_invite.created_by)
-        .populate_existing()
-        .with_for_update()
-        .first()
-    )
-    if inviter is None or not inviter.is_active:
-        raise ForbiddenError("Invite is no longer authorized by its creator")
-    if not inviter.is_superuser:
-        inviter_member = (
-            db.query(WorkspaceMember)
-            .filter(
-                WorkspaceMember.workspace_id == workspace.id,
-                WorkspaceMember.user_id == inviter.id,
-            )
-            .populate_existing()
-            .first()
-        )
-        if (
-            inviter_member is None
-            or ROLE_RANK.get(inviter_member.role, -1) < ROLE_RANK["admin"]
-            or ROLE_RANK.get(locked_invite.role, len(ROLE_RANK))
-            > ROLE_RANK.get(inviter_member.role, -1)
-        ):
-            raise ForbiddenError("Invite is no longer authorized by its creator")
+    # Refresh inviter authority without locking its User row. Deactivation
+    # takes User locks before Workspace locks; taking the inverse order here
+    # would deadlock. The held workspace lock still establishes whether invite
+    # acceptance serialized before or after that authority change.
+    _require_invite_creator_authority(db, locked_invite)
 
-    member = get_member(db, locked_invite.workspace_id, user.id)
+    member = get_member(db, locked_invite.workspace_id, accepting_user.id)
     if member is None:
         member = add_member(
             db,
             locked_invite.workspace_id,
-            user.id,
+            accepting_user.id,
             role=locked_invite.role,
         )
     locked_invite.accepted_at = datetime.now(UTC)
-    locked_invite.accepted_by = user.id
+    locked_invite.accepted_by = accepting_user.id
+    _record_admin_event(
+        db,
+        event_type="workspace.invite_accepted",
+        actor_user_id=accepting_user.id,
+        target_user_id=accepting_user.id,
+        workspace_id=workspace.id,
+        details={"invite_id": locked_invite.id, "role": locked_invite.role},
+    )
     db.flush()
     return member
+
+
+def workspace_governance(db: Session, workspace_id: int) -> dict:
+    workspace = require_workspace(db, workspace_id)
+    return {
+        "workspace_id": workspace.id,
+        "workspace_kind": workspace.kind,
+        "join_code": workspace.join_code,
+        "default_invite_expiry_minutes": _default_invite_expiry_minutes(db),
+    }
+
+
+def rotate_join_code(
+    db: Session,
+    workspace_id: int,
+    *,
+    actor_user_id: int,
+) -> Workspace:
+    workspace = lock_workspace_for_update(db, workspace_id)
+    _require_team_workspace(workspace)
+    require_actor_role_after_workspace_lock(
+        db,
+        workspace_id,
+        actor_user_id=actor_user_id,
+        minimum_role="admin",
+    )
+    previous_code = workspace.join_code
+    next_code = _new_join_code()
+    while next_code == previous_code or (
+        db.query(Workspace.id).filter(Workspace.join_code == next_code).first() is not None
+    ):
+        next_code = _new_join_code()
+    workspace.join_code = next_code
+    _record_admin_event(
+        db,
+        event_type="workspace.join_code_rotated",
+        actor_user_id=actor_user_id,
+        workspace_id=workspace_id,
+    )
+    db.flush()
+    return workspace
 
 
 def get_workspace_by_join_code(db: Session, join_code: str) -> Workspace:
@@ -564,6 +803,7 @@ def list_pending_join_requests(
     require_workspace(db, workspace_id)
     return (
         db.query(WorkspaceJoinRequest)
+        .options(joinedload(WorkspaceJoinRequest.user))
         .filter(
             WorkspaceJoinRequest.workspace_id == workspace_id,
             WorkspaceJoinRequest.status == "pending",
@@ -585,24 +825,12 @@ def decide_join_request(
         raise NotFoundError("Join request not found")
     workspace = lock_workspace_for_update(db, candidate.workspace_id)
     _require_team_workspace(workspace)
-    decider = db.get(User, decided_by)
-    if decider is None:
-        raise NotFoundError("Join request decider not found")
-    if not decider.is_superuser:
-        decider_member = (
-            db.query(WorkspaceMember)
-            .filter(
-                WorkspaceMember.workspace_id == workspace.id,
-                WorkspaceMember.user_id == decided_by,
-            )
-            .populate_existing()
-            .first()
-        )
-        if (
-            decider_member is None
-            or ROLE_RANK.get(decider_member.role, -1) < ROLE_RANK["admin"]
-        ):
-            raise ForbiddenError("Insufficient role to decide join requests")
+    require_actor_role_after_workspace_lock(
+        db,
+        workspace.id,
+        actor_user_id=decided_by,
+        minimum_role="admin",
+    )
     req = (
         db.query(WorkspaceJoinRequest)
         .filter(
@@ -622,5 +850,13 @@ def decide_join_request(
     req.decided_at = datetime.now(UTC)
     if approve and get_member(db, req.workspace_id, req.user_id) is None:
         add_member(db, req.workspace_id, req.user_id, role="annotator")
+    _record_admin_event(
+        db,
+        event_type="workspace.join_request_decided",
+        actor_user_id=decided_by,
+        target_user_id=req.user_id,
+        workspace_id=workspace.id,
+        details={"join_request_id": req.id, "status": req.status},
+    )
     db.flush()
     return req

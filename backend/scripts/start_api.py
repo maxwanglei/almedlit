@@ -32,6 +32,7 @@ def _run_security_checks() -> None:
     from al_medlit.core.database import SessionLocal, ensure_schema_ready
 
     settings.validate_runtime_secrets()
+    settings.validate_deployment_secrets()
     ensure_schema_ready()
     with SessionLocal() as db:
         auth_service.assert_no_vulnerable_bootstrap_admin(db)

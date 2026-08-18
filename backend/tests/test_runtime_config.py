@@ -154,8 +154,73 @@ def test_frontend_proxy_rate_limits_public_auth_and_api_is_loopback_only():
     compose = (ROOT_DIR / "infra" / "docker-compose.yml").read_text()
 
     assert "auth/(?:login|register)" in nginx
-    assert "invites/[^/]+/accept" in nginx
+    # Covers both the invite preview and the accept POST.
+    assert "invites/[^/]+(?:/accept)?" in nginx
     assert "limit_req zone=al_medlit_auth" in nginx
     assert "limit_req_zone $binary_remote_addr zone=al_medlit_auth" in rate_limit
     assert '"127.0.0.1:${AL_MEDLIT_BACKEND_HOST_PORT:-8001}:8000"' in compose
     assert "AL_MEDLIT_AUTH_RATE: ${AL_MEDLIT_AUTH_RATE:-10r/m}" in compose
+
+
+STRONG_DB_URL = "postgresql+psycopg2://al_medlit:8f3c1d9e2b7a4506@db:5432/al_medlit"
+
+
+@pytest.mark.parametrize("secret", ["change-me", "CHANGE-ME", "al_medlit", "minioadmin", "  "])
+def test_deployment_guard_rejects_placeholder_storage_secrets(secret, monkeypatch):
+    monkeypatch.setattr(settings, "storage_backend", "minio")
+    monkeypatch.setattr(settings, "storage_secret_key", secret)
+    monkeypatch.setattr(settings, "database_url", STRONG_DB_URL)
+
+    with pytest.raises(RuntimeError, match="AL_MEDLIT_STORAGE_SECRET_KEY"):
+        settings.validate_deployment_secrets()
+
+
+@pytest.mark.parametrize("password", ["change-me", "al_medlit", "postgres", "password"])
+def test_deployment_guard_rejects_placeholder_database_passwords(password, monkeypatch):
+    monkeypatch.setattr(settings, "storage_backend", "minio")
+    monkeypatch.setattr(settings, "storage_secret_key", "8f3c1d9e2b7a4506")
+    monkeypatch.setattr(
+        settings,
+        "database_url",
+        f"postgresql+psycopg2://al_medlit:{password}@db:5432/al_medlit",
+    )
+
+    with pytest.raises(RuntimeError, match="AL_MEDLIT_DATABASE_URL"):
+        settings.validate_deployment_secrets()
+
+
+def test_deployment_guard_accepts_strong_secrets(monkeypatch):
+    monkeypatch.setattr(settings, "storage_backend", "minio")
+    monkeypatch.setattr(settings, "storage_secret_key", "0c4b8a1f6d2e9370")
+    monkeypatch.setattr(settings, "database_url", STRONG_DB_URL)
+
+    settings.validate_deployment_secrets()
+
+
+def test_deployment_guard_skips_local_development_defaults(monkeypatch):
+    """SQLite and local object storage are legitimately credential-free."""
+    monkeypatch.setattr(settings, "storage_backend", "local")
+    monkeypatch.setattr(settings, "storage_secret_key", "al_medlit")
+    monkeypatch.setattr(settings, "database_url", "sqlite:///./al_medlit.db")
+
+    settings.validate_deployment_secrets()
+
+
+def test_compose_publishes_datastores_on_loopback_only():
+    compose = (ROOT_DIR / "infra" / "docker-compose.yml").read_text()
+
+    assert '"127.0.0.1:${AL_MEDLIT_POSTGRES_HOST_PORT:-5432}:5432"' in compose
+    assert '"127.0.0.1:${AL_MEDLIT_MINIO_HOST_PORT:-9000}:9000"' in compose
+    assert '"127.0.0.1:${AL_MEDLIT_MINIO_CONSOLE_HOST_PORT:-9001}:9001"' in compose
+    # A bare host:container mapping publishes on every interface.
+    for exposed in ('"5432:5432"', '"9000:9000"', '"9001:9001"'):
+        assert exposed not in compose
+
+
+def test_env_example_ships_no_working_datastore_passwords():
+    env_example = (ROOT_DIR / ".env.example").read_text()
+
+    assert "POSTGRES_PASSWORD=\n" in env_example
+    assert "MINIO_ROOT_PASSWORD=\n" in env_example
+    assert "POSTGRES_PASSWORD=change-me" not in env_example
+    assert "MINIO_ROOT_PASSWORD=change-me" not in env_example

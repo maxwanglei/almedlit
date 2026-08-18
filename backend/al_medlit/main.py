@@ -4,6 +4,10 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from al_medlit.administration.router import (
+    account_action_router,
+    admin_router,
+)
 from al_medlit.annotation.router import router as annotation_router
 from al_medlit.annotation_workbench.router import router as annotation_workbench_router
 from al_medlit.auth.dependencies import enforce_authentication
@@ -63,6 +67,8 @@ def create_app() -> FastAPI:
         return {"status": "ok", "service": "al-medlit-backend"}
 
     application.include_router(auth_router, prefix=API_PREFIX)
+    application.include_router(admin_router, prefix=API_PREFIX)
+    application.include_router(account_action_router, prefix=API_PREFIX)
     application.include_router(workspace_routes.router, prefix=API_PREFIX)
     application.include_router(workspace_routes.invite_router, prefix=API_PREFIX)
     application.include_router(workspace_routes.join_request_router, prefix=API_PREFIX)

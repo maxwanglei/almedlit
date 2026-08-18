@@ -141,6 +141,16 @@ describe("module navigation model", () => {
     expect(
       defaultModulePath(context({ workspaceKind: null, role: null, capabilities: [] })),
     ).toBe("/no-access");
+    expect(
+      defaultModulePath(
+        context({
+          workspaceKind: null,
+          role: null,
+          capabilities: [],
+          isSuperuser: true,
+        }),
+      ),
+    ).toBe("/admin/users");
   });
 
   it("recognizes every canonical route family and compatibility alias", () => {
@@ -151,7 +161,7 @@ describe("module navigation model", () => {
     expect(resolveWorkspaceRoute("/models/9/versions/3")).toBe("/models");
     expect(resolveWorkspaceRoute("/projects/3/train")).toBe("/training");
     expect(resolveWorkspaceRoute("/projects/3/models")).toBe("/models");
-    expect(resolveWorkspaceRoute("/admin/users")).toBe("/workspace-settings");
+    expect(resolveWorkspaceRoute("/admin/users")).toBe("/admin");
     expect(resolveWorkspaceRoute("/no-access")).toBe("/no-access");
     expect(resolveWorkspaceRoute("/missing")).toBe("/not-found");
   });
@@ -210,9 +220,7 @@ describe("module navigation model", () => {
     expect(compatibilityRedirectNotice("/projects/12/train")).toContain(
       "independent workspace",
     );
-    expect(compatibilityRedirectNotice("/admin/users")).toContain(
-      "Workspace Settings",
-    );
+    expect(compatibilityRedirectNotice("/admin/users")).toBeNull();
   });
 
   it("redirects known unauthorized routes to the role default", () => {
@@ -240,11 +248,15 @@ describe("module navigation model", () => {
     expect(workspaceSettingsDestination(workspaceAdmin)?.path).toBe(
       "/workspace-settings",
     );
-    expect(currentModuleId("/admin/users", workspaceAdmin)).toBeNull();
+    expect(currentModuleId("/admin/users", workspaceAdmin)).toBe("administration");
     expect(authorizedRedirectPath("/admin/users", context())).toBe("/my-work");
-    expect(authorizedRedirectPath("/admin/users", workspaceAdmin)).toBe(
-      "/workspace-settings",
-    );
+    expect(authorizedRedirectPath("/admin/users", workspaceAdmin)).toBe("/projects");
+    expect(
+      authorizedRedirectPath(
+        "/admin/users",
+        context({ isSuperuser: true }),
+      ),
+    ).toBeNull();
   });
 
   it("preserves legacy query and hash state while alias parameters win", () => {

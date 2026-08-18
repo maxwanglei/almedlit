@@ -109,6 +109,17 @@ class WorkspaceInvite(Base, IntPrimaryKeyMixin, TimestampMixin):
         nullable=True,
     )
     accepted_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    revoked_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+    creator = relationship("User", foreign_keys=[created_by])
+
+    @property
+    def created_by_username(self) -> str:
+        return self.creator.username if self.creator is not None else ""
 
 
 class WorkspaceJoinRequest(Base, IntPrimaryKeyMixin, TimestampMixin):
@@ -133,3 +144,17 @@ class WorkspaceJoinRequest(Base, IntPrimaryKeyMixin, TimestampMixin):
         DateTime(timezone=True),
         nullable=True,
     )
+
+    user = relationship("User", foreign_keys=[user_id])
+
+    @property
+    def username(self) -> str:
+        return self.user.username if self.user is not None else ""
+
+    @property
+    def display_name(self) -> str:
+        return self.user.display_name if self.user is not None else ""
+
+    @property
+    def email(self) -> str | None:
+        return self.user.email if self.user is not None else None

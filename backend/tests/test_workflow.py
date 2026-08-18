@@ -516,6 +516,230 @@ def test_versions_are_immutable_and_protected_items_cannot_be_selected(
     )
 
 
+def test_annotation_round_rejects_inactive_explicit_annotator(
+    db,
+    workflow_scope,
+    workflow_data,
+):
+    workflow_scope.annotator.is_active = False
+    db.commit()
+
+    with pytest.raises(ValidationError, match="active users"):
+        service.create_annotation_round(
+            db,
+            schemas.AnnotationRoundCreate(
+                project_id=workflow_scope.project.id,
+                name="Inactive annotator round",
+                dataset_version_id=workflow_data.dataset_version.id,
+                task_version_id=workflow_data.task_version.id,
+                assistance_policy="blind",
+                reannotation_mode="full_dataset",
+                annotator_user_ids=[workflow_scope.annotator.id],
+            ),
+            workflow_scope.manager,
+        )
+
+
+def test_annotation_round_open_transition_revalidates_assignee_activity(
+    db,
+    workflow_scope,
+    workflow_data,
+):
+    annotation_round = service.create_annotation_round(
+        db,
+        schemas.AnnotationRoundCreate(
+            project_id=workflow_scope.project.id,
+            name="Assignee becomes inactive",
+            dataset_version_id=workflow_data.dataset_version.id,
+            task_version_id=workflow_data.task_version.id,
+            assistance_policy="blind",
+            reannotation_mode="full_dataset",
+            annotator_user_ids=[workflow_scope.annotator.id],
+        ),
+        workflow_scope.manager,
+    )
+    workflow_scope.annotator.is_active = False
+    db.commit()
+
+    with pytest.raises(ValidationError, match="active users"):
+        service.transition_annotation_round(
+            db,
+            workflow_scope.project.id,
+            annotation_round.id,
+            "open",
+        )
+    db.rollback()
+    assert db.get(models.AnnotationRound, annotation_round.id).status == "draft"
+
+
+def test_project_mutation_locks_actor_and_related_users_together_in_id_order(
+    db,
+    monkeypatch,
+):
+    from sqlalchemy.orm import Query
+
+    from al_medlit.auth.tenancy import lock_project_member_for_mutation
+
+    related_user = _user(db, "lower-related-user")
+    workspace = workspace_service.create_team_workspace(
+        db,
+        related_user,
+        "Canonical user locks",
+    )
+    actor = _user(db, "higher-superuser-actor")
+    actor.is_superuser = True
+    project = Project(name="Canonical lock project", workspace_id=workspace.id)
+    db.add(project)
+    db.commit()
+    assert related_user.id < actor.id
+    user_lock_queries: list[str] = []
+    real_with_for_update = Query.with_for_update
+
+    def track_with_for_update(query, *args, **kwargs):
+        locked_query = real_with_for_update(query, *args, **kwargs)
+        if query.column_descriptions[0].get("entity") is User:
+            user_lock_queries.append(str(locked_query.statement))
+        return locked_query
+
+    monkeypatch.setattr(Query, "with_for_update", track_with_for_update)
+    lock_project_member_for_mutation(
+        db,
+        actor,
+        project.id,
+        related_user_ids=(related_user.id,),
+    )
+
+    assert len(user_lock_queries) == 1
+    assert "ORDER BY users.id" in user_lock_queries[0]
+
+
+def test_project_mutation_rejects_unauthorized_actor_before_related_user_locks(
+    db,
+    monkeypatch,
+):
+    from sqlalchemy.orm import Query
+
+    from al_medlit.auth.tenancy import lock_project_member_for_mutation
+
+    workspace_owner = _user(db, "early-auth-workspace-owner")
+    workspace = workspace_service.create_team_workspace(
+        db,
+        workspace_owner,
+        "Early authorization guard",
+    )
+    unauthorized_actor = _user(db, "early-auth-outsider")
+    related_user = _user(db, "early-auth-related-user")
+    project = Project(name="Early authorization project", workspace_id=workspace.id)
+    db.add(project)
+    db.commit()
+    user_lock_queries: list[str] = []
+    real_with_for_update = Query.with_for_update
+
+    def track_with_for_update(query, *args, **kwargs):
+        locked_query = real_with_for_update(query, *args, **kwargs)
+        if query.column_descriptions[0].get("entity") is User:
+            user_lock_queries.append(str(locked_query.statement))
+        return locked_query
+
+    monkeypatch.setattr(Query, "with_for_update", track_with_for_update)
+
+    with pytest.raises(ForbiddenError, match="not a member"):
+        lock_project_member_for_mutation(
+            db,
+            unauthorized_actor,
+            project.id,
+            min_role="manager",
+            related_user_ids=(related_user.id,),
+        )
+
+    assert user_lock_queries == []
+
+
+def test_round_create_route_supplies_explicit_assignees_to_write_lock(
+    db,
+    workflow_scope,
+    workflow_data,
+    monkeypatch,
+):
+    from al_medlit.workflow.routes import rounds as round_routes
+
+    payload = schemas.AnnotationRoundCreate(
+        project_id=workflow_scope.project.id,
+        name="Route lock inputs",
+        dataset_version_id=workflow_data.dataset_version.id,
+        task_version_id=workflow_data.task_version.id,
+        assistance_policy="blind",
+        reannotation_mode="full_dataset",
+        annotator_user_ids=[workflow_scope.annotator.id],
+    )
+    captured_related_ids: list[int] = []
+
+    def capture_write(_db, _user, _project_id, **kwargs):
+        captured_related_ids.extend(kwargs["related_user_ids"])
+
+    monkeypatch.setattr(round_routes, "_write", capture_write)
+    monkeypatch.setattr(
+        round_routes.service,
+        "create_annotation_round",
+        lambda _db, _payload, _actor: "created",
+    )
+
+    assert (
+        round_routes.create_round(
+            payload,
+            current_user=workflow_scope.manager,
+            db=db,
+        )
+        == "created"
+    )
+    assert captured_related_ids == [workflow_scope.annotator.id]
+
+
+def test_round_open_route_supplies_candidate_assignees_to_write_lock(
+    db,
+    workflow_scope,
+    workflow_data,
+    monkeypatch,
+):
+    from al_medlit.workflow.routes import rounds as round_routes
+
+    annotation_round = service.create_annotation_round(
+        db,
+        schemas.AnnotationRoundCreate(
+            project_id=workflow_scope.project.id,
+            name="Route transition lock inputs",
+            dataset_version_id=workflow_data.dataset_version.id,
+            task_version_id=workflow_data.task_version.id,
+            assistance_policy="blind",
+            reannotation_mode="full_dataset",
+            annotator_user_ids=[workflow_scope.annotator.id],
+        ),
+        workflow_scope.manager,
+    )
+    captured_related_ids: list[int] = []
+
+    def capture_write(_db, _user, _project_id, **kwargs):
+        captured_related_ids.extend(kwargs["related_user_ids"])
+
+    monkeypatch.setattr(round_routes, "_write", capture_write)
+    monkeypatch.setattr(
+        round_routes.service,
+        "transition_annotation_round",
+        lambda _db, _project_id, _round_id, _status: annotation_round,
+    )
+
+    result = round_routes.transition_round(
+        annotation_round.id,
+        schemas.AnnotationRoundTransition(status="open"),
+        project_id=workflow_scope.project.id,
+        current_user=workflow_scope.manager,
+        db=db,
+    )
+
+    assert result.id == annotation_round.id
+    assert captured_related_ids == [workflow_scope.annotator.id]
+
+
 def test_round_work_items_are_assignment_scoped_and_do_not_expose_dataset_pool(
     db,
     client,

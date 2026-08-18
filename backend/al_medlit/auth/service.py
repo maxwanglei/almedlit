@@ -1,3 +1,5 @@
+from functools import lru_cache
+
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -40,7 +42,16 @@ def register_user(db: Session, data: UserCreate, *, is_active: bool = True) -> U
 
 
 def authenticate_user(db: Session, username: str, password: str) -> User | None:
-    user = get_user_by_username(db, username)
+    # Password reset and bootstrap password rotation use the same User-row lock.
+    # Refresh after waiting so a login can never verify an old hash and then
+    # overwrite a newer password with a legacy-hash upgrade.
+    user = (
+        db.query(User)
+        .filter(User.username == username)
+        .populate_existing()
+        .with_for_update()
+        .first()
+    )
     if user is None or not user.is_active:
         return None
     valid, updated_hash = verify_password_and_update(password, user.password_hash)
@@ -54,15 +65,30 @@ def authenticate_user(db: Session, username: str, password: str) -> User | None:
     return user
 
 
+@lru_cache(maxsize=8)
+def _hash_matches_forbidden_bootstrap_password(password_hash: str) -> bool:
+    """Memoize the bcrypt comparison against the fixed forbidden password list.
+
+    ``verify_password`` over a fixed password is a pure function of the stored
+    hash, so this is safe to cache: rotating the bootstrap admin's password
+    produces a new hash and therefore a new cache key. Callers check the
+    username first, so only bootstrap-admin hashes ever reach this cache.
+    """
+
+    return any(
+        verify_password(password, password_hash)
+        for password in FORBIDDEN_BOOTSTRAP_ADMIN_PASSWORDS
+    )
+
+
 def user_has_forbidden_bootstrap_password(user: User) -> bool:
+    # Every authenticated request reaches this check, so the cheap identity
+    # guards run before the deliberately expensive password comparison.
     if user.username != settings.bootstrap_admin_username.strip():
         return False
     if not user.is_active or not user.is_superuser:
         return False
-    return any(
-        verify_password(password, user.password_hash)
-        for password in FORBIDDEN_BOOTSTRAP_ADMIN_PASSWORDS
-    )
+    return _hash_matches_forbidden_bootstrap_password(user.password_hash)
 
 
 def assert_no_vulnerable_bootstrap_admin(db: Session) -> None:

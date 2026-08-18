@@ -1,16 +1,20 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
-import { Check, RefreshCw, Trash2, X } from "lucide-react";
+import { Check, Copy, RefreshCw, RotateCw, Trash2, UserRoundPlus, X } from "lucide-react";
 
 import {
   approveJoinRequest,
   createWorkspaceInvite,
   deleteWorkspaceMember,
   getWorkspaceCapabilities,
+  getWorkspaceGovernance,
+  listWorkspaceInvites,
   listWorkspaceJoinRequests,
   listWorkspaceMembers,
   rejectJoinRequest,
+  revokeWorkspaceInvite,
+  rotateWorkspaceJoinCode,
   setWorkspaceCapability,
   updateWorkspaceMemberRole,
   type WorkspaceCapabilities,
@@ -18,6 +22,8 @@ import {
 import ConfirmDialog from "@/components/ConfirmDialog";
 import type {
   WorkspaceJoinRequest,
+  WorkspaceGovernance,
+  WorkspaceInviteSummary,
   WorkspaceMember,
   WorkspaceRole,
 } from "@/types/api";
@@ -68,27 +74,50 @@ function memberName(member: WorkspaceMember): string {
   return member.display_name.trim() || member.username;
 }
 
+function formatExpiryMinutes(minutes: number): string {
+  if (minutes % 1_440 === 0) {
+    const days = minutes / 1_440;
+    return `${days} ${days === 1 ? "day" : "days"}`;
+  }
+  if (minutes % 60 === 0) {
+    const hours = minutes / 60;
+    return `${hours} ${hours === 1 ? "hour" : "hours"}`;
+  }
+  return `${minutes} minutes`;
+}
+
 export default function WorkspaceSettings({
   workspaceId,
   workspaceName,
   workspaceKind,
   currentUserId,
   onCapabilitiesChanged,
+  onManageWorkspaces,
 }: {
   workspaceId: number;
   workspaceName: string;
   workspaceKind: string;
   currentUserId: number | null;
   onCapabilitiesChanged: (capabilities: WorkspaceCapabilities) => void;
+  onManageWorkspaces: () => void;
 }): React.ReactElement {
   const inviteTokenId = useId();
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [joinRequests, setJoinRequests] = useState<WorkspaceJoinRequest[]>([]);
+  const [governance, setGovernance] = useState<WorkspaceGovernance | null>(null);
+  const [invites, setInvites] = useState<WorkspaceInviteSummary[]>([]);
   const [capabilities, setCapabilities] =
     useState<WorkspaceCapabilities | null>(null);
   const [preset, setPreset] = useState("annotate");
   const [inviteRole, setInviteRole] = useState<WorkspaceRole>("annotator");
-  const [inviteToken, setInviteToken] = useState<string | null>(null);
+  const [inviteExpiry, setInviteExpiry] = useState("default");
+  const [createdInvite, setCreatedInvite] = useState<{
+    id: number;
+    token: string;
+  } | null>(null);
+  const [inviteToRevoke, setInviteToRevoke] =
+    useState<WorkspaceInviteSummary | null>(null);
+  const [rotateJoinCode, setRotateJoinCode] = useState(false);
   const [memberToRemove, setMemberToRemove] =
     useState<WorkspaceMember | null>(null);
   const [loading, setLoading] = useState(true);
@@ -110,18 +139,26 @@ export default function WorkspaceSettings({
     setLoading(true);
     setError(null);
     try {
-      const [nextMembers, nextRequests, nextCapabilities] = await Promise.all([
+      const [nextMembers, nextRequests, nextCapabilities, nextGovernance, nextInvites] = await Promise.all([
         listWorkspaceMembers(workspaceId),
         workspaceKind === "team"
           ? listWorkspaceJoinRequests(workspaceId)
           : Promise.resolve([]),
         getWorkspaceCapabilities(workspaceId),
+        workspaceKind === "team"
+          ? getWorkspaceGovernance(workspaceId)
+          : Promise.resolve(null),
+        workspaceKind === "team"
+          ? listWorkspaceInvites(workspaceId)
+          : Promise.resolve([]),
       ]);
       if (!isCurrentRequest()) return;
       setMembers(nextMembers);
       setJoinRequests(nextRequests);
       setCapabilities(nextCapabilities);
       setPreset(nextCapabilities.preset);
+      setGovernance(nextGovernance);
+      setInvites(nextInvites);
     } catch (caught) {
       if (isCurrentRequest()) {
         setError(
@@ -143,7 +180,11 @@ export default function WorkspaceSettings({
     setMembers([]);
     setJoinRequests([]);
     setCapabilities(null);
-    setInviteToken(null);
+    setGovernance(null);
+    setInvites([]);
+    setCreatedInvite(null);
+    setInviteToRevoke(null);
+    setRotateJoinCode(false);
     setMemberToRemove(null);
     setStatus(null);
     setBusy(false);
@@ -231,10 +272,52 @@ export default function WorkspaceSettings({
 
   async function createInvite(): Promise<void> {
     await run(async (isCurrentRequest) => {
-      const invite = await createWorkspaceInvite(workspaceId, inviteRole);
+      const expiresMinutes =
+        inviteExpiry === "default" ? undefined : Number(inviteExpiry);
+      const invite = await createWorkspaceInvite(
+        workspaceId,
+        inviteRole,
+        expiresMinutes,
+      );
       if (!isCurrentRequest()) return;
-      setInviteToken(invite.token);
+      setCreatedInvite({ id: invite.id, token: invite.token });
+      const nextInvites = await listWorkspaceInvites(workspaceId);
+      if (!isCurrentRequest()) return;
+      setInvites(nextInvites);
     }, "Invitation created.");
+  }
+
+  async function revokeInvite(): Promise<void> {
+    if (!inviteToRevoke) return;
+    const invite = inviteToRevoke;
+    await run(async (isCurrentRequest) => {
+      await revokeWorkspaceInvite(workspaceId, invite.id);
+      if (!isCurrentRequest()) return;
+      setInvites((current) => current.filter((item) => item.id !== invite.id));
+      setCreatedInvite((current) =>
+        current?.id === invite.id ? null : current,
+      );
+      setInviteToRevoke(null);
+    }, "Invitation revoked.");
+  }
+
+  async function rotateCode(): Promise<void> {
+    await run(async (isCurrentRequest) => {
+      const nextGovernance = await rotateWorkspaceJoinCode(workspaceId);
+      if (!isCurrentRequest()) return;
+      setGovernance(nextGovernance);
+      setRotateJoinCode(false);
+    }, "Join code rotated. The previous code no longer works.");
+  }
+
+  async function copyText(value: string, successMessage: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(value);
+      setStatus(successMessage);
+      setError(null);
+    } catch {
+      setError("Copy failed. Select the value and copy it manually.");
+    }
   }
 
   async function decideRequest(
@@ -266,14 +349,25 @@ export default function WorkspaceSettings({
             workspaceKind === "individual" ? "Individual workspace" : "Team workspace"
           }`}
           secondary={
-            <Button
-              label="Refresh"
-              icon={<RefreshCw size={17} />}
-              isIconOnly
-              variant="ghost"
-              isDisabled={loading || busy}
-              onClick={() => void load()}
-            />
+            <div className="workspace-settings-header-actions">
+              {workspaceKind === "individual" ? (
+                <Button
+                  label="Create or join a team"
+                  icon={<UserRoundPlus size={17} aria-hidden="true" />}
+                  variant="ghost"
+                  isDisabled={loading || busy}
+                  onClick={onManageWorkspaces}
+                />
+              ) : null}
+              <Button
+                label="Refresh"
+                icon={<RefreshCw size={17} />}
+                isIconOnly
+                variant="ghost"
+                isDisabled={loading || busy}
+                onClick={() => void load()}
+              />
+            </div>
           }
         />
 
@@ -350,8 +444,12 @@ export default function WorkspaceSettings({
             </PlatformSection>
 
             <PlatformSection
-              title="Members"
-              description="Roles are hierarchical; each higher role inherits the permissions below it."
+              title={workspaceKind === "individual" ? "Owner" : "Members"}
+              description={
+                workspaceKind === "individual"
+                  ? "An individual workspace is permanently single-owner. Create or join a team to collaborate."
+                  : "Roles are hierarchical; each higher role inherits the permissions below it."
+              }
             >
               {members.length ? (
                 <div
@@ -367,9 +465,11 @@ export default function WorkspaceSettings({
                         <th scope="col">Email</th>
                         <th scope="col">Status</th>
                         <th scope="col">Effective role</th>
-                        <th scope="col">
-                          <span className="sr-only">Actions</span>
-                        </th>
+                        {workspaceKind === "team" ? (
+                          <th scope="col">
+                            <span className="sr-only">Actions</span>
+                          </th>
+                        ) : null}
                       </tr>
                     </thead>
                     <tbody>
@@ -388,37 +488,43 @@ export default function WorkspaceSettings({
                               />
                             </td>
                             <td data-label="Effective role">
-                              <select
-                                aria-label={`Role for ${memberName(member)}`}
-                                value={member.role}
-                                disabled={busy || isCurrentUser}
-                                onChange={(event) =>
-                                  void changeRole(
-                                    member,
-                                    event.target.value as WorkspaceRole,
-                                  )
-                                }
-                              >
-                                {ROLE_OPTIONS.map((option) => (
-                                  <option
-                                    key={option.value}
-                                    value={option.value}
-                                  >
-                                    {option.label}
-                                  </option>
-                                ))}
-                              </select>
+                              {workspaceKind === "individual" ? (
+                                <strong>Owner</strong>
+                              ) : (
+                                <select
+                                  aria-label={`Role for ${memberName(member)}`}
+                                  value={member.role}
+                                  disabled={busy || isCurrentUser}
+                                  onChange={(event) =>
+                                    void changeRole(
+                                      member,
+                                      event.target.value as WorkspaceRole,
+                                    )
+                                  }
+                                >
+                                  {ROLE_OPTIONS.map((option) => (
+                                    <option
+                                      key={option.value}
+                                      value={option.value}
+                                    >
+                                      {option.label}
+                                    </option>
+                                  ))}
+                                </select>
+                              )}
                             </td>
-                            <td data-label="Action" data-priority="action">
-                              <Button
-                                label={`Remove ${memberName(member)}`}
-                                icon={<Trash2 size={16} />}
-                                isIconOnly
-                                variant="ghost"
-                                isDisabled={busy || isCurrentUser}
-                                onClick={() => setMemberToRemove(member)}
-                              />
-                            </td>
+                            {workspaceKind === "team" ? (
+                              <td data-label="Action" data-priority="action">
+                                <Button
+                                  label={`Remove ${memberName(member)}`}
+                                  icon={<Trash2 size={16} />}
+                                  isIconOnly
+                                  variant="ghost"
+                                  isDisabled={busy || isCurrentUser}
+                                  onClick={() => setMemberToRemove(member)}
+                                />
+                              </td>
+                            ) : null}
                           </tr>
                         );
                       })}
@@ -434,10 +540,41 @@ export default function WorkspaceSettings({
             </PlatformSection>
 
             {workspaceKind === "team" ? (
-              <div className="workspace-collaboration-grid">
+              <div className="workspace-team-settings">
                 <PlatformSection
-                  title="Invite"
-                  description="Create a role-bounded invitation for this workspace."
+                  title="Team access"
+                  description="Share the join code for an approval-based request. Rotating it immediately invalidates the previous code."
+                  action={
+                    <Button
+                      label={governance?.join_code ? "Rotate join code" : "Generate join code"}
+                      icon={<RotateCw size={16} aria-hidden="true" />}
+                      variant="ghost"
+                      isDisabled={busy || governance === null}
+                      onClick={() => setRotateJoinCode(true)}
+                    />
+                  }
+                >
+                  {governance?.join_code ? (
+                    <div className="workspace-share-value">
+                      <code>{governance.join_code}</code>
+                      <Button
+                        label="Copy join code"
+                        icon={<Copy size={16} aria-hidden="true" />}
+                        isIconOnly
+                        variant="ghost"
+                        onClick={() =>
+                          void copyText(governance.join_code ?? "", "Join code copied.")
+                        }
+                      />
+                    </div>
+                  ) : (
+                    <p className="platform-inline-empty">No join code is available.</p>
+                  )}
+                </PlatformSection>
+
+                <PlatformSection
+                  title="Invitations"
+                  description="Create a single-use, role-bounded link or revoke an unused link."
                 >
                   <form
                     className="workspace-invite-form"
@@ -462,6 +599,24 @@ export default function WorkspaceSettings({
                         ))}
                       </select>
                     </label>
+                    <label>
+                      <span>Expires</span>
+                      <select
+                        value={inviteExpiry}
+                        disabled={busy}
+                        onChange={(event) => setInviteExpiry(event.target.value)}
+                      >
+                        <option value="default">
+                          Instance default
+                          {governance
+                            ? ` (${formatExpiryMinutes(governance.default_invite_expiry_minutes)})`
+                            : ""}
+                        </option>
+                        <option value="1440">24 hours</option>
+                        <option value="10080">7 days</option>
+                        <option value="43200">30 days</option>
+                      </select>
+                    </label>
                     <Button
                       label="Create invitation"
                       variant="primary"
@@ -469,16 +624,75 @@ export default function WorkspaceSettings({
                       isDisabled={busy}
                     />
                   </form>
-                  {inviteToken ? (
+                  {createdInvite ? (
                     <div
                       id={inviteTokenId}
                       className="workspace-invite-token"
                       role="status"
                     >
-                      <span>Invitation token</span>
-                      <code>{inviteToken}</code>
+                      <span>Invitation link</span>
+                      <div className="workspace-share-value">
+                        <code>{`${window.location.origin}/invites/${encodeURIComponent(createdInvite.token)}`}</code>
+                        <Button
+                          label="Copy invitation link"
+                          icon={<Copy size={16} aria-hidden="true" />}
+                          isIconOnly
+                          variant="ghost"
+                          onClick={() =>
+                            void copyText(
+                              `${window.location.origin}/invites/${encodeURIComponent(createdInvite.token)}`,
+                              "Invitation link copied.",
+                            )
+                          }
+                        />
+                      </div>
                     </div>
                   ) : null}
+
+                  {invites.length ? (
+                    <div
+                      className="platform-table-scroll platform-table-scroll--summary"
+                      role="region"
+                      aria-label="Open invitations table"
+                      tabIndex={0}
+                    >
+                      <table className="platform-table platform-table--summary">
+                        <thead>
+                          <tr>
+                            <th scope="col">Role</th>
+                            <th scope="col">Created by</th>
+                            <th scope="col">Expires</th>
+                            <th scope="col"><span className="sr-only">Actions</span></th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {invites.map((invite) => (
+                            <tr key={invite.id}>
+                              <td data-label="Role"><PlatformStatus value={invite.role} /></td>
+                              <td data-label="Created by">{invite.created_by_username}</td>
+                              <td data-label="Expires">
+                                {invite.expires_at
+                                  ? new Date(invite.expires_at).toLocaleString()
+                                  : "No expiry"}
+                              </td>
+                              <td data-label="Action" data-priority="action">
+                                <Button
+                                  label={`Revoke ${invite.role} invitation`}
+                                  icon={<X size={16} aria-hidden="true" />}
+                                  isIconOnly
+                                  variant="ghost"
+                                  isDisabled={busy}
+                                  onClick={() => setInviteToRevoke(invite)}
+                                />
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <p className="platform-inline-empty">No open invitations.</p>
+                  )}
                 </PlatformSection>
 
                 <PlatformSection
@@ -490,12 +704,16 @@ export default function WorkspaceSettings({
                       {joinRequests.map((request) => (
                         <li key={request.id}>
                           <div>
-                            <strong>User {request.user_id}</strong>
+                            <strong>{request.display_name.trim() || request.username}</strong>
+                            <span>
+                              {request.username}
+                              {request.email ? ` · ${request.email}` : ""}
+                            </span>
                             <span>{request.message ?? "No message provided"}</span>
                           </div>
                           <div>
                             <Button
-                              label={`Approve request from user ${request.user_id}`}
+                              label={`Approve request from ${request.username}`}
                               icon={<Check size={16} />}
                               isIconOnly
                               variant="ghost"
@@ -503,7 +721,7 @@ export default function WorkspaceSettings({
                               onClick={() => void decideRequest(request, true)}
                             />
                             <Button
-                              label={`Reject request from user ${request.user_id}`}
+                              label={`Reject request from ${request.username}`}
                               icon={<X size={16} />}
                               isIconOnly
                               variant="ghost"
@@ -538,6 +756,24 @@ export default function WorkspaceSettings({
         busy={busy}
         onCancel={() => setMemberToRemove(null)}
         onConfirm={removeMember}
+      />
+      <ConfirmDialog
+        open={inviteToRevoke !== null}
+        title="Revoke invitation?"
+        description="This invitation link will stop working immediately. Existing members are not affected."
+        confirmLabel="Revoke invitation"
+        busy={busy}
+        onCancel={() => setInviteToRevoke(null)}
+        onConfirm={revokeInvite}
+      />
+      <ConfirmDialog
+        open={rotateJoinCode}
+        title="Rotate the join code?"
+        description="The current code will stop accepting new requests. Pending requests are not affected."
+        confirmLabel="Rotate code"
+        busy={busy}
+        onCancel={() => setRotateJoinCode(false)}
+        onConfirm={rotateCode}
       />
     </main>
   );

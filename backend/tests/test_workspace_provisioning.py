@@ -755,10 +755,51 @@ def test_team_workspace_cannot_lose_its_last_admin(db):
         service.remove_member(db, ws.id, owner.id, actor_user_id=owner.id)
 
 
+def test_inactive_admin_membership_does_not_count_toward_last_active_admin(db):
+    from al_medlit.core.exceptions import ConflictError
+    from al_medlit.workspace import service
+
+    owner = _make_user(db, "last-active-admin")
+    inactive_admin = _make_user(db, "inactive-preserved-admin")
+    workspace = service.create_team_workspace(db, owner, name="Active Admin Team")
+    service.add_member(db, workspace.id, inactive_admin.id, role="admin")
+    inactive_admin.is_active = False
+    db.flush()
+
+    with pytest.raises(ConflictError, match="at least one admin"):
+        service.change_role(
+            db,
+            workspace.id,
+            owner.id,
+            role="manager",
+            actor_user_id=owner.id,
+        )
+    with pytest.raises(ConflictError, match="at least one admin"):
+        service.remove_member(
+            db,
+            workspace.id,
+            owner.id,
+            actor_user_id=owner.id,
+        )
+
+    # Cleaning up an inactive preserved membership is safe while an active
+    # administrator remains.
+    service.remove_member(
+        db,
+        workspace.id,
+        inactive_admin.id,
+        actor_user_id=owner.id,
+    )
+    assert service.get_member(db, workspace.id, inactive_admin.id) is None
+    assert service.get_member(db, workspace.id, owner.id).role == "admin"
+
+
 def test_shared_workspace_transitions_request_database_row_locks(db, monkeypatch):
     from sqlalchemy.orm import Query
 
+    from al_medlit.auth.models import User
     from al_medlit.workspace import service
+    from al_medlit.workspace.models import Workspace, WorkspaceInvite
 
     lock_calls = []
     original_with_for_update = Query.with_for_update
@@ -785,8 +826,14 @@ def test_shared_workspace_transitions_request_database_row_locks(db, monkeypatch
     )
     lock_calls.clear()
     service.accept_invite(db, invite, invitee)
-    # Acceptance follows the shared lock order: workspace, invite, inviter.
-    assert len(lock_calls) == 3
+    # Acceptance locks the accepting user before workspace and invite. Inviter
+    # authority is refreshed normally after those locks, avoiding an inverse
+    # Workspace -> User edge against account deactivation's User -> Workspace order.
+    assert [query.column_descriptions[0]["entity"] for query in lock_calls] == [
+        User,
+        Workspace,
+        WorkspaceInvite,
+    ]
 
     join_request = service.create_join_request(
         db,
@@ -938,6 +985,38 @@ def test_accept_invite_revalidates_stale_inviter_authority(
         service.accept_invite(db, invite, invitee)
 
     assert invite.accepted_at is None
+    assert service.get_member(db, workspace.id, invitee.id) is None
+
+
+def test_accept_invite_revalidates_stale_accepting_user_status(db):
+    from al_medlit.auth.models import User
+    from al_medlit.core.exceptions import ForbiddenError
+    from al_medlit.workspace import service
+
+    owner = _make_user(db, "inactive-acceptance-owner")
+    invitee = _make_user(db, "inactive-acceptance-target")
+    workspace = service.create_team_workspace(
+        db,
+        owner,
+        name="Inactive Acceptance Team",
+    )
+    invite = service.create_invite(
+        db,
+        workspace.id,
+        created_by=owner.id,
+        role="annotator",
+        expires_minutes=None,
+    )
+    db.query(User).filter(User.id == invitee.id).update(
+        {User.is_active: False},
+        synchronize_session=False,
+    )
+
+    with pytest.raises(ForbiddenError, match="inactive user"):
+        service.accept_invite(db, invite, invitee)
+
+    assert invite.accepted_at is None
+    assert invite.accepted_by is None
     assert service.get_member(db, workspace.id, invitee.id) is None
 
 
@@ -1230,6 +1309,29 @@ def test_individual_workspace_rejects_members_invites_and_join_requests(
     assert invite.status_code == 409
     assert "Individual workspaces" in invite.json()["detail"]
 
+    for operation in (
+        lambda: service.change_role(
+            db,
+            auth_user["workspace_id"],
+            auth_user["id"],
+            role="admin",
+            actor_user_id=auth_user["id"],
+        ),
+        lambda: service.remove_member(
+            db,
+            auth_user["workspace_id"],
+            auth_user["id"],
+            actor_user_id=auth_user["id"],
+        ),
+        lambda: service.rotate_join_code(
+            db,
+            auth_user["workspace_id"],
+            actor_user_id=auth_user["id"],
+        ),
+    ):
+        with pytest.raises(ConflictError, match="Individual workspaces"):
+            operation()
+
 
 def test_require_role_allows_sufficient_role(db):
     from al_medlit.workspace import service
@@ -1292,6 +1394,93 @@ def test_create_and_list_workspaces_via_api(auth_client):
     assert "My Team" in names
 
 
+def test_workspace_governance_rotates_team_join_code(auth_client):
+    workspace = auth_client.post(
+        "/api/workspaces",
+        json={"name": "Rotating Join Code Team"},
+    ).json()
+    old_code = workspace["join_code"]
+
+    governance = auth_client.get(
+        f"/api/workspaces/{workspace['id']}/governance"
+    )
+    rotated = auth_client.post(
+        f"/api/workspaces/{workspace['id']}/join-code/rotate"
+    )
+
+    assert governance.status_code == 200
+    assert governance.json() == {
+        "workspace_id": workspace["id"],
+        "workspace_kind": "team",
+        "join_code": old_code,
+        "default_invite_expiry_minutes": 10_080,
+    }
+    assert rotated.status_code == 200
+    assert rotated.json()["workspace_id"] == workspace["id"]
+    assert rotated.json()["workspace_kind"] == "team"
+    assert rotated.json()["join_code"]
+    assert rotated.json()["join_code"] != old_code
+
+
+def test_rotated_join_code_invalidates_the_previous_code(auth_client, db):
+    from al_medlit.auth.schemas import UserCreate
+    from al_medlit.auth.security import create_access_token
+    from al_medlit.auth.service import register_user
+
+    workspace = auth_client.post(
+        "/api/workspaces",
+        json={"name": "Invalidated Join Code Team"},
+    ).json()
+    old_code = workspace["join_code"]
+    new_code = auth_client.post(
+        f"/api/workspaces/{workspace['id']}/join-code/rotate"
+    ).json()["join_code"]
+    applicant = register_user(
+        db,
+        UserCreate(username="rotation-applicant", password="pw"),
+    )
+    db.commit()
+    headers = {
+        "Authorization": f"Bearer {create_access_token(applicant.id)}",
+    }
+
+    stale = auth_client.post(
+        f"/api/workspaces/by-code/{old_code}/join-requests",
+        json={},
+        headers=headers,
+    )
+    current = auth_client.post(
+        f"/api/workspaces/by-code/{new_code}/join-requests",
+        json={},
+        headers=headers,
+    )
+
+    assert stale.status_code == 404
+    assert current.status_code == 200
+    assert current.json()["workspace_id"] == workspace["id"]
+
+
+def test_workspace_governance_describes_individual_without_team_controls(
+    auth_client,
+    auth_user,
+):
+    governance = auth_client.get(
+        f"/api/workspaces/{auth_user['workspace_id']}/governance"
+    )
+    invites = auth_client.get(
+        f"/api/workspaces/{auth_user['workspace_id']}/invites"
+    )
+    rotate = auth_client.post(
+        f"/api/workspaces/{auth_user['workspace_id']}/join-code/rotate"
+    )
+
+    assert governance.status_code == 200
+    assert governance.json()["workspace_kind"] == "individual"
+    assert governance.json()["join_code"] is None
+    assert invites.status_code == 409
+    assert rotate.status_code == 409
+
+
 def test_member_role_management_via_api(auth_client, db):
     ws = auth_client.post("/api/workspaces", json={"name": "RoleTeam"}).json()
 
@@ -1308,6 +1497,58 @@ def test_member_role_management_via_api(auth_client, db):
     )
     assert resp.status_code == 200
     assert resp.json()["role"] == "trainer"
+
+
+def test_workspace_governance_mutations_append_admin_events(auth_client, db):
+    from al_medlit.administration.models import AdminAuditEvent
+    from al_medlit.workspace import service
+
+    workspace = auth_client.post(
+        "/api/workspaces",
+        json={"name": "Governance Audit Team"},
+    ).json()
+    other = _make_user(db, "governance-audit-member")
+    service.add_member(db, workspace["id"], other.id, role="annotator")
+    db.commit()
+
+    role_change = auth_client.patch(
+        f"/api/workspaces/{workspace['id']}/members/{other.id}",
+        json={"role": "trainer"},
+    )
+    invite = auth_client.post(
+        f"/api/workspaces/{workspace['id']}/invites",
+        json={"role": "annotator"},
+    ).json()
+    rotate = auth_client.post(
+        f"/api/workspaces/{workspace['id']}/join-code/rotate"
+    )
+    revoke = auth_client.delete(
+        f"/api/workspaces/{workspace['id']}/invites/{invite['id']}"
+    )
+    remove = auth_client.delete(
+        f"/api/workspaces/{workspace['id']}/members/{other.id}"
+    )
+
+    assert role_change.status_code == 200
+    assert rotate.status_code == 200
+    assert revoke.status_code == 204
+    assert remove.status_code == 204
+    db.expire_all()
+    events = (
+        db.query(AdminAuditEvent)
+        .filter(AdminAuditEvent.workspace_id == workspace["id"])
+        .order_by(AdminAuditEvent.id)
+        .all()
+    )
+    assert [event.event_type for event in events] == [
+        "workspace.member_role_changed",
+        "workspace.invite_created",
+        "workspace.join_code_rotated",
+        "workspace.invite_revoked",
+        "workspace.member_removed",
+    ]
+    assert all("token" not in event.details for event in events)
+    assert all("join_code" not in event.details for event in events)
 
 
 def test_invite_create_and_accept_new_user(auth_client):
@@ -1345,6 +1586,270 @@ def test_invite_create_and_accept_new_user(auth_client):
         headers={"Authorization": f"Bearer {access_token}"},
     )
     assert repeated.status_code == 404
+
+
+def test_invite_uses_instance_default_expiry_and_validates_explicit_bounds(
+    auth_client,
+    db,
+):
+    from datetime import UTC, datetime, timedelta
+
+    from al_medlit.administration.models import InstancePolicy
+
+    db.add(
+        InstancePolicy(
+            id=1,
+            allow_self_registration=None,
+            default_invite_expiry_minutes=1_440,
+            account_action_expiry_minutes=60,
+        )
+    )
+    db.commit()
+    workspace = auth_client.post(
+        "/api/workspaces",
+        json={"name": "Policy Expiry Team"},
+    ).json()
+
+    before = datetime.now(UTC)
+    defaulted = auth_client.post(
+        f"/api/workspaces/{workspace['id']}/invites",
+        json={"role": "annotator"},
+    )
+    after = datetime.now(UTC)
+
+    assert defaulted.status_code == 200, defaulted.text
+    body = defaulted.json()
+    assert isinstance(body["id"], int)
+    expires_at = datetime.fromisoformat(body["expires_at"])
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    assert (
+        before + timedelta(minutes=1_440)
+        <= expires_at
+        <= after + timedelta(minutes=1_440)
+    )
+
+    for invalid_expiry in (59, 43_201):
+        response = auth_client.post(
+            f"/api/workspaces/{workspace['id']}/invites",
+            json={"role": "annotator", "expires_minutes": invalid_expiry},
+        )
+        assert response.status_code == 422
+
+
+def test_open_invites_can_be_listed_without_tokens_and_revoked(auth_client, auth_user, db):
+    from al_medlit.workspace.models import WorkspaceInvite
+
+    workspace = auth_client.post(
+        "/api/workspaces",
+        json={"name": "Revocable Invite Team"},
+    ).json()
+    created = auth_client.post(
+        f"/api/workspaces/{workspace['id']}/invites",
+        json={"role": "trainer", "expires_minutes": 1_440},
+    ).json()
+
+    listing = auth_client.get(f"/api/workspaces/{workspace['id']}/invites")
+
+    assert listing.status_code == 200
+    assert listing.json() == [
+        {
+            "id": created["id"],
+            "workspace_id": workspace["id"],
+            "role": "trainer",
+            "created_by": auth_user["id"],
+            "created_by_username": auth_user["username"],
+            "expires_at": created["expires_at"],
+            "created_at": listing.json()[0]["created_at"],
+        }
+    ]
+    assert "token" not in listing.json()[0]
+
+    revoked = auth_client.delete(
+        f"/api/workspaces/{workspace['id']}/invites/{created['id']}"
+    )
+    repeated = auth_client.delete(
+        f"/api/workspaces/{workspace['id']}/invites/{created['id']}"
+    )
+
+    assert revoked.status_code == 204
+    assert repeated.status_code == 204
+    stored = db.get(WorkspaceInvite, created["id"])
+    db.refresh(stored)
+    assert stored.revoked_at is not None
+    assert stored.revoked_by == auth_user["id"]
+    assert auth_client.get(f"/api/workspaces/{workspace['id']}/invites").json() == []
+    assert (
+        auth_client.get(
+            f"/api/invites/{created['token']}",
+            headers={"Authorization": ""},
+        ).status_code
+        == 404
+    )
+    assert (
+        auth_client.post(
+            f"/api/invites/{created['token']}/accept",
+            json={"username": "revoked-invitee", "password": "strong-password"},
+            headers={"Authorization": ""},
+        ).status_code
+        == 404
+    )
+
+
+def test_open_invite_listing_excludes_expired_and_consumed_invites(auth_client, auth_user, db):
+    from datetime import UTC, datetime, timedelta
+
+    from al_medlit.workspace.models import WorkspaceInvite
+
+    workspace = auth_client.post(
+        "/api/workspaces",
+        json={"name": "Only Open Invites Team"},
+    ).json()
+    active = auth_client.post(
+        f"/api/workspaces/{workspace['id']}/invites",
+        json={"role": "annotator"},
+    ).json()
+    expired = auth_client.post(
+        f"/api/workspaces/{workspace['id']}/invites",
+        json={"role": "trainer"},
+    ).json()
+    consumed = auth_client.post(
+        f"/api/workspaces/{workspace['id']}/invites",
+        json={"role": "manager"},
+    ).json()
+    expired_row = db.get(WorkspaceInvite, expired["id"])
+    consumed_row = db.get(WorkspaceInvite, consumed["id"])
+    expired_row.expires_at = datetime.now(UTC) - timedelta(minutes=1)
+    consumed_row.accepted_at = datetime.now(UTC)
+    consumed_row.accepted_by = auth_user["id"]
+    db.commit()
+
+    listing = auth_client.get(f"/api/workspaces/{workspace['id']}/invites")
+    revoke_consumed = auth_client.delete(
+        f"/api/workspaces/{workspace['id']}/invites/{consumed['id']}"
+    )
+
+    assert listing.status_code == 200
+    assert [invite["id"] for invite in listing.json()] == [active["id"]]
+    assert revoke_consumed.status_code == 409
+
+
+def test_invite_preview_describes_workspace_without_authentication(auth_client):
+    ws = auth_client.post("/api/workspaces", json={"name": "PreviewTeam"}).json()
+    token = auth_client.post(
+        f"/api/workspaces/{ws['id']}/invites",
+        json={"role": "trainer"},
+    ).json()["token"]
+
+    preview = auth_client.get(f"/api/invites/{token}", headers={"Authorization": ""})
+
+    assert preview.status_code == 200
+    body = preview.json()
+    assert body["workspace_name"] == "PreviewTeam"
+    assert body["workspace_kind"] == "team"
+    assert body["role"] == "trainer"
+    # The token holder learns nothing beyond what they need to decide.
+    assert "workspace_id" not in body
+    assert "join_code" not in body
+
+
+def test_invite_preview_rejects_unknown_and_consumed_tokens(auth_client):
+    unknown = auth_client.get("/api/invites/not-a-real-token", headers={"Authorization": ""})
+    assert unknown.status_code == 404
+
+    ws = auth_client.post("/api/workspaces", json={"name": "ConsumedTeam"}).json()
+    token = auth_client.post(
+        f"/api/workspaces/{ws['id']}/invites",
+        json={"role": "annotator"},
+    ).json()["token"]
+
+    accepted = auth_client.post(
+        f"/api/invites/{token}/accept",
+        json={"username": "preview-invitee", "password": "strong-password"},
+        headers={"Authorization": ""},
+    )
+    assert accepted.status_code == 200
+
+    assert (
+        auth_client.get(f"/api/invites/{token}", headers={"Authorization": ""}).status_code
+        == 404
+    )
+
+
+def test_invite_preview_rejects_expired_tokens(auth_client, db):
+    from datetime import UTC, datetime, timedelta
+
+    from al_medlit.workspace.models import WorkspaceInvite
+
+    ws = auth_client.post("/api/workspaces", json={"name": "ExpiredTeam"}).json()
+    token = auth_client.post(
+        f"/api/workspaces/{ws['id']}/invites",
+        json={"role": "annotator", "expires_minutes": 60},
+    ).json()["token"]
+
+    invite = db.query(WorkspaceInvite).filter(WorkspaceInvite.token == token).one()
+    invite.expires_at = datetime.now(UTC) - timedelta(minutes=1)
+    db.commit()
+
+    assert (
+        auth_client.get(f"/api/invites/{token}", headers={"Authorization": ""}).status_code
+        == 404
+    )
+
+
+def test_invite_preview_rejects_stale_creator_authority(auth_client, db):
+    from al_medlit.auth.models import User
+
+    workspace = auth_client.post(
+        "/api/workspaces",
+        json={"name": "Stale Invite Authority Team"},
+    ).json()
+    token = auth_client.post(
+        f"/api/workspaces/{workspace['id']}/invites",
+        json={"role": "annotator"},
+    ).json()["token"]
+    db.query(User).filter(User.username == "tester").update(
+        {User.is_active: False},
+        synchronize_session=False,
+    )
+    db.commit()
+
+    preview = auth_client.get(
+        f"/api/invites/{token}",
+        headers={"Authorization": ""},
+    )
+
+    assert preview.status_code == 403
+    assert "no longer authorized" in preview.json()["detail"]
+
+
+def test_invite_accept_supports_an_existing_signed_in_user(auth_client, db):
+    """The bearer path is how an existing account redeems an invite."""
+    from al_medlit.auth.schemas import UserCreate
+    from al_medlit.auth.security import create_access_token
+    from al_medlit.auth.service import register_user
+
+    ws = auth_client.post("/api/workspaces", json={"name": "ExistingUserTeam"}).json()
+    token = auth_client.post(
+        f"/api/workspaces/{ws['id']}/invites",
+        json={"role": "annotator"},
+    ).json()["token"]
+
+    existing = register_user(
+        db,
+        UserCreate(username="already-registered", password="strong-password"),
+    )
+    db.commit()
+
+    accept = auth_client.post(
+        f"/api/invites/{token}/accept",
+        json={},
+        headers={"Authorization": f"Bearer {create_access_token(existing.id)}"},
+    )
+
+    assert accept.status_code == 200
+    members = auth_client.get(f"/api/workspaces/{ws['id']}/members").json()
+    assert any(member["username"] == "already-registered" for member in members)
 
 
 @pytest.mark.parametrize(
@@ -1389,6 +1894,10 @@ def test_manager_cannot_create_workspace_invites(auth_client, db):
     from al_medlit.workspace import service
 
     workspace = auth_client.post("/api/workspaces", json={"name": "Ranked Invites"}).json()
+    open_invite = auth_client.post(
+        f"/api/workspaces/{workspace['id']}/invites",
+        json={"role": "annotator"},
+    ).json()
     manager = _make_user(db, "invite-manager")
     service.add_member(db, workspace["id"], manager.id, role="manager")
     db.commit()
@@ -1404,6 +1913,22 @@ def test_manager_cannot_create_workspace_invites(auth_client, db):
         json={"role": "manager"},
         headers=headers,
     )
+    listing = auth_client.get(
+        f"/api/workspaces/{workspace['id']}/invites",
+        headers=headers,
+    )
+    revoke = auth_client.delete(
+        f"/api/workspaces/{workspace['id']}/invites/{open_invite['id']}",
+        headers=headers,
+    )
+    rotate = auth_client.post(
+        f"/api/workspaces/{workspace['id']}/join-code/rotate",
+        headers=headers,
+    )
+    governance = auth_client.get(
+        f"/api/workspaces/{workspace['id']}/governance",
+        headers=headers,
+    )
     capability = auth_client.patch(
         f"/api/workspaces/{workspace['id']}/capability",
         json={"preset": "train", "overrides": []},
@@ -1416,6 +1941,10 @@ def test_manager_cannot_create_workspace_invites(auth_client, db):
 
     assert elevated.status_code == 403
     assert peer.status_code == 403
+    assert listing.status_code == 403
+    assert revoke.status_code == 403
+    assert rotate.status_code == 403
+    assert governance.status_code == 403
     assert capability.status_code == 403
     assert join_requests.status_code == 403
 
@@ -1428,7 +1957,15 @@ def test_apply_to_join_then_approve(client, db):
 
     owner = auth_service.register_user(db, UserCreate(username="owner2", password="pw"))
     ws = service.create_team_workspace(db, owner, name="ApplyTeam")
-    applicant = auth_service.register_user(db, UserCreate(username="applicant", password="pw"))
+    applicant = auth_service.register_user(
+        db,
+        UserCreate(
+            username="applicant",
+            password="pw",
+            display_name="Applicant Name",
+            email="applicant@example.test",
+        ),
+    )
     db.commit()
 
     owner_token = create_access_token(str(owner.id))
@@ -1440,7 +1977,21 @@ def test_apply_to_join_then_approve(client, db):
         headers={"Authorization": f"Bearer {applicant_token}"},
     )
     assert apply.status_code == 200
-    req_id = apply.json()["id"]
+    request_body = apply.json()
+    req_id = request_body["id"]
+    assert request_body["username"] == "applicant"
+    assert request_body["display_name"] == "Applicant Name"
+    assert request_body["email"] == "applicant@example.test"
+    assert request_body["created_at"]
+
+    pending = client.get(
+        f"/api/workspaces/{ws.id}/join-requests",
+        headers={"Authorization": f"Bearer {owner_token}"},
+    )
+    assert pending.status_code == 200
+    assert pending.json()[0]["username"] == "applicant"
+    assert pending.json()[0]["display_name"] == "Applicant Name"
+    assert pending.json()[0]["email"] == "applicant@example.test"
 
     approve = client.post(
         f"/api/join-requests/{req_id}/approve",

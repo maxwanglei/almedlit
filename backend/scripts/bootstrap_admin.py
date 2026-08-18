@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy.orm import Session
 
 from al_medlit.auth.models import User
-from al_medlit.auth.security import hash_password
+from al_medlit.auth.security import hash_password, verify_password
 from al_medlit.core.config import settings
 from al_medlit.core.database import SessionLocal, ensure_schema_ready
 from al_medlit.workspace import service as workspace_service
@@ -16,19 +16,24 @@ def bootstrap_admin(db: Session) -> User:
         raise RuntimeError("AL_MEDLIT_BOOTSTRAP_ADMIN_USERNAME must not be blank")
     password = settings.bootstrap_admin_password.strip()
 
-    user = db.query(User).filter(User.username == username).first()
+    user = (
+        db.query(User)
+        .filter(User.username == username)
+        .populate_existing()
+        .with_for_update()
+        .first()
+    )
     if user is not None and not user.is_superuser:
         raise RuntimeError(
             f"Refusing to bootstrap {username!r}: that username belongs to an "
             "existing non-superuser account"
         )
 
-    password_hash = hash_password(password)
     if user is None:
         user = User(
             username=username,
             email=None,
-            password_hash=password_hash,
+            password_hash=hash_password(password),
             display_name=username,
             is_active=True,
             is_superuser=True,
@@ -36,7 +41,9 @@ def bootstrap_admin(db: Session) -> User:
         db.add(user)
         db.flush()
     else:
-        user.password_hash = password_hash
+        if not verify_password(password, user.password_hash):
+            user.password_hash = hash_password(password)
+            user.session_version += 1
         user.display_name = user.display_name or username
         user.is_active = True
         user.is_superuser = True

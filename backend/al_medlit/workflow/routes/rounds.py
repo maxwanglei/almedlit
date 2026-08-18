@@ -8,7 +8,7 @@ from al_medlit.auth.models import User
 from al_medlit.core.database import get_db
 from al_medlit.core.exceptions import NotFoundError
 from al_medlit.project.models import Project
-from al_medlit.workflow import schemas, service
+from al_medlit.workflow import models, schemas, service
 
 from .shared import (
     _read,
@@ -31,7 +31,13 @@ def create_round(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _write(db, current_user, payload.project_id, module="annotate")
+    _write(
+        db,
+        current_user,
+        payload.project_id,
+        module="annotate",
+        related_user_ids=payload.annotator_user_ids,
+    )
     return service.create_annotation_round(db, payload, current_user)
 
 
@@ -222,7 +228,25 @@ def transition_round(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _write(db, current_user, project_id, module="annotate")
+    related_user_ids: list[int] = []
+    if payload.status == "open":
+        candidate = (
+            db.query(models.AnnotationRound.annotator_user_ids)
+            .filter(
+                models.AnnotationRound.id == round_id,
+                models.AnnotationRound.project_id == project_id,
+            )
+            .first()
+        )
+        if candidate is not None:
+            related_user_ids = list(candidate[0] or [])
+    _write(
+        db,
+        current_user,
+        project_id,
+        module="annotate",
+        related_user_ids=related_user_ids,
+    )
     return service.transition_annotation_round(db, project_id, round_id, payload.status)
 
 
