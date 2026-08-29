@@ -2,6 +2,20 @@ server {
     listen 80;
     server_name _;
 
+    # Browser security policy applies to both the SPA and proxied API
+    # responses. React uses style attributes for computed layout and label
+    # colors, so inline styles remain allowed; scripts and network requests do
+    # not receive an inline/eval or cross-origin exception.
+    add_header Content-Security-Policy "default-src 'self'; base-uri 'none'; object-src 'none'; frame-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; script-src-attr 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; media-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    # Browsers honor HSTS only when this response reaches them over HTTPS. TLS
+    # may terminate in front of this container; avoid preload/includeSubDomains
+    # because those require an operator-owned domain-wide commitment.
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()" always;
+
     # Authentication endpoints are intentionally throttled at the public edge.
     # The API container is bound to loopback by Compose, so remote clients cannot
     # bypass this limit while local host-side development can still reach port 8000.

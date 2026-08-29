@@ -173,6 +173,27 @@ def test_frontend_proxy_rate_limits_public_auth_and_api_is_loopback_only():
     assert "AL_MEDLIT_AUTH_RATE: ${AL_MEDLIT_AUTH_RATE:-10r/m}" in compose
 
 
+def test_frontend_proxy_sets_security_headers_for_all_responses():
+    nginx = (ROOT_DIR / "frontend" / "nginx" / "default.conf.template").read_text()
+
+    assert "add_header Content-Security-Policy" in nginx
+    assert "default-src 'self'" in nginx
+    assert "script-src 'self'" in nginx
+    assert "script-src-attr 'none'" in nginx
+    assert "object-src 'none'" in nginx
+    assert "frame-ancestors 'none'" in nginx
+    assert "connect-src 'self'" in nginx
+    assert "'unsafe-eval'" not in nginx
+    assert 'add_header X-Frame-Options "DENY" always;' in nginx
+    assert 'add_header X-Content-Type-Options "nosniff" always;' in nginx
+    assert (
+        'add_header Strict-Transport-Security "max-age=31536000" always;'
+        in nginx
+    )
+    assert 'add_header Referrer-Policy "no-referrer" always;' in nginx
+    assert "add_header Permissions-Policy" in nginx
+
+
 STRONG_DB_URL = "postgresql+psycopg2://al_medlit:8f3c1d9e2b7a4506@db:5432/al_medlit"
 
 
