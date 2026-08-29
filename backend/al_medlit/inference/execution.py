@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
-import zipfile
 from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from al_medlit.core.archive import write_deterministic_zip
+from al_medlit.core.archive import (
+    ArchiveExtractionError,
+    ArchiveExtractionLimits,
+    extract_zip_bounded,
+    write_deterministic_zip,
+)
 from al_medlit.core.config import settings
 from al_medlit.core.exceptions import ConflictError, ValidationError
 from al_medlit.core.storage import ObjectStorage
@@ -54,21 +58,17 @@ def _synthetic_logits(ordinal: int) -> tuple[float, float, float]:
     return (6.0, 0.0, 0.0)
 
 
-def _extract_checkpoint(archive_path: Path, destination: Path) -> Path:
-    destination.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(archive_path) as archive:
-        for member in archive.infolist():
-            path = (destination / member.filename).resolve()
-            if not path.is_relative_to(destination.resolve()):
-                raise ConflictError("Checkpoint archive contains an unsafe path")
-            if member.is_dir():
-                path.mkdir(parents=True, exist_ok=True)
-                continue
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with archive.open(member) as source, path.open("wb") as target:
-                while chunk := source.read(1024 * 1024):
-                    target.write(chunk)
-    return destination / "checkpoint"
+def _extract_checkpoint(
+    archive_path: Path,
+    destination: Path,
+    *,
+    limits: ArchiveExtractionLimits | None = None,
+) -> Path:
+    try:
+        extracted = extract_zip_bounded(archive_path, destination, limits=limits)
+    except ArchiveExtractionError as exc:
+        raise ConflictError(f"Unsafe checkpoint archive: {exc}") from exc
+    return extracted / "checkpoint"
 
 
 def _materialize_artifact_package(storage, package, destination: Path, *, label: str) -> Path:

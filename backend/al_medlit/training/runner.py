@@ -16,9 +16,14 @@ import random
 import shutil
 import sys
 import time
-import zipfile
 from collections import Counter
 from pathlib import Path
+
+from al_medlit.core.archive import (
+    ArchiveExtractionError,
+    ArchiveExtractionLimits,
+    extract_zip_bounded,
+)
 
 RUNNER_SCHEMA_VERSION = "al-medlit-job-v1"
 RESULT_SCHEMA_VERSION = "al-medlit-job-result-v1"
@@ -1272,21 +1277,16 @@ def _train_peft_checkpoint(
         raise RunnerError(str(exc)) from exc
 
 
-def _extract_zip(archive_path: Path, destination: Path) -> Path:
-    destination.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(archive_path) as archive:
-        for member in archive.infolist():
-            path = (destination / member.filename).resolve()
-            if not path.is_relative_to(destination.resolve()):
-                raise RunnerError("Checkpoint archive contains an unsafe path")
-            if member.is_dir():
-                path.mkdir(parents=True, exist_ok=True)
-                continue
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with archive.open(member) as source, path.open("wb") as target:
-                while chunk := source.read(1024 * 1024):
-                    target.write(chunk)
-    return destination
+def _extract_zip(
+    archive_path: Path,
+    destination: Path,
+    *,
+    limits: ArchiveExtractionLimits | None = None,
+) -> Path:
+    try:
+        return extract_zip_bounded(archive_path, destination, limits=limits)
+    except ArchiveExtractionError as exc:
+        raise RunnerError(f"Unsafe checkpoint archive: {exc}") from exc
 
 
 def _resolve_hf_model_root(source: Path, *, label: str) -> Path:
