@@ -40,7 +40,18 @@ from al_medlit.co_learning.error_guideline_learning import service as error_patt
 from al_medlit.co_learning.error_guideline_learning.models import ErrorPattern
 from al_medlit.core.exceptions import ForbiddenError, NotFoundError
 from al_medlit.corpus.models import Document
-from al_medlit.project.models import Project
+from al_medlit.evidence.models import EvidenceTarget, EvidenceTargetVersion
+from al_medlit.inference import service as inference_service
+from al_medlit.inference.models import InferenceRun
+from al_medlit.inference.schemas import InferenceRunCreate
+from al_medlit.lineage.models import AnnotationSet, CorpusSnapshot, LineageArtifact
+from al_medlit.project.models import Project, ProjectTask
+from al_medlit.training.models import (
+    ComputeProfile,
+    ModelCheckpoint,
+    TrainingExperiment,
+    TrainingJob,
+)
 from al_medlit.workflow.models import (
     AnnotationRound,
     Dataset,
@@ -281,6 +292,156 @@ def _new_error_pattern_scope(
     return project.id, [correction.id for correction in corrections]
 
 
+def _new_inference_scope(
+    db: Session,
+    prefix: str,
+) -> tuple[int, int, int, int, int, int]:
+    suffix = uuid4().hex
+    creator = _new_user(db, f"{prefix}-creator")
+    workspace = workspace_service.create_team_workspace(
+        db,
+        creator,
+        f"{prefix}-{suffix[:8]}",
+    )
+    project = Project(
+        workspace_id=workspace.id,
+        name=f"{prefix}-{suffix[:8]}",
+        annotation_schema={"labels": {}},
+        settings={},
+    )
+    db.add(project)
+    db.flush()
+
+    task = ProjectTask(
+        project_id=project.id,
+        annotation_type="evidence_block",
+        display_name="Evidence block",
+    )
+    db.add(task)
+    db.flush()
+    target = EvidenceTarget(
+        project_id=project.id,
+        task_id=task.id,
+        key=f"target-{suffix}",
+        name="Evidence target",
+        is_active=True,
+        created_by_user_id=creator.id,
+    )
+    db.add(target)
+    db.flush()
+    target_version = EvidenceTargetVersion(
+        target_id=target.id,
+        version_number=1,
+        text="Does the intervention improve the outcome?",
+        created_by_user_id=creator.id,
+    )
+    db.add(target_version)
+    db.flush()
+
+    corpus_artifact = LineageArtifact(
+        project_id=project.id,
+        artifact_type="corpus_snapshot",
+        content_hash="c" * 64,
+        storage_key=f"contention/{suffix}/corpus.json",
+        content_type="application/json",
+        size_bytes=1,
+        manifest={},
+        created_by_user_id=creator.id,
+    )
+    annotation_artifact = LineageArtifact(
+        project_id=project.id,
+        artifact_type="annotation_set",
+        content_hash="a" * 64,
+        storage_key=f"contention/{suffix}/annotations.json",
+        content_type="application/json",
+        size_bytes=1,
+        manifest={},
+        created_by_user_id=creator.id,
+    )
+    checkpoint_artifact = LineageArtifact(
+        project_id=project.id,
+        artifact_type="model_checkpoint",
+        content_hash="e" * 64,
+        storage_key=f"contention/{suffix}/checkpoint.zip",
+        content_type="application/zip",
+        size_bytes=1,
+        manifest={},
+        created_by_user_id=creator.id,
+    )
+    db.add_all([corpus_artifact, annotation_artifact, checkpoint_artifact])
+    db.flush()
+    snapshot = CorpusSnapshot(
+        project_id=project.id,
+        artifact_id=corpus_artifact.id,
+        name="Inference contention snapshot",
+        document_count=0,
+    )
+    db.add(snapshot)
+    db.flush()
+    annotation_set = AnnotationSet(
+        project_id=project.id,
+        artifact_id=annotation_artifact.id,
+        corpus_snapshot_id=snapshot.id,
+        name="Inference contention annotations",
+        target_version_ids=[target_version.id],
+        block_count=0,
+        reviewed_region_count=0,
+    )
+    profile = ComputeProfile(
+        project_id=project.id,
+        name="contention-local",
+        backend="local",
+        config={},
+        status="active",
+        created_by_user_id=creator.id,
+    )
+    db.add_all([annotation_set, profile])
+    db.flush()
+    experiment = TrainingExperiment(
+        project_id=project.id,
+        annotation_set_id=annotation_set.id,
+        compute_profile_id=profile.id,
+        name="Inference contention experiment",
+        model_type="evidence_block_sentence_tagger",
+        mode="conditioned",
+        target_version_ids=[target_version.id],
+        config={},
+        idempotency_key=f"experiment-{suffix}",
+        created_by_user_id=creator.id,
+    )
+    db.add(experiment)
+    db.flush()
+    job = TrainingJob(
+        experiment_id=experiment.id,
+        compute_profile_id=profile.id,
+        idempotency_key=f"job-{suffix}",
+        status="succeeded",
+    )
+    db.add(job)
+    db.flush()
+    checkpoint = ModelCheckpoint(
+        project_id=project.id,
+        training_job_id=job.id,
+        artifact_id=checkpoint_artifact.id,
+        model_type="evidence_block_sentence_tagger",
+        training_mode="conditioned",
+        trained_target_version_ids=[target_version.id],
+        max_context_tokens=4096,
+        manifest={"synthetic_mode": True},
+        readiness="ready",
+    )
+    db.add(checkpoint)
+    db.flush()
+    return (
+        project.id,
+        creator.id,
+        snapshot.id,
+        checkpoint.id,
+        profile.id,
+        target_version.id,
+    )
+
+
 def test_error_pattern_updates_preserve_concurrent_corrections(
     postgres_session_factory: sessionmaker[Session],
     monkeypatch,
@@ -383,6 +544,73 @@ def test_error_pattern_creation_converges_under_contention(
         assert len(patterns) == 1
         assert patterns[0].example_count == 2
         assert {item["correction_id"] for item in patterns[0].example_ids} == set(correction_ids)
+
+
+def test_inference_launch_returns_existing_run_under_contention(
+    postgres_session_factory: sessionmaker[Session],
+    monkeypatch,
+) -> None:
+    with postgres_session_factory() as db:
+        (
+            project_id,
+            creator_id,
+            snapshot_id,
+            checkpoint_id,
+            profile_id,
+            target_version_id,
+        ) = _new_inference_scope(db, "inference-launch-contention")
+        db.commit()
+
+    payload = InferenceRunCreate(
+        name="Contended inference run",
+        corpus_snapshot_id=snapshot_id,
+        checkpoint_id=checkpoint_id,
+        compute_profile_id=profile_id,
+        target_version_ids=[target_version_id],
+        idempotency_key=f"inference-{uuid4().hex}",
+    )
+
+    initial_misses = threading.Barrier(2)
+    original_find = inference_service._find_inference_run_by_idempotency_key
+
+    def synchronized_find(*args, **kwargs):
+        run = original_find(*args, **kwargs)
+        if run is None:
+            initial_misses.wait(timeout=_LOCK_TIMEOUT_SECONDS)
+        return run
+
+    monkeypatch.setattr(
+        inference_service,
+        "_find_inference_run_by_idempotency_key",
+        synchronized_find,
+    )
+
+    def launch(db: Session) -> int:
+        return inference_service.launch_inference_run(
+            db,
+            project_id=project_id,
+            data=payload,
+            actor_user_id=creator_id,
+        ).id
+
+    left_result, right_result = _run_concurrently(
+        postgres_session_factory,
+        launch,
+        launch,
+    )
+    assert left_result[0] == "ok"
+    assert right_result[0] == "ok"
+    assert left_result[1] == right_result[1]
+    with postgres_session_factory() as db:
+        runs = (
+            db.query(InferenceRun)
+            .filter(
+                InferenceRun.project_id == project_id,
+                InferenceRun.idempotency_key == payload.idempotency_key,
+            )
+            .all()
+        )
+        assert len(runs) == 1
 
 
 def test_invitee_deactivation_and_invite_acceptance_do_not_deadlock(

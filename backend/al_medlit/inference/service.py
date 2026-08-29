@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from io import BytesIO
 from uuid import uuid4
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from al_medlit.annotation.models import Annotation
@@ -51,6 +52,22 @@ OPEN_RUN_STATUSES = {"queued", "submitted", "running"}
 TERMINAL_RUN_STATUSES = {"succeeded", "failed", "cancelled"}
 
 
+def _find_inference_run_by_idempotency_key(
+    db: Session,
+    *,
+    project_id: int,
+    idempotency_key: str,
+) -> InferenceRun | None:
+    return (
+        db.query(InferenceRun)
+        .filter(
+            InferenceRun.project_id == project_id,
+            InferenceRun.idempotency_key == idempotency_key,
+        )
+        .one_or_none()
+    )
+
+
 def launch_inference_run(
     db: Session,
     *,
@@ -58,13 +75,10 @@ def launch_inference_run(
     data: InferenceRunCreate,
     actor_user_id: int | None,
 ) -> InferenceRun:
-    existing = (
-        db.query(InferenceRun)
-        .filter(
-            InferenceRun.project_id == project_id,
-            InferenceRun.idempotency_key == data.idempotency_key,
-        )
-        .first()
+    existing = _find_inference_run_by_idempotency_key(
+        db,
+        project_id=project_id,
+        idempotency_key=data.idempotency_key,
     )
     if existing is not None:
         return existing
@@ -132,7 +146,23 @@ def launch_inference_run(
         idempotency_key=data.idempotency_key,
         created_by_user_id=actor_user_id,
     )
-    db.add(run)
+    try:
+        with db.begin_nested():
+            db.add(run)
+            db.flush()
+    except IntegrityError:
+        # The project/idempotency-key constraint is the serialization point.
+        # Keep the surrounding request transaction usable and return the run
+        # committed by the concurrent winner. If no winner exists, the
+        # integrity error came from a different constraint and must surface.
+        existing = _find_inference_run_by_idempotency_key(
+            db,
+            project_id=project_id,
+            idempotency_key=data.idempotency_key,
+        )
+        if existing is not None:
+            return existing
+        raise
     db.commit()
     db.refresh(run)
     return run
