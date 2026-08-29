@@ -1,4 +1,6 @@
 import re
+import shutil
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -8,6 +10,7 @@ from fastapi.testclient import TestClient
 from al_medlit.core.config import (
     DEFAULT_BOOTSTRAP_ADMIN_PASSWORD,
     DEFAULT_JWT_SECRET,
+    Settings,
     settings,
 )
 from al_medlit.main import create_app
@@ -25,6 +28,11 @@ ALLOW_SELF_REGISTRATION_LINE = (
 DEPLOYMENT_PROFILE_LINE = "AL_MEDLIT_DEPLOYMENT_PROFILE: ${AL_MEDLIT_DEPLOYMENT_PROFILE:-laptop}"
 LOCAL_ATTEMPT_ROOT_LINE = "AL_MEDLIT_LOCAL_ATTEMPT_ROOT: /var/lib/al-medlit/attempts"
 LOCAL_ATTEMPT_VOLUME_LINE = "- attempt_data:/var/lib/al-medlit/attempts"
+SECURE_MINIO_LINE = 'AL_MEDLIT_STORAGE_SECURE: "true"'
+MINIO_CA_PATH_LINE = "AL_MEDLIT_STORAGE_CA_CERT_PATH: /etc/al-medlit/minio-certs/CAs/ca.crt"
+MINIO_CERT_MOUNT_LINE = (
+    "- ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro"
+)
 HEAVY_TRAINING_PACKAGES = {
     "bitsandbytes",
     "peft",
@@ -106,6 +114,9 @@ def test_compose_requires_jwt_secret_for_backend_python_services():
     assert compose.count(DEPLOYMENT_PROFILE_LINE) == python_service_count
     assert compose.count(LOCAL_ATTEMPT_ROOT_LINE) == python_service_count
     assert compose.count(LOCAL_ATTEMPT_VOLUME_LINE) == python_service_count
+    assert compose.count(SECURE_MINIO_LINE) == python_service_count
+    assert compose.count(MINIO_CA_PATH_LINE) == python_service_count
+    assert compose.count(MINIO_CERT_MOUNT_LINE) == python_service_count
     assert "attempt_data:" in compose
 
 
@@ -197,6 +208,19 @@ def test_deployment_guard_accepts_strong_secrets(monkeypatch):
     settings.validate_deployment_secrets()
 
 
+def test_runtime_guard_rejects_insecure_minio_transport(monkeypatch):
+    monkeypatch.setattr(settings, "storage_backend", "minio")
+    monkeypatch.setattr(settings, "storage_secure", False)
+    monkeypatch.setattr(settings, "jwt_secret", "configured-test-jwt-secret-32-byte-minimum")
+
+    with pytest.raises(RuntimeError, match="AL_MEDLIT_STORAGE_SECURE"):
+        settings.validate_runtime_secrets()
+
+
+def test_minio_transport_is_secure_by_default():
+    assert Settings.model_fields["storage_secure"].default is True
+
+
 def test_deployment_guard_skips_local_development_defaults(monkeypatch):
     """SQLite and local object storage are legitimately credential-free."""
     monkeypatch.setattr(settings, "storage_backend", "local")
@@ -215,6 +239,53 @@ def test_compose_publishes_datastores_on_loopback_only():
     # A bare host:container mapping publishes on every interface.
     for exposed in ('"5432:5432"', '"9000:9000"', '"9001:9001"'):
         assert exposed not in compose
+
+
+def test_compose_minio_transport_uses_generated_tls_certificates():
+    compose = (ROOT_DIR / "infra" / "docker-compose.yml").read_text()
+
+    assert "minio-cert-init:" in compose
+    assert 'command: server /data --console-address ":9001" --certs-dir /certs' in compose
+    assert "https://localhost:9000/minio/health/ready" in compose
+    assert "http://localhost:9000/minio/health/ready" not in compose
+    assert "condition: service_completed_successfully" in compose
+
+
+def test_minio_certificate_generator_is_idempotent_and_verifiable(tmp_path):
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        pytest.skip("OpenSSL is required by the Compose certificate-init image")
+    script = ROOT_DIR / "infra" / "scripts" / "generate-minio-certs.sh"
+    cert_dir = tmp_path / "certs"
+
+    subprocess.run(["/bin/sh", str(script), str(cert_dir)], check=True)
+    certificate = cert_dir / "public.crt"
+    ca_certificate = cert_dir / "CAs" / "ca.crt"
+    private_key = cert_dir / "private.key"
+    generated_marker = cert_dir / ".al-medlit-generated"
+    first_certificate = certificate.read_bytes()
+
+    subprocess.run(["/bin/sh", str(script), str(cert_dir)], check=True)
+    verification = subprocess.run(
+        [openssl, "verify", "-CAfile", str(ca_certificate), str(certificate)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    certificate_details = subprocess.run(
+        [openssl, "x509", "-in", str(certificate), "-noout", "-text"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert verification.returncode == 0, verification.stderr
+    assert certificate.read_bytes() == first_certificate
+    assert "DNS:minio" in certificate_details.stdout
+    assert "DNS:localhost" in certificate_details.stdout
+    assert "IP Address:127.0.0.1" in certificate_details.stdout
+    assert private_key.stat().st_mode & 0o777 == 0o600
+    assert generated_marker.stat().st_mode & 0o777 == 0o600
 
 
 def test_env_example_ships_no_working_datastore_passwords():

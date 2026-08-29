@@ -46,15 +46,24 @@ services:
   # ------------------------------------------------------------------
   # MinIO  (every profile — single canonical object store)
   # ------------------------------------------------------------------
+  minio-cert-init:
+    image: python:3.12-slim
+    restart: "no"
+    entrypoint: ["/bin/sh", "/scripts/generate-minio-certs.sh", "/certs"]
+    volumes:
+      - ./scripts/generate-minio-certs.sh:/scripts/generate-minio-certs.sh:ro
+      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/certs
+
   minio:
     image: minio/minio:latest
     restart: unless-stopped
-    command: server /data --console-address ":9001"
+    command: server /data --console-address ":9001" --certs-dir /certs
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-al_medlit}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD required}
     volumes:
       - minio_data:/data
+      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/certs:ro
     ports:
       # Loopback-only, for the same reason as the database: services use
       # minio:9000 over the Compose network. The console in particular must not
@@ -62,10 +71,13 @@ services:
       - "127.0.0.1:${AL_MEDLIT_MINIO_HOST_PORT:-9000}:9000"
       - "127.0.0.1:${AL_MEDLIT_MINIO_CONSOLE_HOST_PORT:-9001}:9001"   # MinIO console
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/ready"]
+      test: ["CMD", "curl", "-f", "--cacert", "/certs/CAs/ca.crt", "https://localhost:9000/minio/health/ready"]
       interval: 10s
       timeout: 5s
       retries: 5
+    depends_on:
+      minio-cert-init:
+        condition: service_completed_successfully
 
   # ------------------------------------------------------------------
   # Redis  (lab profile only — broker for Celery workers)
@@ -104,9 +116,12 @@ services:
       AL_MEDLIT_STORAGE_ENDPOINT: minio:9000
       AL_MEDLIT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-al_medlit}
       AL_MEDLIT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      AL_MEDLIT_STORAGE_SECURE: "true"
+      AL_MEDLIT_STORAGE_CA_CERT_PATH: /etc/al-medlit/minio-certs/CAs/ca.crt
       AL_MEDLIT_AUTO_MIGRATE_ON_STARTUP: ${AL_MEDLIT_AUTO_MIGRATE_ON_STARTUP:-true}
     volumes:
       - attempt_data:/var/lib/al-medlit/attempts
+      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro
     ports:
       # Keep direct API access available to host-side local development without
       # exposing a path that bypasses the frontend's authentication rate limit.
@@ -152,8 +167,11 @@ services:
       AL_MEDLIT_STORAGE_ENDPOINT: minio:9000
       AL_MEDLIT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-al_medlit}
       AL_MEDLIT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      AL_MEDLIT_STORAGE_SECURE: "true"
+      AL_MEDLIT_STORAGE_CA_CERT_PATH: /etc/al-medlit/minio-certs/CAs/ca.crt
     volumes:
       - attempt_data:/var/lib/al-medlit/attempts
+      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro
     depends_on:
       backend:
         condition: service_started
@@ -181,12 +199,15 @@ services:
       AL_MEDLIT_STORAGE_ENDPOINT: minio:9000
       AL_MEDLIT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-al_medlit}
       AL_MEDLIT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      AL_MEDLIT_STORAGE_SECURE: "true"
+      AL_MEDLIT_STORAGE_CA_CERT_PATH: /etc/al-medlit/minio-certs/CAs/ca.crt
       AL_MEDLIT_RUNTIME_PROFILE: classical-cpu
       AL_MEDLIT_WORKER_QUEUE: classical-cpu
       AL_MEDLIT_WORKER_IMAGE_DIGEST: ${AL_MEDLIT_CLASSICAL_CPU_IMAGE_DIGEST:-}
       AL_MEDLIT_RUNTIME_REPORT_PATH: /var/lib/al-medlit/attempts/runtime-reports/classical-cpu.json
     volumes:
       - attempt_data:/var/lib/al-medlit/attempts
+      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro
     depends_on:
       backend:
         condition: service_started
@@ -214,12 +235,15 @@ services:
       AL_MEDLIT_STORAGE_ENDPOINT: minio:9000
       AL_MEDLIT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-al_medlit}
       AL_MEDLIT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      AL_MEDLIT_STORAGE_SECURE: "true"
+      AL_MEDLIT_STORAGE_CA_CERT_PATH: /etc/al-medlit/minio-certs/CAs/ca.crt
       AL_MEDLIT_RUNTIME_PROFILE: torch-cpu
       AL_MEDLIT_WORKER_QUEUE: torch-cpu
       AL_MEDLIT_WORKER_IMAGE_DIGEST: ${AL_MEDLIT_TORCH_CPU_IMAGE_DIGEST:-}
       AL_MEDLIT_RUNTIME_REPORT_PATH: /var/lib/al-medlit/attempts/runtime-reports/torch-cpu.json
     volumes:
       - attempt_data:/var/lib/al-medlit/attempts
+      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro
     depends_on:
       backend:
         condition: service_started
@@ -247,12 +271,15 @@ services:
       AL_MEDLIT_STORAGE_ENDPOINT: minio:9000
       AL_MEDLIT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-al_medlit}
       AL_MEDLIT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      AL_MEDLIT_STORAGE_SECURE: "true"
+      AL_MEDLIT_STORAGE_CA_CERT_PATH: /etc/al-medlit/minio-certs/CAs/ca.crt
       AL_MEDLIT_RUNTIME_PROFILE: transformer-cpu
       AL_MEDLIT_WORKER_QUEUE: transformer-cpu
       AL_MEDLIT_WORKER_IMAGE_DIGEST: ${AL_MEDLIT_TRANSFORMER_CPU_IMAGE_DIGEST:-}
       AL_MEDLIT_RUNTIME_REPORT_PATH: /var/lib/al-medlit/attempts/runtime-reports/transformer-cpu.json
     volumes:
       - attempt_data:/var/lib/al-medlit/attempts
+      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro
     depends_on:
       backend:
         condition: service_started
@@ -281,12 +308,15 @@ services:
       AL_MEDLIT_STORAGE_ENDPOINT: minio:9000
       AL_MEDLIT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-al_medlit}
       AL_MEDLIT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      AL_MEDLIT_STORAGE_SECURE: "true"
+      AL_MEDLIT_STORAGE_CA_CERT_PATH: /etc/al-medlit/minio-certs/CAs/ca.crt
       AL_MEDLIT_RUNTIME_PROFILE: peft-accelerator
       AL_MEDLIT_WORKER_QUEUE: peft-accelerator
       AL_MEDLIT_WORKER_IMAGE_DIGEST: ${AL_MEDLIT_PEFT_ACCELERATOR_IMAGE_DIGEST:-}
       AL_MEDLIT_RUNTIME_REPORT_PATH: /var/lib/al-medlit/attempts/runtime-reports/peft-accelerator.json
     volumes:
       - attempt_data:/var/lib/al-medlit/attempts
+      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro
     depends_on:
       backend:
         condition: service_started
@@ -315,12 +345,15 @@ services:
       AL_MEDLIT_STORAGE_ENDPOINT: minio:9000
       AL_MEDLIT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-al_medlit}
       AL_MEDLIT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      AL_MEDLIT_STORAGE_SECURE: "true"
+      AL_MEDLIT_STORAGE_CA_CERT_PATH: /etc/al-medlit/minio-certs/CAs/ca.crt
       AL_MEDLIT_RUNTIME_PROFILE: qlora-cuda
       AL_MEDLIT_WORKER_QUEUE: qlora-cuda
       AL_MEDLIT_WORKER_IMAGE_DIGEST: ${AL_MEDLIT_QLORA_CUDA_IMAGE_DIGEST:-}
       AL_MEDLIT_RUNTIME_REPORT_PATH: /var/lib/al-medlit/attempts/runtime-reports/qlora-cuda.json
     volumes:
       - attempt_data:/var/lib/al-medlit/attempts
+      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro
     depends_on:
       backend:
         condition: service_started
@@ -347,8 +380,11 @@ services:
       AL_MEDLIT_STORAGE_ENDPOINT: minio:9000
       AL_MEDLIT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-al_medlit}
       AL_MEDLIT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      AL_MEDLIT_STORAGE_SECURE: "true"
+      AL_MEDLIT_STORAGE_CA_CERT_PATH: /etc/al-medlit/minio-certs/CAs/ca.crt
     volumes:
       - attempt_data:/var/lib/al-medlit/attempts
+      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro
     depends_on:
       backend:
         condition: service_started

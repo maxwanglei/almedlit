@@ -114,6 +114,51 @@ def test_minio_sse_s3_is_applied_to_each_upload(monkeypatch):
     assert type(storage.client.put_kwargs["sse"]).__name__ == "SseS3"
 
 
+def test_minio_rejects_insecure_http_transport():
+    with pytest.raises(ObjectStorageError, match="must use TLS"):
+        MinioObjectStorage(
+            endpoint="storage.test",
+            access_key="access",
+            secret_key="secret",
+            bucket="models",
+            secure=False,
+        )
+
+
+def test_minio_uses_configured_ca_certificate(monkeypatch, tmp_path):
+    captured = {}
+    ca_certificate = tmp_path / "ca.crt"
+    ca_certificate.write_text("test CA")
+
+    class FakePoolManager:
+        def __init__(self, **kwargs):
+            captured["pool_kwargs"] = kwargs
+
+    class FakeMinio:
+        def __init__(self, *_args, **kwargs):
+            captured["minio_kwargs"] = kwargs
+
+        def bucket_exists(self, _bucket):
+            return True
+
+    monkeypatch.setattr("urllib3.PoolManager", FakePoolManager)
+    monkeypatch.setattr("minio.Minio", FakeMinio)
+    MinioObjectStorage(
+        endpoint="storage.test",
+        access_key="access",
+        secret_key="secret",
+        bucket="models",
+        secure=True,
+        ca_cert_path=ca_certificate,
+    )
+
+    assert captured["pool_kwargs"] == {
+        "cert_reqs": "CERT_REQUIRED",
+        "ca_certs": str(ca_certificate),
+    }
+    assert captured["minio_kwargs"]["http_client"].__class__ is FakePoolManager
+
+
 def test_minio_sse_kms_requires_and_applies_the_configured_key(monkeypatch):
     class FakeMinio:
         def __init__(self, *_args, **_kwargs):

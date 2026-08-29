@@ -39,6 +39,7 @@ htmlcov/
 **/osc_ascend
 **/*.pem
 **/*.key
+infra/certs/
 
 # Database files
 *.db

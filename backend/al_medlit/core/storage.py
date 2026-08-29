@@ -226,10 +226,28 @@ class MinioObjectStorage:
         secret_key: str,
         bucket: str,
         secure: bool,
+        ca_cert_path: str | Path | None = None,
         encryption_mode: str = "none",
         kms_key_id: str | None = None,
     ) -> None:
         from minio import Minio
+
+        if not secure:
+            raise ObjectStorageError(
+                "MinIO connections must use TLS; insecure HTTP transport is not supported"
+            )
+        normalized_ca_path = str(ca_cert_path or "").strip()
+        http_client = None
+        if normalized_ca_path:
+            ca_path = Path(normalized_ca_path)
+            if not ca_path.is_file():
+                raise ObjectStorageError(f"MinIO CA certificate not found: {ca_path}")
+            import urllib3
+
+            http_client = urllib3.PoolManager(
+                cert_reqs="CERT_REQUIRED",
+                ca_certs=str(ca_path),
+            )
 
         normalized_mode = encryption_mode.strip().lower()
         if normalized_mode not in {"none", "sse-s3", "sse-kms"}:
@@ -251,6 +269,7 @@ class MinioObjectStorage:
             access_key=access_key,
             secret_key=secret_key,
             secure=secure,
+            http_client=http_client,
         )
         if not self.client.bucket_exists(bucket):
             self.client.make_bucket(bucket)
@@ -428,6 +447,7 @@ def build_object_storage() -> ObjectStorage:
             secret_key=settings.storage_secret_key,
             bucket=settings.storage_bucket,
             secure=settings.storage_secure,
+            ca_cert_path=settings.storage_ca_cert_path,
             encryption_mode=settings.storage_encryption_mode,
             kms_key_id=settings.storage_kms_key_id,
         )

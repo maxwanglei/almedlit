@@ -65,7 +65,10 @@ class Settings(BaseSettings):
     storage_access_key: str = "al_medlit"
     storage_secret_key: str = "al_medlit"
     storage_bucket: str = "al-medlit"
-    storage_secure: bool = False
+    storage_secure: bool = True
+    # Optional private CA used to verify an internal MinIO TLS certificate.
+    # Leave blank for endpoints whose certificates chain to the system roots.
+    storage_ca_cert_path: str = ""
     # Object storage backend: "minio" (canonical) or "local" (tests/dev).
     storage_backend: Literal["minio", "local"] = "minio"
     storage_local_dir: str = "./object_store"
@@ -96,6 +99,14 @@ class Settings(BaseSettings):
         if len(self.jwt_secret.encode("utf-8")) < 32:
             raise RuntimeError("AL_MEDLIT_JWT_SECRET must be at least 32 UTF-8 bytes")
         self.validate_bootstrap_admin_password()
+        self.validate_storage_transport()
+
+    def validate_storage_transport(self) -> None:
+        if self.storage_backend == "minio" and not self.storage_secure:
+            raise RuntimeError(
+                "AL_MEDLIT_STORAGE_SECURE must be true for the MinIO backend; "
+                "unencrypted object-storage transport is not supported"
+            )
 
     def validate_bootstrap_admin_password(self, *, require_configured: bool = False) -> None:
         password = self.bootstrap_admin_password.strip()
@@ -127,6 +138,8 @@ class Settings(BaseSettings):
         the local development defaults (SQLite, local object storage) are
         legitimately weak, and only a networked deployment needs this gate.
         """
+
+        self.validate_storage_transport()
 
         if self.storage_backend == "minio":
             secret = self.storage_secret_key.strip()

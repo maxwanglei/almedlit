@@ -11,8 +11,12 @@ POSTGRES_HOST ?= localhost
 POSTGRES_PORT ?= 5432
 POSTGRES_DB ?= al_medlit
 AL_MEDLIT_JWT_SECRET ?=
+AL_MEDLIT_STORAGE_SECURE ?= true
+AL_MEDLIT_STORAGE_CA_CERT_PATH ?= $(abspath $(ROOT_DIR)/infra/certs/minio/CAs/ca.crt)
 export AL_MEDLIT_DATABASE_URL ?= postgresql+psycopg2://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)
 export AL_MEDLIT_JWT_SECRET
+export AL_MEDLIT_STORAGE_SECURE
+export AL_MEDLIT_STORAGE_CA_CERT_PATH
 
 .PHONY: help sync install install-dev dev migrate test lint format seed clean
 
