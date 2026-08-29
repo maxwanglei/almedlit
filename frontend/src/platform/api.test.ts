@@ -5,12 +5,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createDatasetWithVersion,
   createExecutionEnvironment,
+  createFeedbackRun,
   createRound,
   createStoragePolicy,
   createTaskWithVersion,
   createTrainingOnlyProject,
   createTrainingDataset,
   getRoundWorkContext,
+  getFeedbackRun,
   launchTrainingRun,
   listWorkspaceRoundWorkContexts,
   listWorkspaceModels,
@@ -18,6 +20,7 @@ import {
   listWorkspaceTrainingRuns,
   loadPlatformProject,
   loadRoundWork,
+  materializeFeedbackRun,
   verifyExecutionEnvironment,
 } from "./api";
 import {
@@ -416,6 +419,60 @@ describe("platform API orchestration", () => {
     expect(paths).not.toContain("/rounds/71/items?project_id=7");
   });
 
+  it("loads scoring resources on rounds only when learning and models are enabled", async () => {
+    mocks.request.mockImplementation(async (path: string) => {
+      if (path === "/projects/7/modules") {
+        return {
+          project_id: 7,
+          selected: ["data", "annotate", "learning", "models"],
+          effective: ["data", "annotate", "learning", "models"],
+          workspace_capabilities: ["annotation", "active_learning", "training"],
+        };
+      }
+      return [];
+    });
+
+    await loadPlatformProject(7, "rounds", 5);
+    const paths = mocks.request.mock.calls.map(([path]) => String(path));
+
+    expect(paths).toContain("/cycles?project_id=7");
+    expect(paths).toContain("/feedback-runs?project_id=7");
+    expect(paths).toContain("/feedback-runs/sets?project_id=7");
+    expect(paths).toContain("/datasets/split-maps?project_id=7");
+    expect(paths).toContain("/models?project_id=7");
+  });
+
+  it("creates, materializes, and polls a project-scoped feedback run", async () => {
+    mocks.request
+      .mockResolvedValueOnce({ id: 91, status: "planned" })
+      .mockResolvedValueOnce({ id: 91, status: "queued" })
+      .mockResolvedValueOnce({ id: 91, status: "running" });
+    const draft = {
+      datasetVersionId: 22,
+      taskVersionId: 12,
+      cycleId: 5,
+      modelVersionId: 81,
+    };
+
+    const created = await createFeedbackRun(7, draft);
+    await materializeFeedbackRun(7, created.id);
+    await getFeedbackRun(7, created.id);
+
+    expect(mocks.request.mock.calls.map(([path]) => path)).toEqual([
+      "/feedback-runs",
+      "/projects/7/feedback-runs/91/materialize",
+      "/projects/7/feedback-runs/91",
+    ]);
+    expect(bodyOf(mocks.request.mock.calls[0])).toMatchObject({
+      project_id: 7,
+      dataset_version_id: 22,
+      task_version_id: 12,
+      cycle_id: 5,
+      producer_type: "registered_model",
+      model_version_id: 81,
+    });
+  });
+
   it("uses sanitized round context endpoints for My Work navigation", async () => {
     mocks.request
       .mockResolvedValueOnce({ round: { id: 71 } })
@@ -787,7 +844,6 @@ describe("platform API orchestration", () => {
 
   it("materializes targeted selection before creating an annotation round", async () => {
     mocks.request.mockImplementation(async (path: string) => {
-      if (path.startsWith("/datasets/split-maps?")) return [{ id: 41 }];
       if (path === "/selection-runs") return { id: 61 };
       if (path === "/projects/7/selection-runs/61/materialize") return { id: 62 };
       if (path === "/rounds") return { id: 71 };
@@ -802,6 +858,7 @@ describe("platform API orchestration", () => {
       datasetVersionId: 22,
       taskVersionId: 12,
       cycleId: 5,
+      splitMapId: 41,
       guidelineRevisionId: 9,
       feedbackSetVersionId: 73,
       assistancePolicy: "reveal_after_first_pass",
@@ -814,19 +871,18 @@ describe("platform API orchestration", () => {
     });
 
     expect(mocks.request.mock.calls.map(([path]) => path)).toEqual([
-      "/datasets/split-maps?project_id=7&dataset_version_id=22",
       "/selection-runs",
       "/projects/7/selection-runs/61/materialize",
       "/rounds",
       "/rounds/71/transition?project_id=7",
     ]);
-    expect(bodyOf(mocks.request.mock.calls[1])).toMatchObject({
+    expect(bodyOf(mocks.request.mock.calls[0])).toMatchObject({
       split_map_id: 41,
       feedback_set_version_id: 73,
       strategy: "random",
       parameters: { limit: 25 },
     });
-    expect(bodyOf(mocks.request.mock.calls[3])).toMatchObject({
+    expect(bodyOf(mocks.request.mock.calls[2])).toMatchObject({
       selection_set_version_id: 62,
       feedback_set_version_id: 73,
       guideline_revision_id: 9,
@@ -834,7 +890,7 @@ describe("platform API orchestration", () => {
       annotator_user_ids: [7],
       open_to_all_annotators: false,
     });
-    expect(bodyOf(mocks.request.mock.calls[4])).toEqual({ status: "open" });
+    expect(bodyOf(mocks.request.mock.calls[3])).toEqual({ status: "open" });
   });
 
   it("validates configuration and pins recipe, model, runtime, and storage at launch", async () => {

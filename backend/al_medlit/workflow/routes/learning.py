@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 from al_medlit.auth.dependencies import get_current_user
 from al_medlit.auth.models import User
 from al_medlit.core.database import get_db
+from al_medlit.training.tasks import enqueue_feedback_scoring
 from al_medlit.workflow import schemas, service
 
 from .shared import (
@@ -48,7 +49,7 @@ def list_cycles(
         db,
         current_user,
         project_id,
-        min_role="manager",
+        min_role="trainer",
         module=("learning", "activity"),
     )
     return service.list_learning_cycles(db, project_id)
@@ -185,10 +186,68 @@ def list_feedback_runs(
         db,
         current_user,
         project_id,
-        min_role="manager",
+        min_role="trainer",
         module=("learning", "annotate"),
     )
     return service.list_feedback_runs(db, project_id)
+
+
+@router.get(
+    "/projects/{project_id}/feedback-runs/{feedback_run_id}",
+    response_model=schemas.FeedbackRunRead,
+)
+def get_feedback_run(
+    project_id: int,
+    feedback_run_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _read(
+        db,
+        current_user,
+        project_id,
+        min_role="trainer",
+        module="learning",
+    )
+    return service.get_feedback_run(
+        db,
+        project_id=project_id,
+        feedback_run_id=feedback_run_id,
+    )
+
+
+@router.post(
+    "/projects/{project_id}/feedback-runs/{feedback_run_id}/materialize",
+    response_model=schemas.FeedbackRunRead,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def materialize_feedback_run(
+    project_id: int,
+    feedback_run_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _write(
+        db,
+        current_user,
+        project_id,
+        min_role="trainer",
+        module="learning",
+    )
+    dispatch = service.request_feedback_run_materialization(
+        db,
+        project_id=project_id,
+        feedback_run_id=feedback_run_id,
+        actor=current_user,
+    )
+    if dispatch.should_enqueue:
+        enqueue_feedback_scoring(dispatch.run.id)
+        db.expire_all()
+    return service.get_feedback_run(
+        db,
+        project_id=project_id,
+        feedback_run_id=feedback_run_id,
+    )
 
 
 @router.post(
@@ -222,7 +281,7 @@ def list_feedback_sets(
         db,
         current_user,
         project_id,
-        min_role="manager",
+        min_role="trainer",
         module=("learning", "annotate"),
     )
     return service.list_feedback_sets(db, project_id, feedback_run_id)

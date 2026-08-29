@@ -23,6 +23,7 @@ from al_medlit.model_artifacts.schemas import ArtifactPackageCreate
 from al_medlit.project.models import Project
 from al_medlit.training.runtime_profiles import RUNTIME_PROFILES, RuntimeReadinessReport
 from al_medlit.workflow import models, schemas, service
+from al_medlit.workflow.routes import learning as learning_routes
 from al_medlit.workspace import capability_service
 from al_medlit.workspace import service as workspace_service
 
@@ -831,12 +832,12 @@ def test_round_work_items_are_assignment_scoped_and_do_not_expose_dataset_pool(
         "project_id",
         "annotation_round_id",
         "dataset_item_id",
-    }
-    assert not {
         "selection_rank",
         "selection_score",
-        "selection_probability",
         "selection_reason",
+    }
+    assert not {
+        "selection_probability",
         "metadata",
     }.intersection(round_item_payload)
     assert [
@@ -2408,6 +2409,10 @@ def test_project_collections_and_planned_modules_are_not_annotator_enumerable(
         ("/api/tasks", {"project_id": project_id}),
         ("/api/tasks/versions", {"project_id": project_id}),
         ("/api/datasets", {"project_id": project_id}),
+        ("/api/cycles", {"project_id": project_id}),
+        ("/api/feedback-runs", {"project_id": project_id}),
+        ("/api/feedback-runs/sets", {"project_id": project_id}),
+        ("/api/rounds", {"project_id": project_id}),
         (
             "/api/datasets/versions",
             {
@@ -2417,11 +2422,7 @@ def test_project_collections_and_planned_modules_are_not_annotator_enumerable(
         ),
     ]
     manager_reads = [
-        ("/api/rounds", {"project_id": project_id}),
-        ("/api/cycles", {"project_id": project_id}),
         ("/api/selection-runs", {"project_id": project_id}),
-        ("/api/feedback-runs", {"project_id": project_id}),
-        ("/api/feedback-runs/sets", {"project_id": project_id}),
         ("/api/feedback-runs/events", {"project_id": project_id}),
         ("/api/feedback-runs/review-cases", {"project_id": project_id}),
         ("/api/workflow-guidelines", {"project_id": project_id}),
@@ -2459,6 +2460,55 @@ def test_project_collections_and_planned_modules_are_not_annotator_enumerable(
             headers=_headers(workflow_scope.trainer),
         )
         assert response.status_code == 403, (path, response.text)
+
+
+def test_feedback_materialization_requires_trainer_and_returns_accepted(
+    client,
+    db,
+    workflow_scope,
+    workflow_data,
+    monkeypatch,
+):
+    run = models.FeedbackRun(
+        project_id=workflow_scope.project.id,
+        dataset_version_id=workflow_data.dataset_version.id,
+        task_version_id=workflow_data.task_version.id,
+        producer_type="rule",
+        configuration={},
+        data_egress_policy={},
+        status="queued",
+        created_by_user_id=workflow_scope.trainer.id,
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    dispatched: list[int] = []
+    monkeypatch.setattr(
+        learning_routes.service,
+        "request_feedback_run_materialization",
+        lambda *_args, **_kwargs: SimpleNamespace(run=run, should_enqueue=True),
+    )
+    monkeypatch.setattr(
+        learning_routes.service,
+        "get_feedback_run",
+        lambda *_args, **_kwargs: run,
+    )
+    monkeypatch.setattr(
+        learning_routes,
+        "enqueue_feedback_scoring",
+        dispatched.append,
+    )
+    path = (
+        f"/api/projects/{workflow_scope.project.id}/feedback-runs/{run.id}/materialize"
+    )
+
+    denied = client.post(path, headers=_headers(workflow_scope.annotator))
+    accepted = client.post(path, headers=_headers(workflow_scope.trainer))
+
+    assert denied.status_code == 403
+    assert accepted.status_code == 202, accepted.text
+    assert accepted.json()["status"] == "queued"
+    assert dispatched == [run.id]
 
 
 def test_server_side_training_composition_is_grouped_deterministic_and_compact(

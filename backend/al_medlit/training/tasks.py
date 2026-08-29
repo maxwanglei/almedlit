@@ -19,6 +19,7 @@ from al_medlit.training.runtime_profiles import runtime_queue_for_environment_cl
 
 logger = logging.getLogger(__name__)
 TRAINING_HEARTBEAT_INTERVAL_SECONDS = 30.0
+FEEDBACK_SCORING_HEARTBEAT_INTERVAL_SECONDS = 30.0
 
 
 def _training_heartbeat_loop(training_run_id: int, stop: Event) -> None:
@@ -46,6 +47,43 @@ def _training_heartbeat(training_run_id: int) -> Iterator[None]:
         target=_training_heartbeat_loop,
         args=(training_run_id, stop),
         name=f"training-heartbeat-{training_run_id}",
+        daemon=True,
+    )
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+
+
+def _feedback_scoring_heartbeat_loop(feedback_run_id: int, stop: Event) -> None:
+    from al_medlit.workflow.services.feedback_scoring import (
+        heartbeat_feedback_scoring_run,
+    )
+
+    while not stop.wait(FEEDBACK_SCORING_HEARTBEAT_INTERVAL_SECONDS):
+        db = SessionLocal()
+        try:
+            if not heartbeat_feedback_scoring_run(db, feedback_run_id):
+                return
+        except Exception:
+            db.rollback()
+            logger.exception(
+                "Could not renew the feedback-scoring heartbeat for run %s",
+                feedback_run_id,
+            )
+        finally:
+            db.close()
+
+
+@contextmanager
+def _feedback_scoring_heartbeat(feedback_run_id: int) -> Iterator[None]:
+    stop = Event()
+    thread = Thread(
+        target=_feedback_scoring_heartbeat_loop,
+        args=(feedback_run_id, stop),
+        name=f"feedback-scoring-heartbeat-{feedback_run_id}",
         daemon=True,
     )
     thread.start()
@@ -90,6 +128,45 @@ def reconcile_training_runs_task() -> list[int]:
         return reconcile_stale_training_runs(db)
     finally:
         db.close()
+
+
+@app.task(
+    name="al_medlit.workflow.execute_feedback_scoring",
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
+def execute_feedback_scoring_task(feedback_run_id: int) -> int:
+    from al_medlit.workflow.services.feedback_scoring import (
+        execute_feedback_scoring_run,
+    )
+
+    db = SessionLocal()
+    try:
+        with _feedback_scoring_heartbeat(feedback_run_id):
+            run = execute_feedback_scoring_run(
+                db,
+                get_object_storage(),
+                feedback_run_id=feedback_run_id,
+            )
+        return run.id
+    finally:
+        db.close()
+
+
+@app.task(name="al_medlit.workflow.reconcile_feedback_scoring")
+def reconcile_feedback_scoring_task() -> dict[str, list[int]]:
+    from al_medlit.workflow.services.feedback_scoring import (
+        reconcile_feedback_scoring_runs,
+    )
+
+    db = SessionLocal()
+    try:
+        result = reconcile_feedback_scoring_runs(db)
+    finally:
+        db.close()
+    for feedback_run_id in result["redispatch_ids"]:
+        enqueue_feedback_scoring(feedback_run_id)
+    return result
 
 
 @app.task(
@@ -208,6 +285,13 @@ def enqueue_training_run(
     except KeyError as exc:
         raise ValidationError(str(exc)) from exc
     execute_training_run_task.apply_async(args=(training_run_id,), queue=queue)
+
+
+def enqueue_feedback_scoring(feedback_run_id: int) -> None:
+    execute_feedback_scoring_task.apply_async(
+        args=(feedback_run_id,),
+        queue=runtime_queue_for_environment_class("classical-cpu"),
+    )
 
 
 def enqueue_artifact_garbage_collection(workspace_id: int) -> None:

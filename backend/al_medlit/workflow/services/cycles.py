@@ -1,6 +1,7 @@
 """Domain operations for the canonical learning workflow."""
 
 import re
+from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
@@ -15,13 +16,13 @@ from .common import (
     _canonical_hash,
     _commit,
     _next_sequence,
-    _next_version,
     _optional_package,
     _project,
     _require_actor_role,
     _scoped,
     _validate_task_output,
 )
+from .feedback_sets import persist_feedback_set_version
 
 MAX_DATASET_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_DATASET_UPLOAD_ITEMS = 100_000
@@ -311,6 +312,17 @@ def create_feedback_set(
     db: Session, data: schemas.FeedbackSetCreate, actor: User
 ) -> models.FeedbackSetVersion:
     run = _scoped(db, models.FeedbackRun, data.feedback_run_id, data.project_id, "Feedback run")
+    run = (
+        db.query(models.FeedbackRun)
+        .filter(models.FeedbackRun.id == run.id)
+        .populate_existing()
+        .with_for_update()
+        .one()
+    )
+    if run.status in {"queued", "running"}:
+        raise ConflictError("A queued or running feedback run cannot accept manual results")
+    if "server_scoring" in (run.configuration or {}):
+        raise ConflictError("A server-materialized feedback run cannot be rewritten manually")
     task_version = _scoped(
         db,
         models.TaskVersion,
@@ -318,7 +330,6 @@ def create_feedback_set(
         data.project_id,
         "Task version",
     )
-    db.query(models.FeedbackRun).filter(models.FeedbackRun.id == run.id).with_for_update().one()
     _optional_package(db, data.project_id, data.artifact_package_id)
     seen: set[tuple[int, str]] = set()
     candidate_payloads = []
@@ -349,34 +360,21 @@ def create_feedback_set(
         "output_schema": data.output_schema,
         "candidates": candidate_payloads,
     }
-    feedback_set = models.FeedbackSetVersion(
-        project_id=data.project_id,
-        feedback_run_id=run.id,
-        dataset_version_id=run.dataset_version_id,
-        task_version_id=run.task_version_id,
-        version_number=_next_version(
-            db,
-            models.FeedbackSetVersion,
-            models.FeedbackSetVersion.feedback_run_id,
-            run.id,
-        ),
+    feedback_set = persist_feedback_set_version(
+        db,
+        run=run,
         output_schema=data.output_schema,
+        candidate_payloads=candidate_payloads,
         candidate_count=len(candidate_payloads),
         content_hash=_canonical_hash(content),
         artifact_package_id=data.artifact_package_id,
         created_by_user_id=actor.id,
     )
-    db.add(feedback_set)
-    db.flush()
-    for payload in candidate_payloads:
-        db.add(
-            models.FeedbackCandidate(
-                project_id=data.project_id,
-                feedback_set_version_id=feedback_set.id,
-                **payload,
-            )
-        )
     run.status = "completed"
+    run.output_feedback_set_version_id = feedback_set.id
+    run.completed_at = datetime.now(UTC)
+    run.failure_code = None
+    run.failure_reason = None
     _commit(db, "Could not finalize the feedback set")
     db.refresh(feedback_set)
     return feedback_set

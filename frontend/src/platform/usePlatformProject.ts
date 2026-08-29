@@ -9,9 +9,11 @@ import {
   createTrainingDataset,
   launchTrainingRun,
   loadPlatformProject,
+  scoreFeedbackRun,
   updateProjectModules,
   type CycleDraft,
   type DatasetDraft,
+  type FeedbackScoringDraft,
   type GuidelineDraft,
   type PlatformLoadScope,
   type RoundDraft,
@@ -40,6 +42,7 @@ export function usePlatformProject(
   addDataset: (draft: DatasetDraft) => Promise<void>;
   addCycle: (draft: CycleDraft) => Promise<void>;
   addRound: (draft: RoundDraft) => Promise<void>;
+  scoreFeedback: (draft: FeedbackScoringDraft) => Promise<void>;
   addGuideline: (draft: GuidelineDraft) => Promise<void>;
   addTask: (draft: TaskDraft) => Promise<void>;
   prepareTrainingData: (draft: TrainingDataDraft) => Promise<void>;
@@ -180,6 +183,7 @@ export function usePlatformProject(
     addDataset: (draft) => mutate((id) => createDatasetWithVersion(id, draft)),
     addCycle: (draft) => mutate((id) => createCycle(id, draft)),
     addRound: (draft) => mutate((id) => createRound(id, draft)),
+    scoreFeedback: (draft) => mutate((id) => scoreFeedbackRun(id, draft)),
     addGuideline: (draft) => mutate((id) => createGuidelineWithRevision(id, draft)),
     addTask: (draft) => mutate((id) => createTaskWithVersion(id, draft)),
     prepareTrainingData: (draft) => mutate((id) => createTrainingDataset(id, draft)),

@@ -1109,6 +1109,27 @@
   color: var(--muted);
 }
 
+.platform-workbench-progress .platform-workbench-priority {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.platform-strategy-badge {
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  color: var(--status-info-text);
+  background: var(--status-info-surface);
+  border: 1px solid var(--status-info-border);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 650;
+}
+
 .platform-workbench-layout {
   display: grid;
   grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
@@ -1967,6 +1988,13 @@
   border-radius: var(--radius-sm);
 }
 
+.platform-dialog-form label > small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
 .platform-dialog-form textarea {
   resize: vertical;
   line-height: 1.45;
@@ -2041,6 +2069,21 @@
   color: var(--muted);
   font-size: 12px;
   line-height: 1.5;
+}
+
+.platform-scoring-notice {
+  min-height: var(--control-height);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  color: var(--status-warning-text);
+  background: var(--status-warning-surface);
+  border-left: 3px solid var(--status-warning-border);
+  font-size: 13px;
 }
 
 .platform-fieldset {

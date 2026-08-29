@@ -1594,6 +1594,7 @@ function Application(): React.ReactElement {
             },
           });
         }}
+        onRefresh={platform.reload}
         dialog={platformDialog}
         onDialogChange={setPlatformDialog}
         onProjectSelect={(projectId, nextTab) => {
@@ -1617,6 +1618,7 @@ function Application(): React.ReactElement {
                 onCreateDataset={platform.addDataset}
                 onCreateCycle={platform.addCycle}
                 onCreateRound={platform.addRound}
+                onScoreFeedback={platform.scoreFeedback}
                 onCreateGuideline={platform.addGuideline}
                 onCreateTask={platform.addTask}
                 onPrepareTrainingData={platform.prepareTrainingData}

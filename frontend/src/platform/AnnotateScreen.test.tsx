@@ -144,5 +144,29 @@ describe("AnnotateScreen", () => {
 
     expect(screen.queryByRole("button", { name: "New round" })).toBeNull();
     expect(screen.getByRole("button", { name: "Annotate" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Model scoring" })).toBeNull();
+  });
+
+  it("shows model scoring only when the caller has the scoring capability", () => {
+    const onCreateScore = vi.fn();
+    render(
+      <AnnotateScreen
+        view="rounds"
+        data={projectData()}
+        onCreateRound={vi.fn()}
+        onCreateTask={vi.fn()}
+        onOpenRound={vi.fn()}
+        currentUserId={7}
+        canManage
+        canScore
+        projectId={1}
+        onCreateScore={onCreateScore}
+        onRefresh={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "Model scoring" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Score with model" }));
+    expect(onCreateScore).toHaveBeenCalledTimes(1);
   });
 });

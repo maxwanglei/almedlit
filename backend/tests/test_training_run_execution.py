@@ -1,13 +1,14 @@
 """Execution coverage for canonical immutable training runs."""
 
 import hashlib
+import importlib.util
 import io
 import json
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -25,6 +26,10 @@ from al_medlit.model_artifacts.models import (
 )
 from al_medlit.model_artifacts.schemas import ArtifactPackageCreate
 from al_medlit.project.models import Project
+from al_medlit.training.artifact_loading import (
+    load_safe_skops_model,
+    stage_artifact_package,
+)
 from al_medlit.training.evaluators.contracts import (
     EvaluationInput,
     EvaluationOutput,
@@ -47,7 +52,15 @@ from al_medlit.training.trainers.contracts import (
     TrainingPlan,
 )
 from al_medlit.workflow import models, schemas, service
+from al_medlit.workflow.routes import learning as learning_router
 from al_medlit.workflow.routes import training as workflow_router
+from al_medlit.workflow.services.feedback_scoring import (
+    _prediction_output,
+    execute_feedback_scoring_run,
+    heartbeat_feedback_scoring_run,
+    reconcile_feedback_scoring_runs,
+    request_feedback_run_materialization,
+)
 from al_medlit.workspace import capability_service
 from al_medlit.workspace import service as workspace_service
 
@@ -712,6 +725,111 @@ def test_sklearn_holdout_evaluator_computes_aggregate_classification_metrics(
     assert "predictions" not in result.report
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("sklearn") is None
+    or importlib.util.find_spec("skops") is None,
+    reason="classical-cpu optional dependencies are not installed",
+)
+def test_real_skops_checkpoint_stages_and_loads_from_memory_storage(db, tmp_path):
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import make_pipeline
+    from skops.io import dump
+
+    storage = MemoryObjectStorage()
+    scope = _training_run_fixture(
+        db,
+        storage=storage,
+        suffix="real-skops-stage",
+    )
+    pipeline = make_pipeline(
+        TfidfVectorizer(),
+        LogisticRegression(random_state=42),
+    )
+    pipeline.fit(
+        ["include this study", "exclude this review", "include trial", "exclude editorial"],
+        ["positive", "negative", "positive", "negative"],
+    )
+    checkpoint = tmp_path / "model.skops"
+    dump(pipeline, checkpoint)
+    package = artifact_service.publish_artifact_package(
+        db,
+        storage,
+        project_id=scope.project.id,
+        data=ArtifactPackageCreate(
+            package_kind="model_checkpoint",
+            package_format="skops",
+            display_name="Real safe sklearn checkpoint",
+            model_family="conventional_ml",
+            model_type="tfidf_logistic_regression",
+            readiness="ready",
+            deployable=False,
+            loader_policy="safe",
+            task_contract={
+                "task_version_id": scope.task.id,
+                "task_content_hash": scope.task.content_hash,
+            },
+            license_info={},
+        ),
+        files=[
+            artifact_service.PackageFileUpload(
+                relative_path="model.skops",
+                source=checkpoint.read_bytes(),
+                role="weights",
+            )
+        ],
+        actor_user_id=scope.actor.id,
+    )
+
+    staged = stage_artifact_package(
+        db,
+        storage,
+        package=package,
+        destination=tmp_path / "staged",
+    )
+    loaded = load_safe_skops_model(staged / "model.skops")
+
+    assert loaded.predict(["include a randomized trial"]).tolist() == ["positive"]
+    assert loaded.predict_proba(["include a randomized trial"]).shape == (1, 2)
+
+
+def test_safe_skops_loader_rejects_untrusted_types(monkeypatch, tmp_path):
+    model_path = tmp_path / "model.skops"
+    model_path.write_bytes(b"untrusted checkpoint")
+    skops_module = ModuleType("skops")
+    skops_module.__path__ = []
+    skops_io_module = ModuleType("skops.io")
+    skops_io_module.get_untrusted_types = lambda **_kwargs: ["unsafe.CustomEstimator"]
+    skops_io_module.load = lambda *_args, **_kwargs: pytest.fail(
+        "untrusted checkpoint was loaded"
+    )
+    monkeypatch.setitem(sys.modules, "skops", skops_module)
+    monkeypatch.setitem(sys.modules, "skops.io", skops_io_module)
+
+    with pytest.raises(ValidationError, match="unsafe.CustomEstimator"):
+        load_safe_skops_model(model_path)
+
+
+def test_artifact_staging_detects_corrupted_object_bytes(db, tmp_path):
+    storage = MemoryObjectStorage()
+    scope = _completed_tfidf_model(db, storage, suffix="corrupt-stage")
+    package = db.get(ArtifactPackage, scope.model_version.checkpoint_package_id)
+    model_file = next(
+        package_file
+        for package_file in package.files
+        if package_file.relative_path == "model.skops"
+    )
+    storage.objects[model_file.blob.storage_key] = b"corrupted bytes"
+
+    with pytest.raises(ConflictError, match="integrity verification"):
+        stage_artifact_package(
+            db,
+            storage,
+            package=package,
+            destination=tmp_path / "corrupted",
+        )
+
+
 def test_protected_test_evaluation_runs_after_training_and_is_immutable(db, client):
     storage = MemoryObjectStorage()
     scope = _training_run_fixture(
@@ -1211,6 +1329,23 @@ def test_queue_routing_uses_selected_environment(monkeypatch):
         enqueue_training_run(92, environment_class="custom-runtime")
 
 
+def test_feedback_scoring_queue_uses_classical_cpu(monkeypatch):
+    from al_medlit.training.tasks import enqueue_feedback_scoring
+
+    dispatched = {}
+
+    def fake_apply_async(*, args, queue):
+        dispatched.update(args=args, queue=queue)
+
+    monkeypatch.setattr(
+        "al_medlit.training.tasks.execute_feedback_scoring_task.apply_async",
+        fake_apply_async,
+    )
+    enqueue_feedback_scoring(93)
+
+    assert dispatched == {"args": (93,), "queue": "classical-cpu"}
+
+
 def test_training_launch_route_dispatches_queued_run(monkeypatch):
     dispatched = {}
     queued_run = SimpleNamespace(
@@ -1247,6 +1382,50 @@ def test_training_launch_route_dispatches_queued_run(monkeypatch):
     }
 
 
+def test_feedback_materialization_route_dispatches_and_refreshes(monkeypatch):
+    dispatched = []
+    queued = SimpleNamespace(id=42, status="queued")
+    refreshed = SimpleNamespace(id=42, status="completed")
+
+    class FakeDb:
+        expired = False
+
+        def expire_all(self):
+            self.expired = True
+
+    db = FakeDb()
+    monkeypatch.setattr(learning_router, "_write", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        learning_router.service,
+        "request_feedback_run_materialization",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            run=queued,
+            should_enqueue=True,
+        ),
+    )
+    monkeypatch.setattr(
+        learning_router.service,
+        "get_feedback_run",
+        lambda *_args, **_kwargs: refreshed,
+    )
+    monkeypatch.setattr(
+        learning_router,
+        "enqueue_feedback_scoring",
+        dispatched.append,
+    )
+
+    result = learning_router.materialize_feedback_run(
+        project_id=7,
+        feedback_run_id=42,
+        current_user=object(),
+        db=db,
+    )
+
+    assert result is refreshed
+    assert dispatched == [42]
+    assert db.expired is True
+
+
 def test_api_import_does_not_load_optional_ml_packages():
     script = """
 import sys
@@ -1264,3 +1443,536 @@ if loaded:
         text=True,
     )
     assert completed.returncode == 0, completed.stderr or completed.stdout
+
+
+class FakeProbabilityModel:
+    classes_ = ["negative", "positive"]
+
+    def __init__(self):
+        self.batches: list[list[str]] = []
+
+    def predict_proba(self, texts):
+        values = list(texts)
+        self.batches.append(values)
+        return [
+            [0.9, 0.1] if "forbidden" not in text else [0.4, 0.6]
+            for text in values
+        ]
+
+
+def _completed_tfidf_model(db, storage, *, suffix: str):
+    scope = _training_run_fixture(db, storage=storage, suffix=suffix)
+    trainer = FakeTrainer(
+        key="sklearn_tfidf",
+        recipe_key="tfidf_logistic_regression",
+        runtime_class="classical-cpu",
+        output_name="model.skops",
+    )
+    registry = TrainerPluginRegistry()
+    registry.register(trainer)
+    completed = execute_training_run(
+        db,
+        storage,
+        training_run_id=scope.run.id,
+        trainer_registry=registry,
+    )
+    scope.model_version = db.get(models.ModelVersion, completed.output_model_version_id)
+    return scope
+
+
+def test_registered_model_feedback_scoring_is_deterministic_and_idempotent(db):
+    storage = MemoryObjectStorage()
+    scope = _completed_tfidf_model(db, storage, suffix="feedback-scoring")
+    feedback_run = service.create_feedback_run(
+        db,
+        schemas.FeedbackRunCreate(
+            project_id=scope.project.id,
+            dataset_version_id=scope.dataset.id,
+            task_version_id=scope.task.id,
+            producer_type="registered_model",
+            model_version_id=scope.model_version.id,
+        ),
+        scope.actor,
+    )
+
+    dispatch = request_feedback_run_materialization(
+        db,
+        project_id=scope.project.id,
+        feedback_run_id=feedback_run.id,
+        actor=scope.actor,
+    )
+    assert dispatch.should_enqueue is True
+    assert dispatch.run.status == "queued"
+    scope.actor.is_active = False
+    db.commit()
+
+    fake_model = FakeProbabilityModel()
+    completed = execute_feedback_scoring_run(
+        db,
+        storage,
+        feedback_run_id=feedback_run.id,
+        model_loader=lambda _path: fake_model,
+    )
+    repeated = execute_feedback_scoring_run(
+        db,
+        storage,
+        feedback_run_id=feedback_run.id,
+        model_loader=lambda _path: pytest.fail("duplicate delivery reloaded the model"),
+    )
+
+    assert completed.status == "completed"
+    assert completed.output_feedback_set_version_id is not None
+    assert completed.completed_at is not None
+    assert repeated.id == completed.id
+    assert repeated.output_feedback_set_version_id == completed.output_feedback_set_version_id
+    feedback_set = db.get(
+        models.FeedbackSetVersion,
+        completed.output_feedback_set_version_id,
+    )
+    assert feedback_set.candidate_count == scope.dataset.item_count == 5
+    assert feedback_set.created_by_user_id == scope.actor.id
+    candidates = (
+        db.query(models.FeedbackCandidate)
+        .filter(models.FeedbackCandidate.feedback_set_version_id == feedback_set.id)
+        .order_by(models.FeedbackCandidate.dataset_item_id)
+        .all()
+    )
+    assert len(candidates) == 5
+    assert all(candidate.output in {"negative", "positive"} for candidate in candidates)
+    assert all(
+        candidate.explanation["uncertainty"] == pytest.approx(1 - candidate.score)
+        and candidate.explanation["signal_basis"] == "least_confidence"
+        and candidate.explanation["checkpoint_manifest_digest"]
+        == scope.model_version.parameters["_lineage"]["checkpoint_manifest_digest"]
+        for candidate in candidates
+    )
+    assert fake_model.batches == [
+        [
+            "pool forbidden",
+            "test forbidden",
+            "train corrected",
+            "train excluded",
+            "validation visible",
+        ]
+    ]
+
+    selection_run = service.create_selection_run(
+        db,
+        schemas.SelectionRunCreate(
+            project_id=scope.project.id,
+            dataset_version_id=scope.dataset.id,
+            task_version_id=scope.task.id,
+            feedback_set_version_id=feedback_set.id,
+            split_map_id=scope.split_map.id,
+            strategy="uncertainty",
+            parameters={"limit": 2},
+        ),
+        scope.actor,
+    )
+    selection_set = service.materialize_selection_run(
+        db,
+        project_id=scope.project.id,
+        selection_run_id=selection_run.id,
+        actor=scope.actor,
+    )
+    protected_item = (
+        db.query(models.DatasetItem)
+        .filter(
+            models.DatasetItem.dataset_version_id == scope.dataset.id,
+            models.DatasetItem.stable_key == "test-1",
+        )
+        .one()
+    )
+    assert protected_item.id in {candidate.dataset_item_id for candidate in candidates}
+    assert protected_item.id not in {
+        item["dataset_item_id"] for item in selection_set.items
+    }
+
+    equivalent_run = service.create_feedback_run(
+        db,
+        schemas.FeedbackRunCreate(
+            project_id=scope.project.id,
+            dataset_version_id=scope.dataset.id,
+            task_version_id=scope.task.id,
+            producer_type="registered_model",
+            model_version_id=scope.model_version.id,
+        ),
+        scope.actor,
+    )
+    request_feedback_run_materialization(
+        db,
+        project_id=scope.project.id,
+        feedback_run_id=equivalent_run.id,
+        actor=scope.actor,
+    )
+    equivalent_completed = execute_feedback_scoring_run(
+        db,
+        storage,
+        feedback_run_id=equivalent_run.id,
+        model_loader=lambda _path: FakeProbabilityModel(),
+    )
+    equivalent_set = db.get(
+        models.FeedbackSetVersion,
+        equivalent_completed.output_feedback_set_version_id,
+    )
+    equivalent_hashes = [
+        content_hash
+        for (content_hash,) in (
+            db.query(models.FeedbackCandidate.content_hash)
+            .filter(models.FeedbackCandidate.feedback_set_version_id == equivalent_set.id)
+            .order_by(models.FeedbackCandidate.dataset_item_id)
+            .all()
+        )
+    ]
+    assert equivalent_hashes == [candidate.content_hash for candidate in candidates]
+    assert equivalent_set.content_hash != feedback_set.content_hash
+
+
+def test_feedback_scoring_crosses_the_fixed_512_item_batch_boundary(db):
+    storage = MemoryObjectStorage()
+    scope = _completed_tfidf_model(db, storage, suffix="feedback-scoring-batches")
+    db.bulk_save_objects(
+        [
+            models.DatasetItem(
+                project_id=scope.project.id,
+                dataset_version_id=scope.dataset.id,
+                stable_key=f"bulk-{index:04d}",
+                payload={"text": f"bulk text {index}"},
+                content_hash=f"{index + 1:064x}",
+            )
+            for index in range(508)
+        ]
+    )
+    db.query(models.DatasetVersion).filter(
+        models.DatasetVersion.id == scope.dataset.id
+    ).update({models.DatasetVersion.item_count: 513})
+    db.commit()
+    feedback_run = service.create_feedback_run(
+        db,
+        schemas.FeedbackRunCreate(
+            project_id=scope.project.id,
+            dataset_version_id=scope.dataset.id,
+            task_version_id=scope.task.id,
+            producer_type="registered_model",
+            model_version_id=scope.model_version.id,
+        ),
+        scope.actor,
+    )
+    request_feedback_run_materialization(
+        db,
+        project_id=scope.project.id,
+        feedback_run_id=feedback_run.id,
+        actor=scope.actor,
+    )
+    fake_model = FakeProbabilityModel()
+
+    completed = execute_feedback_scoring_run(
+        db,
+        storage,
+        feedback_run_id=feedback_run.id,
+        model_loader=lambda _path: fake_model,
+    )
+
+    feedback_set = db.get(
+        models.FeedbackSetVersion,
+        completed.output_feedback_set_version_id,
+    )
+    assert feedback_set.candidate_count == 513
+    assert [len(batch) for batch in fake_model.batches] == [512, 1]
+    assert fake_model.batches[0][0] == "bulk text 0"
+    assert fake_model.batches[-1] == ["validation visible"]
+
+
+def test_feedback_prediction_serializes_scalar_and_single_field_object_outputs():
+    scalar_task = SimpleNamespace(
+        output_schema={"type": "string", "enum": ["negative", "positive"]}
+    )
+    object_task = SimpleNamespace(
+        output_schema={
+            "type": "object",
+            "properties": {
+                "label": {"type": "string", "enum": ["negative", "positive"]}
+            },
+            "required": ["label"],
+            "additionalProperties": False,
+        }
+    )
+
+    assert _prediction_output(scalar_task, "label", "positive") == "positive"
+    assert _prediction_output(object_task, "label", "positive") == {
+        "label": "positive"
+    }
+
+
+@pytest.mark.parametrize(
+    ("retention_field", "message"),
+    (("archived_at", "archived"), ("purged_at", "purged")),
+)
+def test_feedback_scoring_rejects_unavailable_checkpoint_retention(
+    db,
+    retention_field,
+    message,
+):
+    storage = MemoryObjectStorage()
+    scope = _completed_tfidf_model(
+        db,
+        storage,
+        suffix=f"feedback-scoring-{retention_field}",
+    )
+    package = db.get(ArtifactPackage, scope.model_version.checkpoint_package_id)
+    setattr(package.retention, retention_field, datetime.now(UTC))
+    db.commit()
+    feedback_run = service.create_feedback_run(
+        db,
+        schemas.FeedbackRunCreate(
+            project_id=scope.project.id,
+            dataset_version_id=scope.dataset.id,
+            task_version_id=scope.task.id,
+            producer_type="registered_model",
+            model_version_id=scope.model_version.id,
+        ),
+        scope.actor,
+    )
+
+    with pytest.raises(ConflictError, match=message):
+        request_feedback_run_materialization(
+            db,
+            project_id=scope.project.id,
+            feedback_run_id=feedback_run.id,
+            actor=scope.actor,
+        )
+
+
+def test_feedback_scoring_eager_cap_fails_with_worker_guidance(db, monkeypatch):
+    storage = MemoryObjectStorage()
+    scope = _completed_tfidf_model(db, storage, suffix="feedback-scoring-eager-cap")
+    db.query(models.DatasetVersion).filter(
+        models.DatasetVersion.id == scope.dataset.id
+    ).update({models.DatasetVersion.item_count: 5001})
+    db.commit()
+    feedback_run = service.create_feedback_run(
+        db,
+        schemas.FeedbackRunCreate(
+            project_id=scope.project.id,
+            dataset_version_id=scope.dataset.id,
+            task_version_id=scope.task.id,
+            producer_type="registered_model",
+            model_version_id=scope.model_version.id,
+        ),
+        scope.actor,
+    )
+    request_feedback_run_materialization(
+        db,
+        project_id=scope.project.id,
+        feedback_run_id=feedback_run.id,
+        actor=scope.actor,
+    )
+    monkeypatch.setattr(
+        "al_medlit.workflow.services.feedback_scoring.settings.celery_task_always_eager",
+        True,
+    )
+
+    with pytest.raises(ValidationError, match="use `make lab-up`"):
+        execute_feedback_scoring_run(
+            db,
+            storage,
+            feedback_run_id=feedback_run.id,
+            model_loader=lambda _path: pytest.fail("eager cap loaded the model"),
+        )
+
+    assert db.get(models.FeedbackRun, feedback_run.id).status == "failed"
+
+
+def test_feedback_scoring_failure_records_terminal_state_without_partial_set(db):
+    storage = MemoryObjectStorage()
+    scope = _completed_tfidf_model(db, storage, suffix="feedback-scoring-failure")
+    feedback_run = service.create_feedback_run(
+        db,
+        schemas.FeedbackRunCreate(
+            project_id=scope.project.id,
+            dataset_version_id=scope.dataset.id,
+            task_version_id=scope.task.id,
+            producer_type="registered_model",
+            model_version_id=scope.model_version.id,
+        ),
+        scope.actor,
+    )
+    request_feedback_run_materialization(
+        db,
+        project_id=scope.project.id,
+        feedback_run_id=feedback_run.id,
+        actor=scope.actor,
+    )
+
+    class InvalidProbabilityModel(FakeProbabilityModel):
+        def predict_proba(self, texts):
+            return [[0.2, 0.2] for _text in texts]
+
+    with pytest.raises(ValidationError, match="sum to one"):
+        execute_feedback_scoring_run(
+            db,
+            storage,
+            feedback_run_id=feedback_run.id,
+            model_loader=lambda _path: InvalidProbabilityModel(),
+        )
+
+    db.expire_all()
+    failed = db.get(models.FeedbackRun, feedback_run.id)
+    assert failed.status == "failed"
+    assert failed.failure_code == "ValidationError"
+    assert "sum to one" in failed.failure_reason
+    assert failed.output_feedback_set_version_id is None
+    assert db.query(models.FeedbackSetVersion).filter(
+        models.FeedbackSetVersion.feedback_run_id == feedback_run.id
+    ).count() == 0
+
+    retried = request_feedback_run_materialization(
+        db,
+        project_id=scope.project.id,
+        feedback_run_id=feedback_run.id,
+        actor=scope.actor,
+    )
+    assert retried.run.status == "queued"
+    assert retried.run.failure_code is None
+    with pytest.raises(ConflictError, match="cannot accept manual results"):
+        service.create_feedback_set(
+            db,
+            schemas.FeedbackSetCreate(
+                project_id=scope.project.id,
+                feedback_run_id=feedback_run.id,
+                output_schema=scope.task.output_schema,
+                candidates=[],
+            ),
+            scope.actor,
+        )
+
+
+def test_feedback_scoring_rejects_missing_input_text_without_partial_output(db):
+    storage = MemoryObjectStorage()
+    scope = _completed_tfidf_model(db, storage, suffix="feedback-scoring-missing-text")
+    missing = (
+        db.query(models.DatasetItem)
+        .filter(models.DatasetItem.dataset_version_id == scope.dataset.id)
+        .order_by(models.DatasetItem.id)
+        .first()
+    )
+    db.query(models.DatasetItem).filter(models.DatasetItem.id == missing.id).update(
+        {models.DatasetItem.payload: {"text": " "}}
+    )
+    db.commit()
+    feedback_run = service.create_feedback_run(
+        db,
+        schemas.FeedbackRunCreate(
+            project_id=scope.project.id,
+            dataset_version_id=scope.dataset.id,
+            task_version_id=scope.task.id,
+            producer_type="registered_model",
+            model_version_id=scope.model_version.id,
+        ),
+        scope.actor,
+    )
+    request_feedback_run_materialization(
+        db,
+        project_id=scope.project.id,
+        feedback_run_id=feedback_run.id,
+        actor=scope.actor,
+    )
+
+    with pytest.raises(ValidationError, match="must be non-empty text"):
+        execute_feedback_scoring_run(
+            db,
+            storage,
+            feedback_run_id=feedback_run.id,
+            model_loader=lambda _path: FakeProbabilityModel(),
+        )
+
+    assert db.get(models.FeedbackRun, feedback_run.id).status == "failed"
+    assert (
+        db.query(models.FeedbackSetVersion)
+        .filter(models.FeedbackSetVersion.feedback_run_id == feedback_run.id)
+        .count()
+        == 0
+    )
+
+
+def test_feedback_scoring_heartbeat_and_reconciliation(db):
+    storage = MemoryObjectStorage()
+    scope = _completed_tfidf_model(db, storage, suffix="feedback-scoring-heartbeat")
+    feedback_run = service.create_feedback_run(
+        db,
+        schemas.FeedbackRunCreate(
+            project_id=scope.project.id,
+            dataset_version_id=scope.dataset.id,
+            task_version_id=scope.task.id,
+            producer_type="registered_model",
+            model_version_id=scope.model_version.id,
+        ),
+        scope.actor,
+    )
+    request_feedback_run_materialization(
+        db,
+        project_id=scope.project.id,
+        feedback_run_id=feedback_run.id,
+        actor=scope.actor,
+    )
+    now = datetime.now(UTC)
+    queued = db.get(models.FeedbackRun, feedback_run.id)
+    queued.updated_at = now - timedelta(minutes=6)
+    db.commit()
+    reconciled = reconcile_feedback_scoring_runs(db, now=now)
+    assert reconciled["redispatch_ids"] == [feedback_run.id]
+
+    from al_medlit.workflow.services.feedback_scoring import _claim_feedback_scoring_run
+
+    _claim_feedback_scoring_run(db, feedback_run.id)
+    old_heartbeat = now - timedelta(minutes=20)
+    assert heartbeat_feedback_scoring_run(
+        db,
+        feedback_run.id,
+        now=old_heartbeat,
+    ) is True
+    reconciled = reconcile_feedback_scoring_runs(db, now=now)
+    assert reconciled["failed_ids"] == [feedback_run.id]
+    failed = db.get(models.FeedbackRun, feedback_run.id)
+    assert failed.status == "failed"
+    assert failed.failure_code == "scoring_worker_stalled"
+
+
+def test_completed_feedback_scoring_requires_a_consistent_output_pointer(db):
+    storage = MemoryObjectStorage()
+    scope = _completed_tfidf_model(db, storage, suffix="feedback-scoring-pointer")
+    feedback_run = service.create_feedback_run(
+        db,
+        schemas.FeedbackRunCreate(
+            project_id=scope.project.id,
+            dataset_version_id=scope.dataset.id,
+            task_version_id=scope.task.id,
+            producer_type="registered_model",
+            model_version_id=scope.model_version.id,
+        ),
+        scope.actor,
+    )
+    request_feedback_run_materialization(
+        db,
+        project_id=scope.project.id,
+        feedback_run_id=feedback_run.id,
+        actor=scope.actor,
+    )
+    execute_feedback_scoring_run(
+        db,
+        storage,
+        feedback_run_id=feedback_run.id,
+        model_loader=lambda _path: FakeProbabilityModel(),
+    )
+    db.query(models.FeedbackRun).filter(models.FeedbackRun.id == feedback_run.id).update(
+        {models.FeedbackRun.output_feedback_set_version_id: None}
+    )
+    db.commit()
+
+    with pytest.raises(ConflictError, match="has no output feedback set"):
+        request_feedback_run_materialization(
+            db,
+            project_id=scope.project.id,
+            feedback_run_id=feedback_run.id,
+            actor=scope.actor,
+        )

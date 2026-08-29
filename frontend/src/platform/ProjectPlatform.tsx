@@ -3,6 +3,7 @@ import { Banner } from "@astryxdesign/core/Banner";
 
 import { shouldHandleSpaClick } from "@/components/ModuleSwitcher";
 import {
+  canPerform,
   effectiveRoleLabel,
   type AccessSnapshot,
 } from "@/navigation/AccessContext";
@@ -36,6 +37,7 @@ export type PlatformDialogKind =
   | "trainingData"
   | "cycle"
   | "round"
+  | "feedbackScore"
   | "guideline"
   | null;
 
@@ -59,6 +61,7 @@ interface ProjectPlatformProps {
   onOpenRound: (roundId: number) => void;
   onUpdateProject: (payload: ProjectUpdate) => Promise<void>;
   onUpdateModules: (selected: ProjectModule[]) => Promise<void>;
+  onRefresh: () => Promise<void>;
   dialogContent?: ReactNode;
 }
 
@@ -82,6 +85,7 @@ export default function ProjectPlatform({
   onOpenRound,
   onUpdateProject,
   onUpdateModules,
+  onRefresh,
   dialogContent,
 }: ProjectPlatformProps): React.ReactElement {
   const route = parseProjectPlatformRoute(pathname);
@@ -94,6 +98,10 @@ export default function ProjectPlatform({
       (item.backendModule === null || effectiveModules.has(item.backendModule)),
   );
   const canManageAnnotation = canAccessProjectSection(access, "tasks");
+  const canScore =
+    canPerform(access, "learning:score") &&
+    effectiveModules.has("learning") &&
+    effectiveModules.has("models");
   const tab =
     !moduleConfigReady ||
     visibleTabs.some((item) => item.id === requestedTab)
@@ -151,6 +159,10 @@ export default function ProjectPlatform({
           onOpenRound={onOpenRound}
           currentUserId={currentUserId}
           canManage={canManageAnnotation}
+          canScore={false}
+          projectId={project.id}
+          onCreateScore={() => onDialogChange("feedbackScore")}
+          onRefresh={onRefresh}
         />
       );
       break;
@@ -164,6 +176,10 @@ export default function ProjectPlatform({
           onOpenRound={onOpenRound}
           currentUserId={currentUserId}
           canManage={canManageAnnotation}
+          canScore={canScore}
+          projectId={project.id}
+          onCreateScore={() => onDialogChange("feedbackScore")}
+          onRefresh={onRefresh}
         />
       );
       break;

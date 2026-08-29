@@ -4,6 +4,7 @@ import {
   PlatformSection,
   PlatformStatus,
 } from "./components";
+import ModelScoringPanel from "./ModelScoringPanel";
 import type { PlatformProjectData } from "./types";
 
 export default function AnnotateScreen({
@@ -14,6 +15,10 @@ export default function AnnotateScreen({
   onOpenRound,
   currentUserId,
   canManage,
+  canScore = false,
+  projectId = data.projectModules.project_id,
+  onCreateScore = () => undefined,
+  onRefresh = async () => undefined,
 }: {
   view: "tasks" | "rounds";
   data: PlatformProjectData;
@@ -22,6 +27,10 @@ export default function AnnotateScreen({
   onOpenRound: (roundId: number) => void;
   currentUserId: number | null;
   canManage: boolean;
+  canScore?: boolean;
+  projectId?: number;
+  onCreateScore?: () => void;
+  onRefresh?: () => Promise<void>;
 }): React.ReactElement {
   const showingTasks = view === "tasks";
 
@@ -176,6 +185,15 @@ export default function AnnotateScreen({
           />
         )}
       </PlatformSection> : null}
+
+      {!showingTasks && canScore ? (
+        <ModelScoringPanel
+          projectId={projectId}
+          data={data}
+          onCreate={onCreateScore}
+          onRefresh={onRefresh}
+        />
+      ) : null}
     </div>
   );
 }

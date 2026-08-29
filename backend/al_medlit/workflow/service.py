@@ -9,6 +9,7 @@ from al_medlit.workflow.services import (
     cycles,
     datasets,
     feedback,
+    feedback_scoring,
     guidelines,
     labels,
     models,
@@ -34,6 +35,7 @@ _DOMAIN_MODULES = (
     workspace_training,
     rounds,
     feedback,
+    feedback_scoring,
     guidelines,
 )
 
