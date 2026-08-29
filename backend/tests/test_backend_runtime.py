@@ -10,6 +10,9 @@ from al_medlit.annotation.schemas import AnnotationCorrectionCreate, AnnotationC
 from al_medlit.annotation.service import create_annotation, create_correction
 from al_medlit.co_learning.error_guideline_learning.events import register_event_handlers
 from al_medlit.co_learning.error_guideline_learning.models import ErrorPattern
+from al_medlit.co_learning.error_guideline_learning.service import (
+    upsert_pattern_from_correction,
+)
 from al_medlit.core.events import event_bus
 from al_medlit.core.exceptions import ConflictError
 from al_medlit.core.models import utc_now
@@ -148,7 +151,22 @@ def test_create_correction_publishes_single_error_pattern(db, testing_session_fa
         ),
     )
 
-    create_correction(
+    first_correction = create_correction(
+        db,
+        AnnotationCorrectionCreate(
+            project_id=project.id,
+            document_id=document.id,
+            original_annotation_id=original_annotation.id,
+            corrected_annotation_id=corrected_annotation.id,
+            correction_source="adjudication",
+            error_type="boundary_error",
+        ),
+        created_by_user_id=None,
+    )
+    replayed_pattern = upsert_pattern_from_correction(db, first_correction)
+    assert replayed_pattern.example_count == 1
+
+    second_correction = create_correction(
         db,
         AnnotationCorrectionCreate(
             project_id=project.id,
@@ -173,7 +191,11 @@ def test_create_correction_publishes_single_error_pattern(db, testing_session_fa
 
     assert len(patterns) == 1
     assert patterns[0].error_type == "boundary_error"
-    assert patterns[0].example_count == 1
+    assert patterns[0].example_count == 2
+    assert patterns[0].example_ids == [
+        {"correction_id": first_correction.id, "document_id": document.id},
+        {"correction_id": second_correction.id, "document_id": document.id},
+    ]
 
 
 def test_create_correction_is_returned_when_event_handler_fails(

@@ -1,3 +1,4 @@
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from al_medlit.annotation.models import Annotation, AnnotationCorrection
@@ -16,6 +17,7 @@ from al_medlit.co_learning.error_guideline_learning.schemas import (
     MicroQuestionTemplateCreate,
     TrainingActionCreate,
 )
+from al_medlit.core.exceptions import ConflictError
 
 
 def create_error_pattern(db: Session, data: ErrorPatternCreate) -> ErrorPattern:
@@ -23,8 +25,33 @@ def create_error_pattern(db: Session, data: ErrorPatternCreate) -> ErrorPattern:
     if existing_pattern is not None:
         return existing_pattern
 
+    if data.status == "active" and _find_active_error_pattern(
+        db,
+        project_id=data.project_id,
+        task_type=data.task_type,
+        error_type=data.error_type,
+        label_type=data.label_type,
+    ) is not None:
+        raise ConflictError("An active error pattern already exists for this scope")
+
     pattern = ErrorPattern(**data.model_dump())
-    db.add(pattern)
+    try:
+        with db.begin_nested():
+            db.add(pattern)
+            db.flush()
+    except IntegrityError:
+        existing_pattern = _find_matching_error_pattern(db, data)
+        if existing_pattern is not None:
+            return existing_pattern
+        if data.status == "active" and _find_active_error_pattern(
+            db,
+            project_id=data.project_id,
+            task_type=data.task_type,
+            error_type=data.error_type,
+            label_type=data.label_type,
+        ) is not None:
+            raise ConflictError("An active error pattern already exists for this scope") from None
+        raise
     db.commit()
     db.refresh(pattern)
     return pattern
@@ -59,25 +86,17 @@ def upsert_pattern_from_correction(db: Session, correction: AnnotationCorrection
     task_type = corrected.annotation_type if corrected else "entity"
     label_type = corrected.label if corrected else None
 
-    pattern = (
-        db.query(ErrorPattern)
-        .filter(
-            ErrorPattern.project_id == correction.project_id,
-            ErrorPattern.task_type == task_type,
-            ErrorPattern.error_type == error_type,
-            ErrorPattern.label_type == label_type,
-            ErrorPattern.status == "active",
-        )
-        .first()
+    pattern = _find_active_error_pattern(
+        db,
+        project_id=correction.project_id,
+        task_type=task_type,
+        error_type=error_type,
+        label_type=label_type,
+        for_update=True,
     )
 
     if pattern:
-        pattern.example_count += 1
-        example_ids = list(pattern.example_ids or [])
-        example_ids.append(
-            {"correction_id": correction.id, "document_id": correction.document_id}
-        )
-        pattern.example_ids = example_ids
+        _append_correction_example(pattern, correction)
     else:
         pattern = ErrorPattern(
             project_id=correction.project_id,
@@ -90,11 +109,65 @@ def upsert_pattern_from_correction(db: Session, correction: AnnotationCorrection
             detected_from=correction.correction_source,
             example_ids=[{"correction_id": correction.id, "document_id": correction.document_id}],
         )
-        db.add(pattern)
+        try:
+            with db.begin_nested():
+                db.add(pattern)
+                db.flush()
+        except IntegrityError:
+            pattern = _find_active_error_pattern(
+                db,
+                project_id=correction.project_id,
+                task_type=task_type,
+                error_type=error_type,
+                label_type=label_type,
+                for_update=True,
+            )
+            if pattern is None:
+                raise
+            _append_correction_example(pattern, correction)
 
     db.commit()
     db.refresh(pattern)
     return pattern
+
+
+def _find_active_error_pattern(
+    db: Session,
+    *,
+    project_id: int,
+    task_type: str,
+    error_type: str,
+    label_type: str | None,
+    for_update: bool = False,
+) -> ErrorPattern | None:
+    query = db.query(ErrorPattern).filter(
+        ErrorPattern.project_id == project_id,
+        ErrorPattern.task_type == task_type,
+        ErrorPattern.error_type == error_type,
+        ErrorPattern.label_type == label_type,
+        ErrorPattern.status == "active",
+    )
+    if for_update:
+        query = query.populate_existing().with_for_update()
+    return query.one_or_none()
+
+
+def _append_correction_example(
+    pattern: ErrorPattern,
+    correction: AnnotationCorrection,
+) -> bool:
+    example_ids = list(pattern.example_ids or [])
+    if any(
+        isinstance(example, dict) and example.get("correction_id") == correction.id
+        for example in example_ids
+    ):
+        return False
+    example_ids.append(
+        {"correction_id": correction.id, "document_id": correction.document_id}
+    )
+    pattern.example_count += 1
+    pattern.example_ids = example_ids
+    return True
 
 
 def draft_guideline_atom(

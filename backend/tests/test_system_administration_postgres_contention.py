@@ -33,9 +33,13 @@ from al_medlit.administration.service import (
     issue_password_reset_link,
     set_user_status,
 )
+from al_medlit.annotation.models import Annotation, AnnotationCorrection
 from al_medlit.auth.models import User
 from al_medlit.auth.tenancy import lock_project_member_for_mutation
+from al_medlit.co_learning.error_guideline_learning import service as error_pattern_service
+from al_medlit.co_learning.error_guideline_learning.models import ErrorPattern
 from al_medlit.core.exceptions import ForbiddenError, NotFoundError
+from al_medlit.corpus.models import Document
 from al_medlit.project.models import Project
 from al_medlit.workflow.models import (
     AnnotationRound,
@@ -223,6 +227,162 @@ def _raw_token(action_url: str) -> str:
 
 def _token_hash(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+def _new_error_pattern_scope(
+    db: Session,
+    prefix: str,
+    *,
+    correction_count: int,
+) -> tuple[int, list[int]]:
+    creator = _new_user(db, f"{prefix}-creator")
+    workspace = workspace_service.create_team_workspace(
+        db,
+        creator,
+        f"{prefix}-{uuid4().hex[:8]}",
+    )
+    project = Project(
+        workspace_id=workspace.id,
+        name=f"{prefix}-{uuid4().hex[:8]}",
+        annotation_schema={"labels": {}},
+        settings={},
+    )
+    db.add(project)
+    db.flush()
+    document = Document(project_id=project.id, text="Patients receiving aspirin improved.")
+    db.add(document)
+    db.flush()
+    corrected = Annotation(
+        project_id=project.id,
+        document_id=document.id,
+        annotation_type="entity",
+        label="Drug",
+        start_offset=19,
+        end_offset=26,
+        text_span="aspirin",
+        source="human",
+        status="gold",
+    )
+    db.add(corrected)
+    db.flush()
+    corrections = [
+        AnnotationCorrection(
+            project_id=project.id,
+            document_id=document.id,
+            corrected_annotation_id=corrected.id,
+            correction_source="adjudication",
+            error_type="boundary_error",
+            severity="medium",
+        )
+        for _ in range(correction_count)
+    ]
+    db.add_all(corrections)
+    db.flush()
+    return project.id, [correction.id for correction in corrections]
+
+
+def test_error_pattern_updates_preserve_concurrent_corrections(
+    postgres_session_factory: sessionmaker[Session],
+    monkeypatch,
+) -> None:
+    with postgres_session_factory() as db:
+        project_id, correction_ids = _new_error_pattern_scope(
+            db,
+            "existing-pattern-contention",
+            correction_count=3,
+        )
+        seed_id, left_id, right_id = correction_ids
+        pattern = ErrorPattern(
+            project_id=project_id,
+            task_type="entity",
+            error_type="boundary_error",
+            label_type="Drug",
+            description="Boundary mismatch",
+            example_count=1,
+            severity="medium",
+            detected_from="adjudication",
+            example_ids=[{"correction_id": seed_id, "document_id": 1}],
+        )
+        db.add(pattern)
+        db.commit()
+        pattern_id = pattern.id
+
+    lock_attempts = threading.Barrier(2)
+    original_find = error_pattern_service._find_active_error_pattern
+
+    def synchronized_find(*args, **kwargs):
+        if kwargs.get("for_update"):
+            lock_attempts.wait(timeout=_LOCK_TIMEOUT_SECONDS)
+        return original_find(*args, **kwargs)
+
+    monkeypatch.setattr(error_pattern_service, "_find_active_error_pattern", synchronized_find)
+
+    def aggregate(correction_id: int):
+        def operation(db: Session) -> int:
+            correction = db.get(AnnotationCorrection, correction_id)
+            assert correction is not None
+            return error_pattern_service.upsert_pattern_from_correction(db, correction).id
+
+        return operation
+
+    left_result, right_result = _run_concurrently(
+        postgres_session_factory,
+        aggregate(left_id),
+        aggregate(right_id),
+    )
+    assert left_result == ("ok", pattern_id)
+    assert right_result == ("ok", pattern_id)
+    with postgres_session_factory() as db:
+        persisted = db.get(ErrorPattern, pattern_id)
+        assert persisted is not None
+        assert persisted.example_count == 3
+        assert {item["correction_id"] for item in persisted.example_ids} == set(correction_ids)
+
+
+def test_error_pattern_creation_converges_under_contention(
+    postgres_session_factory: sessionmaker[Session],
+    monkeypatch,
+) -> None:
+    with postgres_session_factory() as db:
+        project_id, correction_ids = _new_error_pattern_scope(
+            db,
+            "new-pattern-contention",
+            correction_count=2,
+        )
+        db.commit()
+
+    initial_misses = threading.Barrier(2)
+    original_find = error_pattern_service._find_active_error_pattern
+
+    def synchronized_find(*args, **kwargs):
+        pattern = original_find(*args, **kwargs)
+        if kwargs.get("for_update") and pattern is None:
+            initial_misses.wait(timeout=_LOCK_TIMEOUT_SECONDS)
+        return pattern
+
+    monkeypatch.setattr(error_pattern_service, "_find_active_error_pattern", synchronized_find)
+
+    def aggregate(correction_id: int):
+        def operation(db: Session) -> int:
+            correction = db.get(AnnotationCorrection, correction_id)
+            assert correction is not None
+            return error_pattern_service.upsert_pattern_from_correction(db, correction).id
+
+        return operation
+
+    left_result, right_result = _run_concurrently(
+        postgres_session_factory,
+        aggregate(correction_ids[0]),
+        aggregate(correction_ids[1]),
+    )
+    assert left_result[0] == "ok"
+    assert right_result[0] == "ok"
+    assert left_result[1] == right_result[1]
+    with postgres_session_factory() as db:
+        patterns = db.query(ErrorPattern).filter(ErrorPattern.project_id == project_id).all()
+        assert len(patterns) == 1
+        assert patterns[0].example_count == 2
+        assert {item["correction_id"] for item in patterns[0].example_ids} == set(correction_ids)
 
 
 def test_invitee_deactivation_and_invite_acceptance_do_not_deadlock(

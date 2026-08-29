@@ -1,4 +1,4 @@
-from sqlalchemy import ForeignKey, Integer, String, Text
+from sqlalchemy import ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from al_medlit.core.database import Base
@@ -8,6 +8,27 @@ from al_medlit.core.types import JSONType
 
 class ErrorPattern(Base, IntPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "error_patterns"
+    __table_args__ = (
+        Index(
+            "uq_error_patterns_active_unlabeled",
+            "project_id",
+            "task_type",
+            "error_type",
+            unique=True,
+            postgresql_where=text("status = 'active' AND label_type IS NULL"),
+            sqlite_where=text("status = 'active' AND label_type IS NULL"),
+        ),
+        Index(
+            "uq_error_patterns_active_labeled",
+            "project_id",
+            "task_type",
+            "error_type",
+            "label_type",
+            unique=True,
+            postgresql_where=text("status = 'active' AND label_type IS NOT NULL"),
+            sqlite_where=text("status = 'active' AND label_type IS NOT NULL"),
+        ),
+    )
 
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), index=True)
 

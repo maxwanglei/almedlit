@@ -1860,6 +1860,13 @@ def test_manual_error_guideline_create_endpoints_are_retry_safe(client):
     assert retry_pattern_response.status_code == 200
     assert retry_pattern_response.json()["id"] == pattern["id"]
 
+    conflicting_pattern_response = client.post(
+        "/api/co-learning/error-guideline/patterns",
+        json={**pattern_payload, "description": "Conflicting active pattern."},
+    )
+    assert conflicting_pattern_response.status_code == 409
+    assert "active error pattern already exists" in conflicting_pattern_response.json()["detail"]
+
     list_patterns_response = client.get(
         "/api/co-learning/error-guideline/patterns",
         params={"project_id": project["id"]},
