@@ -51,6 +51,22 @@ describe("AccessContext policy", () => {
     expect(canPerform(access, "training:read")).toBe(false);
   });
 
+  it("allows model scoring only for trainers with active learning", () => {
+    const trainer = createAccessSnapshot({
+      workspaceId: 1,
+      workspaceKind: "team",
+      membershipRole: "trainer",
+      effectiveCapabilities: ["active_learning"],
+    });
+    expect(canPerform(trainer, "learning:score")).toBe(true);
+    expect(
+      canPerform({ ...trainer, effectiveCapabilities: [] }, "learning:score"),
+    ).toBe(false);
+    expect(
+      canPerform({ ...trainer, effectiveRoles: ["annotator"] }, "learning:score"),
+    ).toBe(false);
+  });
+
   it("reserves system administration for deployment superusers", () => {
     const workspaceAdmin = createAccessSnapshot({
       workspaceId: 1,

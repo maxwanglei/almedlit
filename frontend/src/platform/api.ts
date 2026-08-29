@@ -143,6 +143,12 @@ function collectionPlan(
       "guidelineRevisions",
       "members",
     );
+    if (enabled.has("learning")) {
+      add("cycles", "splitMaps", "feedbackRuns", "feedbackSets");
+    }
+    if (enabled.has("learning") && enabled.has("models")) {
+      add("models", "modelVersions");
+    }
     return plan;
   }
 
@@ -1098,6 +1104,7 @@ export interface RoundDraft {
   datasetVersionId: number;
   taskVersionId: number;
   cycleId: number | null;
+  splitMapId: number | null;
   guidelineRevisionId: number | null;
   feedbackSetVersionId: number | null;
   assistancePolicy: AnnotationRound["assistance_policy"];
@@ -1122,13 +1129,9 @@ export async function createRound(
 ): Promise<AnnotationRound> {
   let selectionSetVersionId: number | null = null;
   if (draft.reannotationMode === "targeted_subset") {
-    const splitMaps = await request<SplitMap[]>(
-      `/datasets/split-maps?${projectQuery(projectId)}&dataset_version_id=${draft.datasetVersionId}`,
-    );
-    const splitMap = splitMaps[0];
-    if (!splitMap) {
+    if (draft.splitMapId === null) {
       throw new Error(
-        "Create a governed train, validation, test, and pool split before selecting annotation items.",
+        "Select a governed train, validation, test, and pool split before selecting annotation items.",
       );
     }
     const selectionRun = await post<{ id: number }>("/selection-runs", {
@@ -1137,7 +1140,7 @@ export async function createRound(
       task_version_id: draft.taskVersionId,
       cycle_id: draft.cycleId,
       feedback_set_version_id: draft.feedbackSetVersionId,
-      split_map_id: splitMap.id,
+      split_map_id: draft.splitMapId,
       strategy: draft.selectionStrategy,
       parameters: { limit: draft.selectionLimit },
       eligibility_filter: {},
@@ -1168,6 +1171,56 @@ export async function createRound(
     `/rounds/${annotationRound.id}/transition?${projectQuery(projectId)}`,
     { status: "open" },
   );
+}
+
+export interface FeedbackScoringDraft {
+  datasetVersionId: number;
+  taskVersionId: number;
+  cycleId: number | null;
+  modelVersionId: number;
+}
+
+export function createFeedbackRun(
+  projectId: number,
+  draft: FeedbackScoringDraft,
+): Promise<FeedbackRun> {
+  return post<FeedbackRun>("/feedback-runs", {
+    project_id: projectId,
+    dataset_version_id: draft.datasetVersionId,
+    task_version_id: draft.taskVersionId,
+    cycle_id: draft.cycleId,
+    producer_type: "registered_model",
+    model_version_id: draft.modelVersionId,
+    configuration: {},
+    data_egress_policy: {},
+  });
+}
+
+export function materializeFeedbackRun(
+  projectId: number,
+  feedbackRunId: number,
+): Promise<FeedbackRun> {
+  return post<FeedbackRun>(
+    `/projects/${projectId}/feedback-runs/${feedbackRunId}/materialize`,
+    {},
+  );
+}
+
+export function getFeedbackRun(
+  projectId: number,
+  feedbackRunId: number,
+): Promise<FeedbackRun> {
+  return request<FeedbackRun>(
+    `/projects/${projectId}/feedback-runs/${feedbackRunId}`,
+  );
+}
+
+export async function scoreFeedbackRun(
+  projectId: number,
+  draft: FeedbackScoringDraft,
+): Promise<FeedbackRun> {
+  const run = await createFeedbackRun(projectId, draft);
+  return materializeFeedbackRun(projectId, run.id);
 }
 
 export interface RoundWorkData {

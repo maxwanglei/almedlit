@@ -497,7 +497,13 @@ class FeedbackRunCreate(InputModel):
 
 
 class FeedbackRunRead(FeedbackRunCreate, ReadModel):
-    status: str
+    status: Literal["planned", "queued", "running", "completed", "failed"]
+    output_feedback_set_version_id: int | None
+    failure_code: str | None
+    failure_reason: str | None
+    started_at: datetime | None
+    heartbeat_at: datetime | None
+    completed_at: datetime | None
     created_by_user_id: int | None
 
 
@@ -636,6 +642,9 @@ class RoundWorkItemIdentityRead(ReadModel):
     project_id: int
     annotation_round_id: int
     dataset_item_id: int
+    selection_rank: int | None
+    selection_score: float | None
+    selection_reason: dict
 
 
 class RoundWorkItemRead(InputModel):

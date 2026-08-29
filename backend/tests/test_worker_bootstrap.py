@@ -12,6 +12,12 @@ def test_celery_app_declares_expected_queues():
         "peft-accelerator",
         "qlora-cuda",
     }
+    scoring_reconciliation = app.conf.beat_schedule["reconcile-feedback-scoring"]
+    assert scoring_reconciliation == {
+        "task": "al_medlit.workflow.reconcile_feedback_scoring",
+        "schedule": 60.0,
+        "options": {"queue": "control"},
+    }
 
 
 def test_celery_ping_task_runs_eagerly() -> None:

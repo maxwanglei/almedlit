@@ -293,7 +293,13 @@ const feedbackRuns = [
     prompt_template_hash: hash,
     configuration: { temperature: 0 },
     data_egress_policy: { mode: "deidentified_only" },
-    status: "succeeded",
+    status: "completed",
+    output_feedback_set_version_id: 73,
+    failure_code: null,
+    failure_reason: null,
+    started_at: timestamp,
+    heartbeat_at: timestamp,
+    completed_at: timestamp,
     created_by_user_id: 1,
     created_at: timestamp,
     updated_at: timestamp,
@@ -344,7 +350,7 @@ const modelVersions = [
     parent_version_id: null,
     task_version_id: 12,
     training_dataset_version_id: 51,
-    family: "linear",
+    family: "conventional_ml",
     framework: "scikit-learn",
     base_model: {},
     training_method: "supervised",
@@ -354,6 +360,7 @@ const modelVersions = [
     metrics: { f1: 0.84 },
     runtime_digest: hash,
     content_hash: hash,
+    checkpoint_package_id: 274,
     created_at: timestamp,
   },
 ];
@@ -830,6 +837,16 @@ export async function installPlatformApiMock(
   let releaseModelVersion: Record<string, unknown> | null = null;
   let releaseEvaluation: Record<string, unknown> | null = null;
   let releaseRun: Record<string, unknown> | null = null;
+  let activeFeedbackRuns: Array<Record<string, unknown>> = feedbackRuns.map(
+    (run) => ({ ...run }),
+  );
+  let activeFeedbackSets: Array<Record<string, unknown>> = feedbackSets.map(
+    (feedbackSet) => ({ ...feedbackSet }),
+  );
+  let activeRounds: Array<Record<string, unknown>> = rounds.map((round) => ({
+    ...round,
+  }));
+  let createdRoundId: number | null = null;
 
   const releaseEnvironment = {
     id: 331,
@@ -1012,7 +1029,14 @@ export async function installPlatformApiMock(
         overrides: [],
         effective:
           workspaceId === 1
-            ? ["annotation", "lineage", "export", "training", "inference"]
+            ? [
+                "annotation",
+                "lineage",
+                "export",
+                "training",
+                "inference",
+                "active_learning",
+              ]
             : ["annotation", "lineage", "export"],
         blocked: {},
       });
@@ -1041,6 +1065,143 @@ export async function installPlatformApiMock(
         search: url.search,
       });
       await json(route, roundWorkContext);
+      return;
+    }
+    if (
+      request.method() === "GET" &&
+      url.pathname === "/api/projects/1/feedback-runs/74"
+    ) {
+      const current = activeFeedbackRuns.find((run) => run.id === 74);
+      if (!current) {
+        await json(route, { detail: "Feedback run not found" }, 404);
+        return;
+      }
+      const completed = {
+        ...current,
+        status: "completed",
+        output_feedback_set_version_id: 75,
+        heartbeat_at: timestamp,
+        completed_at: timestamp,
+        updated_at: timestamp,
+      };
+      activeFeedbackRuns = activeFeedbackRuns.map((run) =>
+        run.id === 74 ? completed : run,
+      );
+      if (!activeFeedbackSets.some((feedbackSet) => feedbackSet.id === 75)) {
+        activeFeedbackSets = [
+          ...activeFeedbackSets,
+          {
+            id: 75,
+            project_id: 1,
+            feedback_run_id: 74,
+            dataset_version_id: 22,
+            task_version_id: 12,
+            version_number: 1,
+            output_schema: taskVersions[0].output_schema,
+            candidate_count: 240,
+            content_hash: releaseGateHash,
+            artifact_package_id: null,
+            created_by_user_id: 1,
+            created_at: timestamp,
+            updated_at: timestamp,
+          },
+        ];
+      }
+      requests.push({
+        method: request.method(),
+        pathname: url.pathname,
+        search: url.search,
+      });
+      await json(route, completed);
+      return;
+    }
+    if (
+      request.method() === "GET" &&
+      createdRoundId !== null &&
+      url.pathname === `/api/rounds/${createdRoundId}/work-context`
+    ) {
+      const createdRound = activeRounds.find((round) => round.id === createdRoundId);
+      requests.push({
+        method: request.method(),
+        pathname: url.pathname,
+        search: url.search,
+      });
+      await json(route, {
+        project: { id: 1, name: platformProject.name },
+        round: {
+          ...createdRound,
+          feedback_available: true,
+        },
+        task: {
+          id: taskDefinitions[0].id,
+          key: taskDefinitions[0].key,
+          name: taskDefinitions[0].name,
+        },
+        task_version: taskVersions[0],
+        cycle: {
+          id: cycles[0].id,
+          name: cycles[0].name,
+          sequence: cycles[0].sequence,
+        },
+        guideline: null,
+      });
+      return;
+    }
+    if (
+      request.method() === "GET" &&
+      createdRoundId !== null &&
+      url.pathname === `/api/rounds/${createdRoundId}/work-items`
+    ) {
+      requests.push({
+        method: request.method(),
+        pathname: url.pathname,
+        search: url.search,
+      });
+      await json(route, [
+        {
+          round_item: {
+            id: 761,
+            project_id: 1,
+            annotation_round_id: createdRoundId,
+            dataset_item_id: 221,
+            selection_rank: 1,
+            selection_score: 0.49,
+            selection_reason: {
+              strategy: "uncertainty",
+              feedback_set_version_id: 75,
+            },
+            created_at: timestamp,
+            updated_at: timestamp,
+          },
+          dataset_item: {
+            id: 221,
+            project_id: 1,
+            dataset_version_id: 22,
+            stable_key: "PMID-E2E-uncertain",
+            group_key: "patient-17",
+            payload: {
+              text: "The treatment effect was uncertain in the primary analysis.",
+            },
+            content_hash: hash,
+            created_at: timestamp,
+            updated_at: timestamp,
+          },
+        },
+      ]);
+      return;
+    }
+    if (
+      request.method() === "GET" &&
+      createdRoundId !== null &&
+      (url.pathname === `/api/rounds/${createdRoundId}/decisions` ||
+        url.pathname === `/api/rounds/${createdRoundId}/submissions`)
+    ) {
+      requests.push({
+        method: request.method(),
+        pathname: url.pathname,
+        search: url.search,
+      });
+      await json(route, []);
       return;
     }
     if (request.method() === "GET" && url.pathname === "/api/projects") {
@@ -1079,6 +1240,120 @@ export async function installPlatformApiMock(
           body: requestBody,
         });
       };
+
+      if (url.pathname === "/api/feedback-runs") {
+        const run = {
+          id: 74,
+          ...payload,
+          project_id: 1,
+          producer_type: "registered_model",
+          provider: null,
+          external_model_id: null,
+          exact_revision: null,
+          prompt_template_hash: null,
+          status: "planned",
+          output_feedback_set_version_id: null,
+          failure_code: null,
+          failure_reason: null,
+          started_at: null,
+          heartbeat_at: null,
+          completed_at: null,
+          created_by_user_id: 1,
+          created_at: timestamp,
+          updated_at: timestamp,
+        };
+        activeFeedbackRuns = [
+          ...activeFeedbackRuns.filter((item) => item.id !== 74),
+          run,
+        ];
+        capture();
+        await json(route, run, 201);
+        return;
+      }
+      if (
+        url.pathname === "/api/projects/1/feedback-runs/74/materialize"
+      ) {
+        const run = activeFeedbackRuns.find((item) => item.id === 74);
+        const queued = {
+          ...run,
+          status: "queued",
+          started_at: null,
+          heartbeat_at: null,
+          completed_at: null,
+          updated_at: timestamp,
+        };
+        activeFeedbackRuns = activeFeedbackRuns.map((item) =>
+          item.id === 74 ? queued : item,
+        );
+        capture();
+        await json(route, queued, 202);
+        return;
+      }
+      if (url.pathname === "/api/selection-runs") {
+        capture();
+        await json(
+          route,
+          {
+            id: 76,
+            ...payload,
+            status: "planned",
+            created_at: timestamp,
+            updated_at: timestamp,
+          },
+          201,
+        );
+        return;
+      }
+      if (url.pathname === "/api/projects/1/selection-runs/76/materialize") {
+        capture();
+        await json(
+          route,
+          {
+            id: 77,
+            project_id: 1,
+            selection_run_id: 76,
+            item_count: 25,
+            content_hash: releaseGateHash,
+            created_at: timestamp,
+            updated_at: timestamp,
+          },
+          201,
+        );
+        return;
+      }
+      if (url.pathname === "/api/rounds") {
+        const round = {
+          id: 78,
+          ...payload,
+          project_id: 1,
+          sequence: 5,
+          status: "draft",
+          opened_at: null,
+          closed_at: null,
+          created_at: timestamp,
+          updated_at: timestamp,
+        };
+        activeRounds = [...activeRounds, round];
+        capture();
+        await json(route, round, 201);
+        return;
+      }
+      if (url.pathname === "/api/rounds/78/transition") {
+        const round = activeRounds.find((item) => item.id === 78);
+        const opened = {
+          ...round,
+          status: "open",
+          opened_at: timestamp,
+          updated_at: timestamp,
+        };
+        activeRounds = activeRounds.map((item) =>
+          item.id === 78 ? opened : item,
+        );
+        createdRoundId = 78;
+        capture();
+        await json(route, opened);
+        return;
+      }
 
       if (releaseGateEnabled && url.pathname === "/api/projects") {
         releaseProject = {
@@ -1605,9 +1880,9 @@ export async function installPlatformApiMock(
       ["/api/datasets/split-maps", splitMaps],
       ["/api/datasets/training-versions", trainingDatasets],
       ["/api/cycles", cycles],
-      ["/api/rounds", rounds],
-      ["/api/feedback-runs", feedbackRuns],
-      ["/api/feedback-runs/sets", feedbackSets],
+      ["/api/rounds", activeRounds],
+      ["/api/feedback-runs", activeFeedbackRuns],
+      ["/api/feedback-runs/sets", activeFeedbackSets],
       ["/api/models", registeredModels],
       ["/api/models/versions", modelVersions],
       ["/api/models/81/versions/82/evaluations", modelEvaluations],

@@ -1306,6 +1306,9 @@ function TrainingData({
           onCreateRound={async () => {
             throw new Error("Rounds are managed from Projects.");
           }}
+          onScoreFeedback={async () => {
+            throw new Error("Model scoring is managed from Projects.");
+          }}
           onCreateGuideline={async () => {
             throw new Error("Guideline Learning is planned for a later release.");
           }}

@@ -185,6 +185,7 @@ describe("module navigation model", () => {
     });
     expect(canAccessProjectSection(trainer, "overview")).toBe(true);
     expect(canAccessProjectSection(trainer, "data")).toBe(true);
+    expect(canAccessProjectSection(trainer, "rounds")).toBe(true);
     expect(canAccessProjectSection(trainer, "tasks")).toBe(false);
     expect(canAccessProjectSection(trainer, "settings")).toBe(false);
 

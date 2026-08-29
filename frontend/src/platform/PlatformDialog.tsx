@@ -15,6 +15,7 @@ import DialogFrame from "@/components/DialogFrame";
 import type {
   CycleDraft,
   DatasetDraft,
+  FeedbackScoringDraft,
   GuidelineDraft,
   RoundDraft,
   TaskDraft,
@@ -35,6 +36,7 @@ interface PlatformDialogProps {
   onCreateDataset: (draft: DatasetDraft) => Promise<void>;
   onCreateCycle: (draft: CycleDraft) => Promise<void>;
   onCreateRound: (draft: RoundDraft) => Promise<void>;
+  onScoreFeedback: (draft: FeedbackScoringDraft) => Promise<void>;
   onCreateGuideline: (draft: GuidelineDraft) => Promise<void>;
   onCreateTask: (draft: TaskDraft) => Promise<void>;
   onPrepareTrainingData: (draft: TrainingDataDraft) => Promise<void>;
@@ -46,6 +48,7 @@ const ICONS = {
   trainingData: Split,
   cycle: RefreshCw,
   round: Repeat2,
+  feedbackScore: BrainCircuit,
   guideline: BookOpen,
 };
 
@@ -55,6 +58,7 @@ const TITLES = {
   trainingData: "Prepare training data",
   cycle: "Start learning cycle",
   round: "Create annotation round",
+  feedbackScore: "Score dataset with model",
   guideline: "Create guideline",
 };
 
@@ -67,6 +71,7 @@ export default function PlatformDialog({
   onCreateDataset,
   onCreateCycle,
   onCreateRound,
+  onScoreFeedback,
   onCreateGuideline,
   onCreateTask,
   onPrepareTrainingData,
@@ -150,6 +155,14 @@ export default function PlatformDialog({
           onSubmit={(draft) => submit(() => onCreateRound(draft))}
         />
       ) : null}
+      {kind === "feedbackScore" ? (
+        <FeedbackScoringForm
+          data={data}
+          busy={busy}
+          defaultDatasetVersion={defaultDatasetVersion}
+          onSubmit={(draft) => submit(() => onScoreFeedback(draft))}
+        />
+      ) : null}
       {kind === "guideline" ? (
         <GuidelineForm
           data={data}
@@ -163,11 +176,17 @@ export default function PlatformDialog({
   );
 }
 
-function FormActions({ busy }: { busy: boolean }): React.ReactElement {
+function FormActions({
+  busy,
+  label = "Create",
+}: {
+  busy: boolean;
+  label?: string;
+}): React.ReactElement {
   return (
     <div className="platform-dialog-actions">
       <Button
-        label={busy ? "Creating…" : "Create"}
+        label={busy ? `${label}…` : label}
         type="submit"
         variant="primary"
         isDisabled={busy}
@@ -708,6 +727,186 @@ function CycleForm({
   );
 }
 
+function FeedbackScoringForm({
+  data,
+  busy,
+  defaultDatasetVersion,
+  onSubmit,
+}: {
+  data: PlatformProjectData;
+  busy: boolean;
+  defaultDatasetVersion: number;
+  onSubmit: (draft: FeedbackScoringDraft) => Promise<void>;
+}): React.ReactElement {
+  const classificationTasks = data.taskVersions.filter(
+    (task) => task.task_kind === "classification",
+  );
+  const initialTaskVersionId = classificationTasks[0]?.id ?? 0;
+  const initialDatasetVersionId =
+    data.datasetVersions.find(
+      (version) => version.id === defaultDatasetVersion && version.item_count > 0,
+    )?.id ?? data.datasetVersions.find((version) => version.item_count > 0)?.id ?? 0;
+  const scorableCycles = data.cycles.filter((cycle) => {
+    const task = data.taskVersions.find((item) => item.id === cycle.task_version_id);
+    const dataset = data.datasetVersions.find(
+      (item) => item.id === cycle.source_dataset_version_id,
+    );
+    const model = data.modelVersions.find(
+      (item) => item.id === cycle.baseline_model_version_id,
+    );
+    return Boolean(
+      task?.task_kind === "classification" &&
+      dataset &&
+      dataset.item_count > 0 &&
+      model?.recipe_key === "tfidf_logistic_regression" &&
+      model.framework === "scikit-learn" &&
+      model.family === "conventional_ml" &&
+      model.checkpoint_package_id,
+    );
+  });
+  const [cycleId, setCycleId] = useState(0);
+  const [taskVersionId, setTaskVersionId] = useState(initialTaskVersionId);
+  const [datasetVersionId, setDatasetVersionId] = useState(initialDatasetVersionId);
+  const [modelVersionId, setModelVersionId] = useState(0);
+  const selectedCycle = data.cycles.find((cycle) => cycle.id === cycleId);
+  const compatibleModels = data.modelVersions.filter(
+    (version) =>
+      version.task_version_id === taskVersionId &&
+      version.recipe_key === "tfidf_logistic_regression" &&
+      version.framework === "scikit-learn" &&
+      version.family === "conventional_ml" &&
+      Boolean(version.checkpoint_package_id),
+  );
+
+  function chooseCompatibleModel(nextTaskVersionId: number): void {
+    const version = data.modelVersions.find(
+      (item) =>
+        item.task_version_id === nextTaskVersionId &&
+        item.recipe_key === "tfidf_logistic_regression" &&
+        item.framework === "scikit-learn" &&
+        item.family === "conventional_ml" &&
+        Boolean(item.checkpoint_package_id),
+    );
+    setModelVersionId(version?.id ?? 0);
+  }
+
+  return (
+    <form className="platform-dialog-form" onSubmit={(event) => {
+      event.preventDefault();
+      void onSubmit({
+        cycleId: cycleId || null,
+        taskVersionId,
+        datasetVersionId,
+        modelVersionId,
+      });
+    }}>
+      <p className="platform-form-note">
+        The worker scores the complete immutable dataset. Test and validation protection is
+        applied later, when a targeted round is selected.
+      </p>
+      <label>
+        <span>Learning cycle</span>
+        <select
+          value={cycleId}
+          onChange={(event) => {
+            const nextCycleId = Number(event.target.value);
+            const cycle = data.cycles.find((item) => item.id === nextCycleId);
+            setCycleId(nextCycleId);
+            if (cycle) {
+              setDatasetVersionId(cycle.source_dataset_version_id);
+              setTaskVersionId(cycle.task_version_id);
+              setModelVersionId(cycle.baseline_model_version_id ?? 0);
+            }
+          }}
+        >
+          <option value={0}>No cycle</option>
+          {scorableCycles.map((cycle) => (
+            <option key={cycle.id} value={cycle.id}>
+              Cycle {cycle.sequence} · {cycle.name}
+            </option>
+          ))}
+        </select>
+        {selectedCycle ? <small>Dataset, task, and baseline model are pinned by this cycle.</small> : null}
+      </label>
+      <section className="platform-form-grid" aria-label="Scoring resources">
+        <label>
+          <span>Classification task</span>
+          <select
+            required
+            disabled={Boolean(selectedCycle)}
+            value={taskVersionId}
+            onChange={(event) => {
+              const nextTaskVersionId = Number(event.target.value);
+              setTaskVersionId(nextTaskVersionId);
+              chooseCompatibleModel(nextTaskVersionId);
+            }}
+          >
+            <option value={0}>Select a task</option>
+            {classificationTasks.map((task) => (
+              <option key={task.id} value={task.id}>
+                Classification · v{task.version_number}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span>Dataset version</span>
+          <select
+            required
+            disabled={Boolean(selectedCycle)}
+            value={datasetVersionId}
+            onChange={(event) => setDatasetVersionId(Number(event.target.value))}
+          >
+            <option value={0}>Select a non-empty dataset</option>
+            {data.datasetVersions.filter((version) => version.item_count > 0).map((version) => {
+              const dataset = data.datasets.find((item) => item.id === version.dataset_id);
+              return (
+                <option key={version.id} value={version.id}>
+                  {dataset?.name ?? "Dataset"} · v{version.version_number} · {version.item_count} items
+                </option>
+              );
+            })}
+          </select>
+        </label>
+      </section>
+      <label>
+        <span>TF-IDF model</span>
+        <select
+          required
+          disabled={Boolean(selectedCycle)}
+          value={modelVersionId}
+          onChange={(event) => setModelVersionId(Number(event.target.value))}
+        >
+          <option value={0}>Select a compatible model</option>
+          {compatibleModels.map((version) => {
+            const model = data.models.find(
+              (item) => item.id === version.registered_model_id,
+            );
+            return (
+              <option key={version.id} value={version.id}>
+                {model?.name ?? "Model"} · v{version.version_number}
+              </option>
+            );
+          })}
+        </select>
+      </label>
+      {!classificationTasks.length ? (
+        <p className="platform-dialog-error" role="alert">
+          Create a classification task before scoring.
+        </p>
+      ) : !compatibleModels.length ? (
+        <p className="platform-dialog-error" role="alert">
+          No ready TF-IDF logistic-regression model matches this task.
+        </p>
+      ) : null}
+      <FormActions
+        busy={busy || !taskVersionId || !datasetVersionId || !modelVersionId}
+        label="Start scoring"
+      />
+    </form>
+  );
+}
+
 function RoundForm({
   data,
   busy,
@@ -722,12 +921,76 @@ function RoundForm({
   onSubmit: (draft: RoundDraft) => Promise<void>;
 }): React.ReactElement {
   const [name, setName] = useState("");
+  const [cycleId, setCycleId] = useState(0);
   const [taskVersionId, setTaskVersionId] = useState(defaultTaskVersion);
   const [datasetVersionId, setDatasetVersionId] = useState(defaultDatasetVersion);
   const [guidelineRevisionId, setGuidelineRevisionId] = useState(0);
+  const [reannotationMode, setReannotationMode] =
+    useState<RoundDraft["reannotationMode"]>("full_dataset");
+  const [selectionStrategy, setSelectionStrategy] =
+    useState<RoundDraft["selectionStrategy"]>("random");
+  const [splitMapId, setSplitMapId] = useState(0);
+  const [selectionLimit, setSelectionLimit] = useState(25);
+  const [feedbackSetVersionId, setFeedbackSetVersionId] = useState(0);
   const [annotatorUserIds, setAnnotatorUserIds] = useState<number[]>([]);
   const [openToAllAnnotators, setOpenToAllAnnotators] = useState(false);
   const [reason, setReason] = useState("");
+  const selectedCycle = data.cycles.find((cycle) => cycle.id === cycleId);
+  const compatibleSplitMaps = data.splitMaps.filter(
+    (splitMap) => splitMap.dataset_version_id === datasetVersionId,
+  );
+  const compatibleFeedbackSets = data.feedbackSets.filter((feedbackSet) => {
+    const run = data.feedbackRuns.find(
+      (item) =>
+        item.id === feedbackSet.feedback_run_id &&
+        item.status === "completed" &&
+        item.output_feedback_set_version_id === feedbackSet.id,
+    );
+    return Boolean(
+      run &&
+      feedbackSet.candidate_count > 0 &&
+      feedbackSet.dataset_version_id === datasetVersionId &&
+      feedbackSet.task_version_id === taskVersionId &&
+      run.cycle_id === (cycleId || null),
+    );
+  });
+  const selectedDataset = data.datasetVersions.find(
+    (version) => version.id === datasetVersionId,
+  );
+
+  function resetSelectionResources(
+    nextDatasetVersionId: number,
+    nextTaskVersionId: number,
+    nextCycleId: number,
+  ): void {
+    setSplitMapId(
+      data.splitMaps.find(
+        (splitMap) => splitMap.dataset_version_id === nextDatasetVersionId,
+      )?.id ?? 0,
+    );
+    const nextFeedbackSet = data.feedbackSets.find((feedbackSet) => {
+      const run = data.feedbackRuns.find(
+        (item) =>
+          item.id === feedbackSet.feedback_run_id &&
+          item.status === "completed" &&
+          item.output_feedback_set_version_id === feedbackSet.id,
+      );
+      return Boolean(
+        run &&
+        feedbackSet.candidate_count > 0 &&
+        feedbackSet.dataset_version_id === nextDatasetVersionId &&
+        feedbackSet.task_version_id === nextTaskVersionId &&
+        run.cycle_id === (nextCycleId || null),
+      );
+    });
+    setFeedbackSetVersionId(nextFeedbackSet?.id ?? 0);
+  }
+
+  const targeted = reannotationMode === "targeted_subset";
+  const uncertaintyIncomplete =
+    targeted &&
+    selectionStrategy === "uncertainty" &&
+    !compatibleFeedbackSets.some((feedbackSet) => feedbackSet.id === feedbackSetVersionId);
 
   return (
     <form className="platform-dialog-form" onSubmit={(event) => {
@@ -736,70 +999,175 @@ function RoundForm({
         name,
         taskVersionId,
         datasetVersionId,
-        cycleId: null,
+        cycleId: cycleId || null,
+        splitMapId: targeted ? splitMapId || null : null,
         guidelineRevisionId: guidelineRevisionId || null,
-        feedbackSetVersionId: null,
+        feedbackSetVersionId: feedbackSetVersionId || null,
         assistancePolicy: "blind",
-        reannotationMode: "full_dataset",
-        selectionStrategy: "all",
-        selectionLimit: 1,
+        reannotationMode,
+        selectionStrategy: targeted ? selectionStrategy : "all",
+        selectionLimit,
         annotatorUserIds,
         openToAllAnnotators,
         reason,
       });
     }}>
       <label><span>Round name</span><input required value={name} onChange={(event) => setName(event.target.value)} /></label>
+      <label>
+        <span>Learning cycle</span>
+        <select
+          value={cycleId}
+          onChange={(event) => {
+            const nextCycleId = Number(event.target.value);
+            const cycle = data.cycles.find((item) => item.id === nextCycleId);
+            setCycleId(nextCycleId);
+            if (cycle) {
+              setTaskVersionId(cycle.task_version_id);
+              setDatasetVersionId(cycle.source_dataset_version_id);
+              resetSelectionResources(
+                cycle.source_dataset_version_id,
+                cycle.task_version_id,
+                cycle.id,
+              );
+            } else {
+              resetSelectionResources(datasetVersionId, taskVersionId, 0);
+            }
+          }}
+        >
+          <option value={0}>No cycle</option>
+          {data.cycles.map((cycle) => (
+            <option key={cycle.id} value={cycle.id}>Cycle {cycle.sequence} · {cycle.name}</option>
+          ))}
+        </select>
+        {selectedCycle ? <small>Dataset and task are pinned by this cycle.</small> : null}
+      </label>
       <ResourceSelectors
         data={data}
         taskVersionId={taskVersionId}
         datasetVersionId={datasetVersionId}
-        onTaskChange={setTaskVersionId}
-        onDatasetChange={setDatasetVersionId}
+        disabled={Boolean(selectedCycle)}
+        onTaskChange={(nextTaskVersionId) => {
+          setTaskVersionId(nextTaskVersionId);
+          resetSelectionResources(datasetVersionId, nextTaskVersionId, cycleId);
+        }}
+        onDatasetChange={(nextDatasetVersionId) => {
+          setDatasetVersionId(nextDatasetVersionId);
+          resetSelectionResources(nextDatasetVersionId, taskVersionId, cycleId);
+        }}
       />
+      <fieldset className="platform-fieldset">
+        <legend>Round coverage</legend>
+        <section className="platform-option-list">
+          <label>
+            <input
+              type="radio"
+              name="round-coverage"
+              checked={!targeted}
+              onChange={() => setReannotationMode("full_dataset")}
+            />
+            <span><strong>Full dataset</strong><small>Annotate every dataset item.</small></span>
+          </label>
+          <label>
+            <input
+              type="radio"
+              name="round-coverage"
+              checked={targeted}
+              onChange={() => {
+                setReannotationMode("targeted_subset");
+                if (!splitMapId) setSplitMapId(compatibleSplitMaps[0]?.id ?? 0);
+              }}
+            />
+            <span><strong>Targeted subset</strong><small>Select eligible items while preserving protected splits.</small></span>
+          </label>
+        </section>
+      </fieldset>
+      {targeted ? (
+        <>
+          <section className="platform-form-grid" aria-label="Selection configuration">
+            <label>
+              <span>Split map</span>
+              <select required value={splitMapId} onChange={(event) => setSplitMapId(Number(event.target.value))}>
+                <option value={0}>Select a governed split</option>
+                {compatibleSplitMaps.map((splitMap) => (
+                  <option key={splitMap.id} value={splitMap.id}>
+                    {splitMap.name} · protects {splitMap.protected_splits.join(", ") || "none"}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>Selection strategy</span>
+              <select
+                value={selectionStrategy}
+                onChange={(event) => setSelectionStrategy(event.target.value as "random" | "uncertainty")}
+              >
+                <option value="random">Random</option>
+                <option value="uncertainty">Uncertainty</option>
+              </select>
+            </label>
+          </section>
+          <label>
+            <span>Selection limit</span>
+            <input
+              required
+              type="number"
+              min={1}
+              max={selectedDataset?.item_count || undefined}
+              value={selectionLimit}
+              onChange={(event) => setSelectionLimit(Number(event.target.value))}
+            />
+          </label>
+        </>
+      ) : null}
+      <label>
+        <span>Model feedback set</span>
+        <select
+          required={targeted && selectionStrategy === "uncertainty"}
+          value={feedbackSetVersionId}
+          onChange={(event) => setFeedbackSetVersionId(Number(event.target.value))}
+        >
+          <option value={0}>No feedback set</option>
+          {compatibleFeedbackSets.map((feedbackSet) => (
+            <option key={feedbackSet.id} value={feedbackSet.id}>
+              Feedback set v{feedbackSet.version_number} · {feedbackSet.candidate_count} candidates
+            </option>
+          ))}
+        </select>
+        <small>Assistance remains blind: scores affect order but predictions are not shown to annotators.</small>
+      </label>
+      {uncertaintyIncomplete ? (
+        <p className="platform-dialog-error" role="alert">
+          Uncertainty selection requires a completed, non-empty feedback set for this dataset, task, and cycle.
+        </p>
+      ) : null}
       <label>
         <span>Pinned guideline</span>
-        <select
-          value={guidelineRevisionId}
-          onChange={(event) => setGuidelineRevisionId(Number(event.target.value))}
-        >
+        <select value={guidelineRevisionId} onChange={(event) => setGuidelineRevisionId(Number(event.target.value))}>
           <option value={0}>No guideline</option>
           {data.guidelineRevisions.map((revision) => {
-            const guideline = data.guidelines.find(
-              (item) => item.id === revision.guideline_id,
-            );
-            return (
-              <option key={revision.id} value={revision.id}>
-                {guideline?.name ?? "Guideline"} · v{revision.version_number}
-              </option>
-            );
+            const guideline = data.guidelines.find((item) => item.id === revision.guideline_id);
+            return <option key={revision.id} value={revision.id}>{guideline?.name ?? "Guideline"} · v{revision.version_number}</option>;
           })}
         </select>
       </label>
       <fieldset className="platform-form-fieldset">
         <legend>Annotators</legend>
-        <div className="platform-checkbox-list">
-          {data.workspaceMembers
-            .filter((member) => member.is_active)
-            .map((member) => (
-              <label key={member.user_id} className="platform-checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={annotatorUserIds.includes(member.user_id)}
-                  disabled={openToAllAnnotators}
-                  onChange={(event) => {
-                    setAnnotatorUserIds((current) =>
-                      event.target.checked
-                        ? [...current, member.user_id]
-                        : current.filter((userId) => userId !== member.user_id),
-                    );
-                  }}
-                />
-                <span>
-                  {member.display_name || member.username} · {member.role}
-                </span>
-              </label>
-            ))}
-        </div>
+        <section className="platform-checkbox-list">
+          {data.workspaceMembers.filter((member) => member.is_active).map((member) => (
+            <label key={member.user_id} className="platform-checkbox-row">
+              <input
+                type="checkbox"
+                checked={annotatorUserIds.includes(member.user_id)}
+                disabled={openToAllAnnotators}
+                onChange={(event) => setAnnotatorUserIds((current) =>
+                  event.target.checked
+                    ? [...current, member.user_id]
+                    : current.filter((userId) => userId !== member.user_id))}
+              />
+              <span>{member.display_name || member.username} · {member.role}</span>
+            </label>
+          ))}
+        </section>
       </fieldset>
       <label className="platform-checkbox-row">
         <input
@@ -813,14 +1181,14 @@ function RoundForm({
         <span>Open to all workspace annotators</span>
       </label>
       <label><span>Reason</span><textarea rows={3} value={reason} onChange={(event) => setReason(event.target.value)} /></label>
-      <FormActions
-        busy={
-          busy ||
-          !taskVersionId ||
-          !datasetVersionId ||
-          (!openToAllAnnotators && !annotatorUserIds.length)
-        }
-      />
+      <FormActions busy={
+        busy ||
+        !taskVersionId ||
+        !datasetVersionId ||
+        (targeted && !splitMapId) ||
+        uncertaintyIncomplete ||
+        (!openToAllAnnotators && !annotatorUserIds.length)
+      } />
     </form>
   );
 }
@@ -876,24 +1244,26 @@ function ResourceSelectors({
   datasetVersionId,
   onTaskChange,
   onDatasetChange,
+  disabled = false,
 }: {
   data: PlatformProjectData;
   taskVersionId: number;
   datasetVersionId: number;
   onTaskChange: (value: number) => void;
   onDatasetChange: (value: number) => void;
+  disabled?: boolean;
 }): React.ReactElement {
   return (
     <div className="platform-form-grid">
       <label>
         <span>Task version</span>
-        <select required value={taskVersionId} onChange={(event) => onTaskChange(Number(event.target.value))}>
+        <select required disabled={disabled} value={taskVersionId} onChange={(event) => onTaskChange(Number(event.target.value))}>
           {data.taskVersions.map((task) => <option key={task.id} value={task.id}>{task.task_kind.replace(/_/g, " ")} · v{task.version_number}</option>)}
         </select>
       </label>
       <label>
         <span>Dataset version</span>
-        <select required value={datasetVersionId} onChange={(event) => onDatasetChange(Number(event.target.value))}>
+        <select required disabled={disabled} value={datasetVersionId} onChange={(event) => onDatasetChange(Number(event.target.value))}>
           {data.datasetVersions.map((version) => {
             const dataset = data.datasets.find((item) => item.id === version.dataset_id);
             return <option key={version.id} value={version.id}>{dataset?.name ?? "Dataset"} · v{version.version_number}</option>;

@@ -366,6 +366,88 @@ test("workspace switching reloads effective access without a not-found transitio
   }
 });
 
+test("manager scores a dataset, selects by uncertainty, and opens the prioritized round", async ({
+  page,
+}) => {
+  const mock = await installPlatformApiMock(page, { role: "manager" });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/projects/1/rounds");
+
+  await expectRouteIdentity(page, "/projects/1/rounds", "Team & Rounds");
+  await expect(page.getByRole("heading", { name: "Model scoring" })).toBeVisible();
+  await page.getByRole("button", { name: "Score with model" }).click();
+
+  const scoringDialog = page.getByRole("dialog", {
+    name: "Score dataset with model",
+  });
+  await scoringDialog
+    .getByRole("combobox", { name: "Learning cycle" })
+    .selectOption("61");
+  await expect(
+    scoringDialog.getByRole("combobox", { name: "TF-IDF model" }),
+  ).toHaveValue("82");
+  await scoringDialog.getByRole("button", { name: "Start scoring" }).click();
+
+  const scoringTable = page.getByRole("region", { name: "Model scoring runs" });
+  const completedRun = scoringTable.locator("tr").filter({
+    hasText: "Relevance baseline",
+  });
+  await expect(completedRun).toContainText("Completed", { timeout: 15_000 });
+  await expect(completedRun).toContainText("240");
+
+  await page.getByRole("button", { name: "New round" }).click();
+  const roundDialog = page.getByRole("dialog", {
+    name: "Create annotation round",
+  });
+  await roundDialog.getByRole("textbox", { name: "Round name" }).fill(
+    "Uncertain abstract review",
+  );
+  await roundDialog
+    .getByRole("combobox", { name: "Learning cycle" })
+    .selectOption("61");
+  await roundDialog.getByRole("radio", { name: /Targeted subset/ }).check();
+  await roundDialog
+    .getByRole("combobox", { name: "Selection strategy" })
+    .selectOption("uncertainty");
+  await roundDialog
+    .getByRole("combobox", { name: "Model feedback set" })
+    .selectOption("75");
+  await roundDialog
+    .getByRole("checkbox", { name: "Open to all workspace annotators" })
+    .check();
+  await roundDialog.getByRole("button", { name: "Create" }).click();
+
+  const newRound = page
+    .getByRole("region", { name: "Annotation rounds table" })
+    .locator("tr")
+    .filter({ hasText: "Uncertain abstract review" });
+  await expect(newRound).toContainText("Open");
+  await newRound.getByRole("button", { name: "Annotate" }).click();
+
+  await expect
+    .poll(() => page.evaluate(() => window.location.pathname))
+    .toBe("/my-work/rounds/78");
+  await expect(
+    page.getByRole("heading", { level: 2, name: "Uncertain abstract review" }),
+  ).toBeVisible();
+  await expect(page.getByText("Priority #1")).toBeVisible();
+  await expect(page.getByText("Uncertainty 0.490")).toBeVisible();
+  await expect(page.getByText("Uncertainty", { exact: true })).toBeVisible();
+
+  const selectionRequest = mock.requests.find(
+    (request) =>
+      request.method === "POST" && request.pathname === "/api/selection-runs",
+  );
+  expect(selectionRequest?.body).toMatchObject({
+    cycle_id: 61,
+    split_map_id: 41,
+    feedback_set_version_id: 75,
+    strategy: "uncertainty",
+  });
+  await expectNoDocumentOverflow(page);
+  await expectNoAxeViolations(page);
+});
+
 test.describe("mobile navigation", () => {
   test.use({ viewport: { width: 375, height: 812 } });
 

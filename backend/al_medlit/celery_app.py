@@ -33,6 +33,11 @@ app.conf.update(
             "schedule": 60.0,
             "options": {"queue": "control"},
         },
+        "reconcile-feedback-scoring": {
+            "task": "al_medlit.workflow.reconcile_feedback_scoring",
+            "schedule": 60.0,
+            "options": {"queue": "control"},
+        },
         "garbage-collect-unreferenced-model-blobs": {
             "task": "al_medlit.model_artifacts.garbage_collect",
             "schedule": 6 * 60 * 60.0,

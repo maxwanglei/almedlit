@@ -52,7 +52,7 @@ def list_rounds(
         db,
         current_user,
         project_id,
-        min_role="manager",
+        min_role="trainer",
         module=("annotate", "activity"),
     )
     return service.list_annotation_rounds(db, project_id, cycle_id)

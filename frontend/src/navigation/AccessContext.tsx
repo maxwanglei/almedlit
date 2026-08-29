@@ -19,6 +19,7 @@ export type AccessCommand =
   | "projects:create"
   | "tasks:manage"
   | "rounds:manage"
+  | "learning:score"
   | "quality:review"
   | "training:read"
   | "training:launch"
@@ -118,6 +119,11 @@ export function canPerform(
       );
     case "projects:read":
       return hasEffectiveRole(access, "trainer");
+    case "learning:score":
+      return (
+        hasEffectiveRole(access, "trainer") &&
+        hasEffectiveCapability(access, "active_learning")
+      );
     case "projects:create":
     case "tasks:manage":
     case "rounds:manage":

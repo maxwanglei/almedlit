@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from al_medlit.core.exceptions import ValidationError
+from al_medlit.training.artifact_loading import load_safe_skops_model
 from al_medlit.training.evaluators.contracts import (
     EvaluationInput,
     EvaluationOutput,
@@ -95,21 +96,7 @@ class SklearnTfidfEvaluator:
         self._model_loader = model_loader
 
     def _load_model(self, model_path: Path):
-        if self._model_loader is not None:
-            return self._model_loader(model_path)
-        try:
-            from skops.io import get_untrusted_types, load
-        except (ImportError, ModuleNotFoundError) as exc:
-            raise ValidationError(
-                "The classical evaluator requires skops in its worker runtime"
-            ) from exc
-        untrusted = get_untrusted_types(file=model_path)
-        if untrusted:
-            raise ValidationError(
-                "The generated sklearn package contains untrusted model types: "
-                + ", ".join(sorted(untrusted))
-            )
-        return load(model_path, trusted=[])
+        return load_safe_skops_model(model_path, model_loader=self._model_loader)
 
     @staticmethod
     def _field_mapping(config: Mapping) -> tuple[str, str]:

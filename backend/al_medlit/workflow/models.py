@@ -356,6 +356,26 @@ class FeedbackRun(Base, IntPrimaryKeyMixin, TimestampMixin):
     configuration: Mapped[dict] = mapped_column(JSONType, default=dict)
     data_egress_policy: Mapped[dict] = mapped_column(JSONType, default=dict)
     status: Mapped[str] = mapped_column(String(30), default="planned", index=True)
+    output_feedback_set_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            "feedback_set_versions.id",
+            name="fk_feedback_runs_output_feedback_set_version_id",
+            use_alter=True,
+        ),
+        nullable=True,
+        index=True,
+    )
+    failure_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_by_user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id"), nullable=True, index=True
     )

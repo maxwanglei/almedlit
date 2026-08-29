@@ -226,7 +226,13 @@ def fixture_test_engine():
     try:
         yield db_engine
     finally:
-        Base.metadata.drop_all(bind=db_engine)
+        # The production schema contains intentionally cyclic foreign keys
+        # (for example, a feedback run points to its immutable output set and
+        # that set points back to its run). SQLite cannot ALTER/drop one side
+        # of a cycle, so disable enforcement only for test-schema teardown.
+        with db_engine.connect() as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            Base.metadata.drop_all(bind=connection)
         db_engine.dispose()
 
 

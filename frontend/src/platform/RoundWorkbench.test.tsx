@@ -60,6 +60,9 @@ function roundWork(roundId: number, text: string): RoundWorkData {
         project_id: 7,
         annotation_round_id: roundId,
         dataset_item_id: roundId * 100,
+        selection_rank: 1,
+        selection_score: 0.42,
+        selection_reason: { strategy: "uncertainty" },
       },
     ],
     datasetItems: [
@@ -155,6 +158,9 @@ describe("RoundWorkbench", () => {
     });
 
     expect(await screen.findByText("Current source record")).toBeTruthy();
+    expect(screen.getByText(/Priority #1/)).toBeTruthy();
+    expect(screen.getByText(/Uncertainty 0.420/)).toBeTruthy();
+    expect(screen.getByText("Uncertainty")).toBeTruthy();
     expect(screen.queryByText("Stale source record")).toBeNull();
   });
 });

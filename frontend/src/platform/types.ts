@@ -115,6 +115,7 @@ export interface TrainingDatasetVersion extends VersionedResource {
 }
 
 export type LearningFeedbackProducer =
+  | "registered_model"
   | "external_llm"
   | "rule"
   | "dictionary"
@@ -151,7 +152,13 @@ export interface FeedbackRun extends VersionedResource {
   prompt_template_hash: string | null;
   configuration: Record<string, unknown>;
   data_egress_policy: Record<string, unknown>;
-  status: string;
+  status: "planned" | "queued" | "running" | "completed" | "failed";
+  output_feedback_set_version_id: number | null;
+  failure_code: string | null;
+  failure_reason: string | null;
+  started_at: string | null;
+  heartbeat_at: string | null;
+  completed_at: string | null;
 }
 
 export interface FeedbackSetVersion extends VersionedResource {
@@ -258,6 +265,9 @@ export interface RoundWorkItemIdentity extends VersionedResource {
   project_id: number;
   annotation_round_id: number;
   dataset_item_id: number;
+  selection_rank: number | null;
+  selection_score: number | null;
+  selection_reason: Record<string, unknown>;
 }
 
 export interface AnnotationDecision extends VersionedResource {

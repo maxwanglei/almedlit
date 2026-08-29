@@ -266,6 +266,10 @@ export default function RoundWorkbench({
   const currentFeedback = currentRoundItem
     ? feedbackByItem[currentRoundItem.id]
     : undefined;
+  const currentSelectionStrategy = currentRoundItem &&
+    typeof currentRoundItem.selection_reason?.strategy === "string"
+      ? currentRoundItem.selection_reason.strategy
+      : null;
   const currentUserSubmitted = work?.submissions
     .filter((submission) => submission.annotator_user_id === currentUserId)
     .sort((left, right) => right.sequence - left.sequence)[0];
@@ -512,6 +516,19 @@ export default function RoundWorkbench({
               {currentUserSubmitted
                 ? ` · submitted snapshot ${currentUserSubmitted.sequence}`
                 : ""}
+            </span>
+            <span className="platform-workbench-priority">
+              {currentRoundItem.selection_rank != null
+                ? `Priority #${currentRoundItem.selection_rank}`
+                : "Full-dataset item"}
+              {currentRoundItem.selection_score != null
+                ? ` · ${currentSelectionStrategy === "uncertainty" ? "Uncertainty" : "Selection score"} ${currentRoundItem.selection_score.toFixed(3)}`
+                : ""}
+              {currentSelectionStrategy ? (
+                <span className="platform-strategy-badge">
+                  {formatStatus(currentSelectionStrategy)}
+                </span>
+              ) : null}
             </span>
           </div>
 

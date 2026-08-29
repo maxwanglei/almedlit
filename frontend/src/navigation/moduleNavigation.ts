@@ -271,11 +271,13 @@ export function canAccessProjectSection(
   if (!canPerform(context, "projects:read")) {
     return false;
   }
-  if (
-    section === "tasks" ||
-    section === "rounds" ||
-    section === "quality"
-  ) {
+  if (section === "rounds") {
+    return (
+      context.effectiveCapabilities.includes("annotation") &&
+      context.blockedCapabilities.annotation === undefined
+    );
+  }
+  if (section === "tasks" || section === "quality") {
     return (
       canPerform(context, "tasks:manage") &&
       context.effectiveCapabilities.includes("annotation") &&

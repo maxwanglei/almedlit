@@ -77,7 +77,7 @@ export const PROJECT_ROUTE_REGISTRY = [
     label: "Team & Rounds",
     title: "Team & Rounds",
     level: "project",
-    requiredRoles: PROJECT_MANAGERS,
+    requiredRoles: PROJECT_ROLES,
     requiredCapability: "annotation",
     backendModule: "annotate",
     releaseState: "released",
