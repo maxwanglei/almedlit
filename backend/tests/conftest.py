@@ -289,7 +289,7 @@ def fixture_client(request):
 
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_object_storage] = lambda: object_storage
-    with TestClient(app) as c:
+    with TestClient(app, base_url="https://testserver") as c:
         yield LegacyAuthClient(c, testing_session_factory)
     app.dependency_overrides.clear()
 

@@ -7,13 +7,11 @@ import AcceptInvitePage from "@/pages/AcceptInvitePage";
 
 const mocks = vi.hoisted(() => ({
   acceptInvite: vi.fn(),
-  authenticate: vi.fn(),
   getInvitePreview: vi.fn(),
 }));
 
 vi.mock("@/api/client", () => ({
   acceptInvite: mocks.acceptInvite,
-  authenticate: mocks.authenticate,
   getInvitePreview: mocks.getInvitePreview,
 }));
 
@@ -34,7 +32,6 @@ beforeEach(() => {
     expires_at: null,
   });
   mocks.acceptInvite.mockResolvedValue(undefined);
-  mocks.authenticate.mockResolvedValue("staged-token");
   Object.defineProperty(window, "matchMedia", {
     configurable: true,
     value: vi.fn().mockImplementation((query: string) => ({
@@ -75,13 +72,13 @@ describe("AcceptInvitePage", () => {
         username: "newcomer",
         password: "strong-password",
         display_name: undefined,
+        create_account: true,
       });
     });
-    expect(mocks.authenticate).not.toHaveBeenCalled();
     await waitFor(() => expect(onAccepted).toHaveBeenCalled());
   });
 
-  it("signs an existing user in before accepting", async () => {
+  it("authenticates an existing user while accepting", async () => {
     const onAccepted = vi.fn();
     render(<AcceptInvitePage token="tok-1" signedIn={false} onAccepted={onAccepted} />);
     await screen.findByText(/Lab Team/);
@@ -91,10 +88,13 @@ describe("AcceptInvitePage", () => {
     fireEvent.change(input("Password"), { target: { value: "pw" } });
     fireEvent.click(acceptButton());
 
-    await waitFor(() => expect(mocks.authenticate).toHaveBeenCalledWith("existing", "pw"));
-    // The staged bearer token is attached without changing the active session
-    // until invite redemption succeeds.
-    expect(mocks.acceptInvite).toHaveBeenCalledWith("tok-1", {}, "staged-token");
+    await waitFor(() => {
+      expect(mocks.acceptInvite).toHaveBeenCalledWith("tok-1", {
+        username: "existing",
+        password: "pw",
+        create_account: false,
+      });
+    });
     await waitFor(() => expect(onAccepted).toHaveBeenCalled());
   });
 
@@ -107,7 +107,6 @@ describe("AcceptInvitePage", () => {
     fireEvent.click(acceptButton());
 
     await waitFor(() => expect(mocks.acceptInvite).toHaveBeenCalledWith("tok-1"));
-    expect(mocks.authenticate).not.toHaveBeenCalled();
     await waitFor(() => expect(onAccepted).toHaveBeenCalled());
   });
 

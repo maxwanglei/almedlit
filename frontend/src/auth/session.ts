@@ -1,51 +1,63 @@
-export const TOKEN_STORAGE_KEY = "al_medlit_access_token";
+export const LEGACY_TOKEN_STORAGE_KEY = "al_medlit_access_token";
+export const SESSION_EVENT_STORAGE_KEY = "al_medlit_session_event";
 
-export type TokenChangeListener = (token: string | null) => void;
+export type SessionChangeListener = (authenticated: boolean) => void;
 
-const tokenChangeListeners = new Set<TokenChangeListener>();
+const sessionChangeListeners = new Set<SessionChangeListener>();
+let sessionGeneration = 0;
 
 function storage(): Storage | null {
   return typeof window === "undefined" ? null : window.localStorage;
 }
 
-export function getToken(): string | null {
-  return storage()?.getItem(TOKEN_STORAGE_KEY) ?? null;
+export function removeLegacyToken(): void {
+  storage()?.removeItem(LEGACY_TOKEN_STORAGE_KEY);
 }
 
-function notifyTokenChange(token: string | null): void {
-  tokenChangeListeners.forEach((listener) => listener(token));
+export function getSessionGeneration(): number {
+  return sessionGeneration;
 }
 
-export function setToken(token: string): void {
+export function publishSessionChange(authenticated: boolean): void {
+  sessionGeneration += 1;
   const tokenStorage = storage();
-  if (!tokenStorage || tokenStorage.getItem(TOKEN_STORAGE_KEY) === token) {
-    return;
+  if (tokenStorage) {
+    tokenStorage.removeItem(LEGACY_TOKEN_STORAGE_KEY);
+    tokenStorage.setItem(
+      SESSION_EVENT_STORAGE_KEY,
+      JSON.stringify({ authenticated, nonce: `${Date.now()}-${Math.random()}` }),
+    );
   }
-  tokenStorage.setItem(TOKEN_STORAGE_KEY, token);
-  notifyTokenChange(token);
+  sessionChangeListeners.forEach((listener) => listener(authenticated));
 }
 
-export function clearToken(): void {
-  const tokenStorage = storage();
-  if (!tokenStorage || tokenStorage.getItem(TOKEN_STORAGE_KEY) === null) {
-    return;
-  }
-  tokenStorage.removeItem(TOKEN_STORAGE_KEY);
-  notifyTokenChange(null);
-}
-
-export function subscribeTokenChanges(listener: TokenChangeListener): () => void {
-  const sameTabListener: TokenChangeListener = (token) => listener(token);
-  tokenChangeListeners.add(sameTabListener);
+export function subscribeSessionChanges(
+  listener: SessionChangeListener,
+): () => void {
+  sessionChangeListeners.add(listener);
 
   const handleStorage = (event: StorageEvent): void => {
-    if (event.key !== TOKEN_STORAGE_KEY && event.key !== null) {
+    if (event.key === null) {
+      sessionGeneration += 1;
+      listener(false);
+      return;
+    }
+    if (event.key !== SESSION_EVENT_STORAGE_KEY || event.newValue === null) {
       return;
     }
     if (event.storageArea !== null && event.storageArea !== storage()) {
       return;
     }
-    listener(event.key === TOKEN_STORAGE_KEY ? event.newValue : getToken());
+    try {
+      const parsed = JSON.parse(event.newValue) as { authenticated?: unknown };
+      if (typeof parsed.authenticated === "boolean") {
+        sessionGeneration += 1;
+        listener(parsed.authenticated);
+      }
+    } catch {
+      // Ignore malformed cross-tab notifications. Server-side cookie
+      // validation remains the authority for authentication state.
+    }
   };
 
   if (typeof window !== "undefined") {
@@ -53,14 +65,9 @@ export function subscribeTokenChanges(listener: TokenChangeListener): () => void
   }
 
   return () => {
-    tokenChangeListeners.delete(sameTabListener);
+    sessionChangeListeners.delete(listener);
     if (typeof window !== "undefined") {
       window.removeEventListener("storage", handleStorage);
     }
   };
-}
-
-export function authHeader(): Record<string, string> {
-  const token = getToken();
-  return token ? { Authorization: `Bearer ${token}` } : {};
 }

@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route } from "@playwright/test";
+import { expect, test, type Route } from "@playwright/test";
 
 const timestamp = "2026-07-31T14:00:00Z";
 
@@ -10,16 +10,9 @@ async function json(route: Route, body: unknown, status = 200): Promise<void> {
   });
 }
 
-async function installToken(page: Page): Promise<void> {
-  await page.addInitScript(() => {
-    window.localStorage.setItem("al_medlit_access_token", "e2e-session");
-  });
-}
-
 test("a membership-less superuser manages deployment users and safe policy", async ({
   page,
 }) => {
-  await installToken(page);
   let policy = {
     allow_self_registration: true,
     default_invite_expiry_minutes: 10_080,
@@ -142,7 +135,6 @@ test("a membership-less superuser manages deployment users and safe policy", asy
 test("an individual owner creates a separate team and manages team access", async ({
   page,
 }) => {
-  await installToken(page);
   let teamCreated = false;
   let joinCode = "join-old";
   let openInvites: Array<Record<string, unknown>> = [];
@@ -341,7 +333,7 @@ test("public account activation completes once and adopts the new session", asyn
     }
     if (url.pathname === "/api/account-actions/activation-token" && request.method() === "POST") {
       completionCount += 1;
-      await json(route, { access_token: "activated-session", token_type: "bearer" });
+      await json(route, { authenticated: true });
       return;
     }
     if (url.pathname === "/api/auth/me") {
@@ -368,7 +360,5 @@ test("public account activation completes once and adopts the new session", asyn
 
   await expect(page.getByRole("heading", { name: "No modules available" })).toBeVisible();
   expect(completionCount).toBe(1);
-  expect(await page.evaluate(() => window.localStorage.getItem("al_medlit_access_token"))).toBe(
-    "activated-session",
-  );
+  expect(await page.evaluate(() => window.localStorage.getItem("al_medlit_access_token"))).toBeNull();
 });

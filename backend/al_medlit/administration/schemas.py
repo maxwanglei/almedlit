@@ -93,5 +93,4 @@ class AccountActionComplete(BaseModel):
 class AccountActionCompleteResponse(BaseModel):
     completed: bool = True
     purpose: AccountActionPurpose
-    access_token: str
-    token_type: str = "bearer"
+    user_id: int = Field(exclude=True)

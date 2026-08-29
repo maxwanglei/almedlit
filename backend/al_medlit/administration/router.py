@@ -1,6 +1,6 @@
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy.orm import Session
 
 from al_medlit.administration import service
@@ -18,6 +18,7 @@ from al_medlit.administration.schemas import (
     InstanceSettingsRead,
     InstanceSettingsUpdate,
 )
+from al_medlit.auth.cookies import set_session_cookies
 from al_medlit.auth.models import User
 from al_medlit.core.database import get_db
 
@@ -160,6 +161,7 @@ def preview_account_action(token: str, db: Session = Depends(get_db)):
 def complete_account_action(
     token: str,
     payload: AccountActionComplete,
+    response: Response,
     db: Session = Depends(get_db),
 ):
     result = service.complete_account_action(
@@ -168,4 +170,11 @@ def complete_account_action(
         password=payload.password,
     )
     db.commit()
+    user = db.get(User, result.user_id)
+    assert user is not None
+    set_session_cookies(
+        response,
+        user_id=user.id,
+        session_version=user.session_version,
+    )
     return result

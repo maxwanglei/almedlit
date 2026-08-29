@@ -1577,13 +1577,15 @@ def test_invite_create_and_accept_new_user(auth_client):
         headers={"Authorization": ""},
     )
     assert accept.status_code == 200
-    access_token = accept.json()["access_token"]
-    assert access_token
+    assert accept.json() == {"authenticated": True}
 
     repeated = auth_client.post(
         f"/api/invites/{token}/accept",
         json={},
-        headers={"Authorization": f"Bearer {access_token}"},
+        headers={
+            "Authorization": "",
+            "X-CSRF-Token": auth_client._client.cookies.get("al_medlit_csrf"),
+        },
     )
     assert repeated.status_code == 404
 
@@ -1850,6 +1852,54 @@ def test_invite_accept_supports_an_existing_signed_in_user(auth_client, db):
     assert accept.status_code == 200
     members = auth_client.get(f"/api/workspaces/{ws['id']}/members").json()
     assert any(member["username"] == "already-registered" for member in members)
+
+
+def test_invite_accept_authenticates_an_existing_user_without_exposing_a_token(
+    auth_client,
+    db,
+):
+    from al_medlit.auth.cookies import CSRF_COOKIE_NAME, SESSION_COOKIE_NAME
+    from al_medlit.auth.schemas import UserCreate
+    from al_medlit.auth.service import register_user
+
+    workspace = auth_client.post(
+        "/api/workspaces",
+        json={"name": "Existing Credentials Team"},
+    ).json()
+    token = auth_client.post(
+        f"/api/workspaces/{workspace['id']}/invites",
+        json={"role": "annotator"},
+    ).json()["token"]
+    existing = register_user(
+        db,
+        UserCreate(username="credential-user", password="strong-password"),
+    )
+    db.commit()
+    auth_client._client.cookies.set(
+        SESSION_COOKIE_NAME,
+        "expired-session",
+        path="/api",
+    )
+
+    accepted = auth_client.post(
+        f"/api/invites/{token}/accept",
+        json={
+            "username": "credential-user",
+            "password": "strong-password",
+            "create_account": False,
+        },
+        headers={"Authorization": ""},
+    )
+
+    assert accepted.status_code == 200
+    assert accepted.json() == {"authenticated": True}
+    assert accepted.cookies.get(SESSION_COOKIE_NAME)
+    assert accepted.cookies.get(CSRF_COOKIE_NAME)
+    assert "access_token" not in accepted.json()
+    db.refresh(existing)
+    assert existing.last_login_at is not None
+    members = auth_client.get(f"/api/workspaces/{workspace['id']}/members").json()
+    assert any(member["username"] == "credential-user" for member in members)
 
 
 @pytest.mark.parametrize(

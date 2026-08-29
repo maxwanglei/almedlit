@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 720
     allow_self_registration: bool = True
+    auth_cookie_secure: bool = True
 
     # Optional one-time bootstrap superuser credentials for the explicit
     # scripts.bootstrap_admin command. Migrations must not create loginable
@@ -99,7 +100,15 @@ class Settings(BaseSettings):
         if len(self.jwt_secret.encode("utf-8")) < 32:
             raise RuntimeError("AL_MEDLIT_JWT_SECRET must be at least 32 UTF-8 bytes")
         self.validate_bootstrap_admin_password()
+        self.validate_auth_cookie()
         self.validate_storage_transport()
+
+    def validate_auth_cookie(self) -> None:
+        if not self.auth_cookie_secure:
+            raise RuntimeError(
+                "AL_MEDLIT_AUTH_COOKIE_SECURE must be true; insecure browser "
+                "session cookies are not supported"
+            )
 
     def validate_storage_transport(self) -> None:
         if self.storage_backend == "minio" and not self.storage_secure:

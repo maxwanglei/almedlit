@@ -74,13 +74,33 @@ import type {
   WorkspaceMember,
   WorkspaceRole,
 } from "@/types/api";
-import { clearToken, getToken, setToken } from "@/auth/session";
+import {
+  getSessionGeneration,
+  publishSessionChange,
+} from "@/auth/session";
 import {
   normalizeArtifactPackage,
   normalizeArtifactPackages,
 } from "@/api/artifactPackagesAdapter";
 
 const API_BASE = "/api";
+const CSRF_COOKIE_NAME = "al_medlit_csrf";
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+function cookieValue(name: string): string | null {
+  if (typeof document === "undefined") return null;
+  const prefix = `${encodeURIComponent(name)}=`;
+  const value = document.cookie
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(prefix));
+  if (!value) return null;
+  try {
+    return decodeURIComponent(value.slice(prefix.length));
+  } catch {
+    return null;
+  }
+}
 
 export class ApiError extends Error {
   readonly status: number;
@@ -93,13 +113,16 @@ export class ApiError extends Error {
 }
 
 async function requestResponse(path: string, init?: RequestInit): Promise<Response> {
-  const requestToken = getToken();
+  const requestGeneration = getSessionGeneration();
+  const method = (init?.method ?? "GET").toUpperCase();
+  const csrfToken = SAFE_METHODS.has(method) ? null : cookieValue(CSRF_COOKIE_NAME);
   const multipartBody = typeof FormData !== "undefined" && init?.body instanceof FormData;
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
+    credentials: "same-origin",
     headers: {
       ...(multipartBody ? {} : { "Content-Type": "application/json" }),
-      ...(requestToken ? { Authorization: `Bearer ${requestToken}` } : {}),
+      ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {}),
       ...init?.headers,
     },
   });
@@ -126,8 +149,11 @@ async function requestResponse(path: string, init?: RequestInit): Promise<Respon
     if (response.status >= 500 && message === response.statusText) {
       message = "Backend API is unavailable or returned an internal error.";
     }
-    if (response.status === 401 && getToken() === requestToken) {
-      clearToken();
+    if (
+      response.status === 401 &&
+      getSessionGeneration() === requestGeneration
+    ) {
+      publishSessionChange(false);
     }
     throw new ApiError(response.status, message);
   }
@@ -1047,26 +1073,21 @@ export function getInvitePreview(token: string): Promise<InvitePreview> {
 /**
  * Redeem an invite and adopt the returned session.
  *
- * Pass username+password to create a brand-new account. Pass an empty payload
- * when a bearer token is already stored — `request` attaches it automatically,
- * and the backend then joins that existing user to the workspace.
+ * Pass username+password to create or authenticate an account. An empty
+ * payload accepts with the current HttpOnly cookie session.
  */
 export async function acceptInvite(
   token: string,
   payload: InviteAcceptPayload = {},
-  bearerToken?: string,
 ): Promise<void> {
-  const response = await request<{ access_token: string }>(
+  await request<{ authenticated: boolean }>(
     `/invites/${encodeURIComponent(token)}/accept`,
     {
       method: "POST",
       body: JSON.stringify(payload),
-      ...(bearerToken
-        ? { headers: { Authorization: `Bearer ${bearerToken}` } }
-        : {}),
     },
   );
-  setToken(response.access_token);
+  publishSessionChange(true);
 }
 
 export function listWorkspaceJoinRequests(
@@ -1087,19 +1108,19 @@ export function rejectJoinRequest(requestId: number): Promise<WorkspaceJoinReque
   });
 }
 
-export async function authenticate(
-  username: string,
-  password: string,
-): Promise<string> {
-  const response = await request<{ access_token: string }>("/auth/login", {
+export async function login(username: string, password: string): Promise<void> {
+  await request<{ authenticated: boolean }>("/auth/login", {
     method: "POST",
     body: JSON.stringify({ username, password }),
   });
-  return response.access_token;
+  publishSessionChange(true);
 }
 
-export async function login(username: string, password: string): Promise<void> {
-  setToken(await authenticate(username, password));
+export async function logout(): Promise<void> {
+  await request<{ authenticated: boolean }>("/auth/logout", {
+    method: "POST",
+  });
+  publishSessionChange(false);
 }
 
 export interface RegisterOptions {
@@ -1113,7 +1134,7 @@ export async function register(
   password: string,
   options: RegisterOptions,
 ): Promise<void> {
-  const response = await request<{ access_token: string }>("/auth/register", {
+  await request<{ authenticated: boolean }>("/auth/register", {
     method: "POST",
     body: JSON.stringify({
       username,
@@ -1123,7 +1144,7 @@ export async function register(
       workspace_name: options.workspaceName,
     }),
   });
-  setToken(response.access_token);
+  publishSessionChange(true);
 }
 
 export function getMe(): Promise<MeResponse> {
@@ -1213,12 +1234,12 @@ export async function completeAccountAction(
   token: string,
   password: string,
 ): Promise<void> {
-  const response = await request<{ access_token: string }>(
+  await request<{ authenticated: boolean }>(
     `/account-actions/${encodeURIComponent(token)}`,
     {
       method: "POST",
       body: JSON.stringify({ password }),
     },
   );
-  setToken(response.access_token);
+  publishSessionChange(true);
 }

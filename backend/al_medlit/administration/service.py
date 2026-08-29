@@ -28,7 +28,7 @@ from al_medlit.administration.schemas import (
     InstanceSettingsUpdate,
 )
 from al_medlit.auth.models import User
-from al_medlit.auth.security import create_access_token, hash_password
+from al_medlit.auth.security import hash_password
 from al_medlit.core.config import settings
 from al_medlit.core.exceptions import ConflictError, ForbiddenError, NotFoundError
 from al_medlit.project.models import Project, TaskAssignment
@@ -760,8 +760,5 @@ def complete_account_action(
     db.flush()
     return AccountActionCompleteResponse(
         purpose=action.purpose,
-        access_token=create_access_token(
-            user.id,
-            session_version=user.session_version,
-        ),
+        user_id=user.id,
     )

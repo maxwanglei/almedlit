@@ -12,7 +12,7 @@ import {
   type TextInputProps,
 } from "@astryxdesign/core/TextInput";
 
-import { acceptInvite, authenticate, getInvitePreview } from "@/api/client";
+import { acceptInvite, getInvitePreview } from "@/api/client";
 import BrandLogo from "@/components/BrandLogo";
 import type { InvitePreview } from "@/types/api";
 
@@ -102,7 +102,7 @@ export default function AcceptInvitePage({
     setBusy(true);
     setError(null);
     try {
-      // The stored bearer token is attached by the shared request helper.
+      // The shared request helper authenticates with the HttpOnly session cookie.
       await acceptInvite(token);
       onAccepted();
     } catch (caught) {
@@ -142,13 +142,14 @@ export default function AcceptInvitePage({
           username: trimmedUsername,
           password,
           display_name: displayName.trim() || undefined,
+          create_account: true,
         });
       } else {
-        // Stage the login token until redemption succeeds. Adopting it earlier
-        // would navigate away on a same-tab token event and hide a stale or
-        // concurrently revoked invitation error.
-        const stagedToken = await authenticate(trimmedUsername, password);
-        await acceptInvite(token, {}, stagedToken);
+        await acceptInvite(token, {
+          username: trimmedUsername,
+          password,
+          create_account: false,
+        });
       }
       onAccepted();
     } catch (caught) {

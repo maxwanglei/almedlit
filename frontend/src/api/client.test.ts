@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { clearToken, getToken, setToken, subscribeTokenChanges } from "@/auth/session";
+import {
+  publishSessionChange,
+  subscribeSessionChanges,
+} from "@/auth/session";
 
 import {
   acceptInvite,
@@ -39,6 +42,10 @@ function installStorage(): void {
       removeEventListener: vi.fn(),
     },
   });
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: { cookie: "" },
+  });
 }
 
 describe("API authentication failures", () => {
@@ -47,15 +54,16 @@ describe("API authentication failures", () => {
   });
 
   afterEach(() => {
-    clearToken();
     vi.unstubAllGlobals();
     Reflect.deleteProperty(globalThis, "window");
+    Reflect.deleteProperty(globalThis, "document");
   });
 
-  it("clears and broadcasts the session token after a 401 response", async () => {
-    setToken("expired-token");
-    const observed: Array<string | null> = [];
-    const unsubscribe = subscribeTokenChanges((token) => observed.push(token));
+  it("broadcasts an anonymous session after a 401 response", async () => {
+    const observed: boolean[] = [];
+    const unsubscribe = subscribeSessionChanges((authenticated) =>
+      observed.push(authenticated),
+    );
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ detail: "Session expired" }), {
         status: 401,
@@ -72,18 +80,22 @@ describe("API authentication failures", () => {
     });
     unsubscribe();
 
-    expect(getToken()).toBeNull();
-    expect(observed).toEqual([null]);
+    expect(observed).toEqual([false]);
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/auth/me",
       expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: "Bearer expired-token" }),
+        credentials: "same-origin",
       }),
     );
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).not.toHaveProperty("Authorization");
   });
 
   it("does not clear a newer session when an older request returns 401", async () => {
-    setToken("old-token");
+    publishSessionChange(true);
+    const observed: boolean[] = [];
+    const unsubscribe = subscribeSessionChanges((authenticated) =>
+      observed.push(authenticated),
+    );
     let resolveResponse!: (response: Response) => void;
     const fetchMock = vi.fn().mockImplementation(
       () =>
@@ -95,7 +107,7 @@ describe("API authentication failures", () => {
 
     const oldRequest = getMe();
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
-    setToken("new-token");
+    publishSessionChange(true);
     resolveResponse(
       new Response(JSON.stringify({ detail: "Old session expired" }), {
         status: 401,
@@ -105,13 +117,8 @@ describe("API authentication failures", () => {
     );
 
     await expect(oldRequest).rejects.toMatchObject({ status: 401 });
-    expect(getToken()).toBe("new-token");
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/auth/me",
-      expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: "Bearer old-token" }),
-      }),
-    );
+    unsubscribe();
+    expect(observed).toEqual([true]);
   });
 
   it("omits the all-user status filter and sends explicit active filters", async () => {
@@ -136,31 +143,34 @@ describe("API authentication failures", () => {
     );
   });
 
-  it("stages existing-account invite authorization until redemption succeeds", async () => {
+  it("accepts an invite with the HttpOnly cookie session", async () => {
+    const observed: boolean[] = [];
+    const unsubscribe = subscribeSessionChanges((authenticated) =>
+      observed.push(authenticated),
+    );
     const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ access_token: "accepted-token" }), {
+      new Response(JSON.stringify({ authenticated: true }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       }),
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await acceptInvite("invite-token", {}, "staged-login-token");
+    await acceptInvite("invite-token");
+    unsubscribe();
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/invites/invite-token/accept",
       expect.objectContaining({
         method: "POST",
-        headers: expect.objectContaining({
-          Authorization: "Bearer staged-login-token",
-        }),
+        credentials: "same-origin",
       }),
     );
-    expect(getToken()).toBe("accepted-token");
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).not.toHaveProperty("Authorization");
+    expect(observed).toEqual([true]);
   });
 
-  it("downloads submission bytes with the bearer token", async () => {
-    setToken("download-token");
+  it("downloads submission bytes with the cookie session", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response("submission contents", {
         status: 200,
@@ -175,13 +185,13 @@ describe("API authentication failures", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/submissions/17/download",
       expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: "Bearer download-token" }),
+        credentials: "same-origin",
       }),
     );
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).not.toHaveProperty("Authorization");
   });
 
-  it("downloads export bytes with the bearer token", async () => {
-    setToken("export-token");
+  it("downloads export bytes with the cookie session", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response("training data", {
         status: 200,
@@ -196,13 +206,13 @@ describe("API authentication failures", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/exports/29/download",
       expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: "Bearer export-token" }),
+        credentials: "same-origin",
       }),
     );
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).not.toHaveProperty("Authorization");
   });
 
   it("downloads an authorized package file without exposing a storage key", async () => {
-    setToken("model-token");
     const fetchMock = vi.fn().mockResolvedValue(new Response("weights", { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -212,12 +222,14 @@ describe("API authentication failures", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/artifact-packages/41/files/73/download",
       expect.objectContaining({
-        headers: expect.objectContaining({ Authorization: "Bearer model-token" }),
+        credentials: "same-origin",
       }),
     );
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).not.toHaveProperty("Authorization");
   });
 
   it("requests the manager-approved archive lifecycle", async () => {
+    document.cookie = "al_medlit_csrf=csrf-value";
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       package_id: 41,
       archived_at: "2026-01-01T00:00:00Z",
@@ -229,7 +241,11 @@ describe("API authentication failures", () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/artifact-packages/41/archive",
-      expect.objectContaining({ method: "POST" }),
+      expect.objectContaining({
+        method: "POST",
+        credentials: "same-origin",
+        headers: expect.objectContaining({ "X-CSRF-Token": "csrf-value" }),
+      }),
     );
   });
 

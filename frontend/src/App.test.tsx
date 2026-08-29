@@ -11,8 +11,6 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { clearToken, setToken } from "@/auth/session";
-
 import App from "./App";
 
 const mocks = vi.hoisted(() => {
@@ -51,6 +49,7 @@ const mocks = vi.hoisted(() => {
     listWorkspaceRoundWorkContexts: vi.fn(),
     getMe: vi.fn(),
     getWorkspaceCapabilities: vi.fn(),
+    logout: vi.fn(),
     updateProject: vi.fn(),
     usePlatformProject: vi.fn(),
     projectState,
@@ -62,6 +61,7 @@ vi.mock("@/api/client", () => ({
   getAnnotationWorkbench: mocks.getAnnotationWorkbench,
   getMe: mocks.getMe,
   getWorkspaceCapabilities: mocks.getWorkspaceCapabilities,
+  logout: mocks.logout,
   updateProject: mocks.updateProject,
 }));
 
@@ -353,6 +353,7 @@ beforeEach(() => {
   window.history.replaceState(null, "", "/");
   vi.clearAllMocks();
   mocks.getMe.mockResolvedValue(me);
+  mocks.logout.mockResolvedValue(undefined);
   mocks.getWorkspaceCapabilities.mockImplementation(async (workspaceId: number) => ({
     workspace_id: workspaceId,
     preset: "annotation_only",
@@ -422,18 +423,17 @@ beforeEach(() => {
     projects: [],
     selectedProjectId: null,
   });
-  setToken("session-token");
 });
 
 afterEach(() => {
   cleanup();
-  clearToken();
 });
 
 describe("App workspace selection", () => {
   it("finishes onboarding with the refreshed capability snapshot", async () => {
-    clearToken();
-    mocks.getMe.mockResolvedValue({
+    mocks.getMe
+      .mockRejectedValueOnce(new Error("No active session"))
+      .mockResolvedValue({
       ...me,
       memberships: [
         {
@@ -443,7 +443,7 @@ describe("App workspace selection", () => {
           role: "trainer",
         },
       ],
-    });
+      });
     mocks.getWorkspaceCapabilities
       .mockResolvedValueOnce({
         workspace_id: 20,
@@ -462,7 +462,7 @@ describe("App workspace selection", () => {
 
     render(<App />);
     fireEvent.click(
-      screen.getByRole("button", { name: "Register mock user" }),
+      await screen.findByRole("button", { name: "Register mock user" }),
     );
     fireEvent.click(
       await screen.findByRole("button", { name: "Complete onboarding" }),

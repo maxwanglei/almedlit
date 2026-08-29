@@ -346,10 +346,6 @@ export async function installEvidenceApiMock(
   let nextAnnotationId = 800;
   let nextReviewId = 900;
 
-  await page.addInitScript(() => {
-    window.localStorage.setItem("al_medlit_access_token", "playwright-fixture-token");
-  });
-
   await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request();
     const url = new URL(request.url());

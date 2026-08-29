@@ -49,9 +49,8 @@ class UserRead(BaseModel):
     is_superuser: bool
 
 
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
+class SessionResponse(BaseModel):
+    authenticated: bool = True
 
 
 class WorkspaceMembershipRead(BaseModel):
@@ -73,4 +72,5 @@ class MeResponse(BaseModel):
 
 # Backward-compatible names used by the existing router/frontend code.
 UserLogin = LoginRequest
-TokenRead = TokenResponse
+TokenResponse = SessionResponse
+TokenRead = SessionResponse

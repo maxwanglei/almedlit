@@ -217,6 +217,18 @@ def test_runtime_guard_rejects_insecure_minio_transport(monkeypatch):
         settings.validate_runtime_secrets()
 
 
+def test_runtime_guard_rejects_insecure_auth_cookie(monkeypatch):
+    monkeypatch.setattr(settings, "auth_cookie_secure", False)
+    monkeypatch.setattr(settings, "jwt_secret", "configured-test-jwt-secret-32-byte-minimum")
+
+    with pytest.raises(RuntimeError, match="AL_MEDLIT_AUTH_COOKIE_SECURE"):
+        settings.validate_runtime_secrets()
+
+
+def test_auth_cookie_is_secure_by_default():
+    assert Settings.model_fields["auth_cookie_secure"].default is True
+
+
 def test_minio_transport_is_secure_by_default():
     assert Settings.model_fields["storage_secure"].default is True
 

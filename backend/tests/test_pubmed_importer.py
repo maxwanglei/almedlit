@@ -376,7 +376,7 @@ def fixture_api_client(request):
 
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_ncbi_client] = override_get_ncbi_client
-    with TestClient(app) as test_client:
+    with TestClient(app, base_url="https://testserver") as test_client:
         test_client.headers.update({"Authorization": f"Bearer {token}"})
         yield test_client
     app.dependency_overrides.clear()
@@ -438,7 +438,7 @@ def fixture_personal_api_client(request):
 
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_ncbi_client] = override_get_ncbi_client
-    with TestClient(app) as test_client:
+    with TestClient(app, base_url="https://testserver") as test_client:
         response = test_client.post(
             "/api/auth/register",
             json={
@@ -448,8 +448,9 @@ def fixture_personal_api_client(request):
             },
         )
         assert response.status_code == 200
-        token = response.json()["access_token"]
-        test_client.headers.update({"Authorization": f"Bearer {token}"})
+        test_client.headers.update(
+            {"X-CSRF-Token": test_client.cookies.get("al_medlit_csrf")}
+        )
         yield test_client
     app.dependency_overrides.clear()
 

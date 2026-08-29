@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
-  authHeader,
-  clearToken,
-  getToken,
-  setToken,
-  subscribeTokenChanges,
-  TOKEN_STORAGE_KEY,
+  getSessionGeneration,
+  LEGACY_TOKEN_STORAGE_KEY,
+  publishSessionChange,
+  removeLegacyToken,
+  SESSION_EVENT_STORAGE_KEY,
+  subscribeSessionChanges,
 } from "./session";
 
 interface InstalledStorage {
@@ -59,49 +59,48 @@ describe("session token store", () => {
   beforeEach(() => installStorage());
 
   afterEach(() => {
-    clearToken();
+    window.localStorage.clear();
     Reflect.deleteProperty(globalThis, "window");
   });
 
-  it("stores and returns the token", () => {
-    setToken("abc");
-    expect(getToken()).toBe("abc");
+  it("removes a legacy localStorage bearer token", () => {
+    window.localStorage.setItem(LEGACY_TOKEN_STORAGE_KEY, "legacy-jwt");
+    removeLegacyToken();
+    expect(window.localStorage.getItem(LEGACY_TOKEN_STORAGE_KEY)).toBeNull();
   });
 
-  it("builds an Authorization header when a token is present", () => {
-    setToken("abc");
-    expect(authHeader()).toEqual({ Authorization: "Bearer abc" });
-  });
+  it("broadcasts only non-secret session state", () => {
+    const observed: boolean[] = [];
+    const before = getSessionGeneration();
+    const unsubscribe = subscribeSessionChanges((authenticated) =>
+      observed.push(authenticated),
+    );
 
-  it("returns an empty header when no token is set", () => {
-    expect(authHeader()).toEqual({});
-  });
-
-  it("notifies same-tab subscribers when the token changes", () => {
-    const observed: Array<string | null> = [];
-    const unsubscribe = subscribeTokenChanges((token) => observed.push(token));
-
-    setToken("abc");
-    setToken("abc");
-    clearToken();
+    publishSessionChange(true);
+    publishSessionChange(false);
     unsubscribe();
-    setToken("ignored-after-unsubscribe");
+    publishSessionChange(true);
 
-    expect(observed).toEqual(["abc", null]);
+    expect(observed).toEqual([true, false]);
+    expect(getSessionGeneration()).toBe(before + 3);
+    expect(window.localStorage.getItem(LEGACY_TOKEN_STORAGE_KEY)).toBeNull();
+    expect(window.localStorage.getItem(SESSION_EVENT_STORAGE_KEY)).not.toContain("jwt");
   });
 
-  it("notifies subscribers about token changes from another tab", () => {
+  it("notifies subscribers about session changes from another tab", () => {
     const { dispatchStorage, localStorage } = installStorage();
-    const observed: Array<string | null> = [];
-    const unsubscribe = subscribeTokenChanges((token) => observed.push(token));
+    const observed: boolean[] = [];
+    const unsubscribe = subscribeSessionChanges((authenticated) =>
+      observed.push(authenticated),
+    );
 
-    localStorage.setItem(TOKEN_STORAGE_KEY, "other-user-token");
-    dispatchStorage(TOKEN_STORAGE_KEY, "other-user-token");
-    localStorage.removeItem(TOKEN_STORAGE_KEY);
-    dispatchStorage(TOKEN_STORAGE_KEY, null);
+    const event = JSON.stringify({ authenticated: true, nonce: "other-tab" });
+    localStorage.setItem(SESSION_EVENT_STORAGE_KEY, event);
+    dispatchStorage(SESSION_EVENT_STORAGE_KEY, event);
+    dispatchStorage(null, null);
     dispatchStorage("unrelated", "value");
     unsubscribe();
 
-    expect(observed).toEqual(["other-user-token", null]);
+    expect(observed).toEqual([true, false]);
   });
 });

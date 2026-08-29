@@ -1046,6 +1046,7 @@ export interface InviteAcceptPayload {
   username?: string;
   password?: string;
   display_name?: string;
+  create_account?: boolean;
 }
 
 export interface WorkspaceJoinRequest {

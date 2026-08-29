@@ -428,15 +428,27 @@ def test_get_current_user_rejects_bad_token(db):
 
 
 def test_register_login_me_flow(client):
+    from al_medlit.auth.cookies import CSRF_COOKIE_NAME, SESSION_COOKIE_NAME
+
     password = "strong-password"
     reg = client.post(
         "/api/auth/register",
         json={"username": "newbie", "password": password},
     )
     assert reg.status_code == 200
-    token = reg.json()["access_token"]
+    assert reg.json() == {"authenticated": True}
+    assert reg.cookies.get(SESSION_COOKIE_NAME)
+    assert reg.cookies.get(CSRF_COOKIE_NAME)
+    session_set_cookie = next(
+        value
+        for value in reg.headers.get_list("set-cookie")
+        if value.startswith(f"{SESSION_COOKIE_NAME}=")
+    )
+    assert "HttpOnly" in session_set_cookie
+    assert "Secure" in session_set_cookie
+    assert "SameSite=lax" in session_set_cookie
 
-    me = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
+    me = client.get("/api/auth/me", headers={"Authorization": ""})
     assert me.status_code == 200
     body = me.json()
     assert body["user"]["username"] == "newbie"
@@ -447,9 +459,45 @@ def test_register_login_me_flow(client):
         json={"username": "newbie", "password": password},
     )
     assert login.status_code == 200
+    assert login.json() == {"authenticated": True}
 
     bad = client.post("/api/auth/login", json={"username": "newbie", "password": "x"})
     assert bad.status_code == 401
+
+
+def test_cookie_authenticated_mutations_require_csrf_and_logout_clears_session(client):
+    from al_medlit.auth.cookies import CSRF_COOKIE_NAME, SESSION_COOKIE_NAME
+
+    registered = client.post(
+        "/api/auth/register",
+        json={"username": "csrf-user", "password": "strong-password"},
+    )
+    assert registered.status_code == 200
+
+    rejected = client.post(
+        "/api/workspaces",
+        json={"name": "Missing CSRF"},
+        headers={"Authorization": ""},
+    )
+    assert rejected.status_code == 403
+    assert rejected.json()["detail"] == "CSRF validation failed"
+
+    csrf_token = client._client.cookies.get(CSRF_COOKIE_NAME)
+    accepted = client.post(
+        "/api/workspaces",
+        json={"name": "Verified CSRF"},
+        headers={"Authorization": "", "X-CSRF-Token": csrf_token},
+    )
+    assert accepted.status_code == 200
+
+    logged_out = client.post(
+        "/api/auth/logout",
+        headers={"Authorization": "", "X-CSRF-Token": csrf_token},
+    )
+    assert logged_out.status_code == 200
+    assert logged_out.json() == {"authenticated": False}
+    assert client._client.cookies.get(SESSION_COOKIE_NAME) is None
+    assert client._client.cookies.get(CSRF_COOKIE_NAME) is None
 
 
 @pytest.mark.parametrize(

@@ -1,11 +1,13 @@
-from fastapi import APIRouter, Depends, Header, status
+from datetime import UTC, datetime
+
+from fastapi import APIRouter, Depends, Header, Request, Response, status
 from sqlalchemy.orm import Session
 
 from al_medlit.auth import service as auth_service
+from al_medlit.auth.cookies import set_session_cookies
 from al_medlit.auth.dependencies import get_current_user
 from al_medlit.auth.models import User
-from al_medlit.auth.schemas import UserCreate
-from al_medlit.auth.security import create_access_token
+from al_medlit.auth.schemas import SessionResponse, UserCreate
 from al_medlit.core import capabilities as cap
 from al_medlit.core.config import settings
 from al_medlit.core.database import get_db
@@ -266,37 +268,52 @@ def preview_invite(token: str, db: Session = Depends(get_db)):
     )
 
 
-@invite_router.post("/{token}/accept")
+@invite_router.post("/{token}/accept", response_model=SessionResponse)
 def accept_invite(
     token: str,
     payload: InviteAccept,
+    request: Request,
+    response: Response,
     authorization: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
     invite = service.get_open_invite(db, token)
-    if authorization and authorization.lower().startswith("bearer "):
-        user = get_current_user(authorization=authorization, db=db)
+    if authorization:
+        # Explicit API-client authentication takes precedence over both a
+        # browser cookie and any credential payload.
+        user = get_current_user(request=request, authorization=authorization, db=db)
     elif payload.username and payload.password:
-        user = auth_service.register_user(
-            db,
-            UserCreate(
-                username=payload.username,
-                password=payload.password,
-                display_name=payload.display_name,
-            ),
-        )
+        # A stale/expired session cookie must not prevent an invitee from
+        # authenticating or registering explicitly on this public endpoint.
+        if payload.create_account:
+            user = auth_service.register_user(
+                db,
+                UserCreate(
+                    username=payload.username,
+                    password=payload.password,
+                    display_name=payload.display_name,
+                ),
+            )
+        else:
+            user = auth_service.authenticate_user(db, payload.username, payload.password)
+            if user is None:
+                raise UnauthorizedError("Invalid username or password")
+            user.last_login_at = datetime.now(UTC)
+            # Sessions deliberately disable autoflush. Persist the login stamp
+            # (and any legacy password-hash upgrade) before invite acceptance
+            # refreshes and locks the user row.
+            db.flush()
     else:
-        raise UnauthorizedError("Provide a bearer token or username+password to accept")
+        user = get_current_user(request=request, authorization=None, db=db)
 
     service.accept_invite(db, invite, user)
     db.commit()
-    return {
-        "access_token": create_access_token(
-            str(user.id),
-            session_version=user.session_version,
-        ),
-        "token_type": "bearer",
-    }
+    set_session_cookies(
+        response,
+        user_id=user.id,
+        session_version=user.session_version,
+    )
+    return SessionResponse()
 
 
 join_request_router = APIRouter(prefix="/join-requests", tags=["join-requests"])

@@ -179,6 +179,13 @@ def test_global_auth_guard_blocks_protected_routes(client):
     )
     assert login.status_code == 200
 
+    csrf_token = client._client.cookies.get("al_medlit_csrf")
+    logout = client.post(
+        "/api/auth/logout",
+        headers={"Authorization": "", "X-CSRF-Token": csrf_token},
+    )
+    assert logout.status_code == 200
+
     assert client.get("/api/documents", headers={"Authorization": ""}).status_code == 401
     assert (
         client.get(

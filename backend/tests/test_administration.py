@@ -274,10 +274,10 @@ def test_admin_created_account_uses_hashed_single_use_activation_link(client, db
     assert completed.status_code == 200
     assert completed.json()["completed"] is True
     assert completed.json()["purpose"] == "activation"
-    assert completed.json()["token_type"] == "bearer"
+    assert "access_token" not in completed.json()
     assert client.get(
         "/api/auth/me",
-        headers={"Authorization": f"Bearer {completed.json()['access_token']}"},
+        headers={"Authorization": ""},
     ).status_code == 200
     assert client.get(
         f"/api/account-actions/{raw_token}",

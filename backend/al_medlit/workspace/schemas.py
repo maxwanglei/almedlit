@@ -94,6 +94,7 @@ class InviteAccept(BaseModel):
     username: str | None = Field(default=None, min_length=1, max_length=120)
     password: PublicPassword | None = None
     display_name: str = Field(default="", max_length=120)
+    create_account: bool = True
 
 
 class JoinRequestCreate(BaseModel):

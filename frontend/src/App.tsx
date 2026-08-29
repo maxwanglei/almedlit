@@ -25,9 +25,14 @@ import {
   getAnnotationWorkbench,
   getMe,
   getWorkspaceCapabilities,
+  logout,
   updateProject,
 } from "@/api/client";
-import { clearToken, getToken, subscribeTokenChanges } from "@/auth/session";
+import {
+  publishSessionChange,
+  removeLegacyToken,
+  subscribeSessionChanges,
+} from "@/auth/session";
 import AppShell from "@/components/AppShell";
 import WorkspaceSwitcher from "@/components/WorkspaceSwitcher";
 import { useEvidenceBlockStore } from "@/features/evidence-block/evidenceBlockStore";
@@ -338,8 +343,10 @@ export default function App(): React.ReactElement {
 function Application(): React.ReactElement {
   const location = useLocation();
   const routerNavigate = useNavigate();
-  const [authed, setAuthed] = useState<boolean>(() => getToken() !== null);
-  const [sessionReady, setSessionReady] = useState<boolean>(() => getToken() === null);
+  // HttpOnly cookies cannot be inspected by JavaScript. Start in a probing
+  // state and let /auth/me establish whether a valid session exists.
+  const [authed, setAuthed] = useState(true);
+  const [sessionReady, setSessionReady] = useState(false);
   const [justRegistered, setJustRegistered] = useState(false);
   const [onboarded, setOnboarded] = useState(false);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<number | null>(null);
@@ -355,7 +362,6 @@ function Application(): React.ReactElement {
   const [sessionGeneration, setSessionGeneration] = useState(0);
   const sessionGenerationRef = useRef(0);
   const pendingWorkspaceSwitchRef = useRef(false);
-  const observedTokenRef = useRef<string | null>(getToken());
   const pathname = normalizePathname(location.pathname);
   const inviteToken = inviteTokenFromPath(location.pathname);
   const accountActionToken = accountActionTokenFromPath(location.pathname);
@@ -513,14 +519,13 @@ function Application(): React.ReactElement {
   const navigatePathRef = useRef(navigatePath);
   navigatePathRef.current = navigatePath;
 
-  const resetForTokenChange = useCallback((token: string | null): void => {
-    observedTokenRef.current = token;
+  const resetForSessionChange = useCallback((authenticated: boolean): void => {
     sessionGenerationRef.current += 1;
     setSessionGeneration(sessionGenerationRef.current);
     useProjectWorkspaceStore.getState().reset();
     useEvidenceBlockStore.getState().reset();
-    setAuthed(token !== null);
-    setSessionReady(token === null);
+    setAuthed(authenticated);
+    setSessionReady(!authenticated);
     setJustRegistered(false);
     setOnboarded(false);
     setActiveWorkspaceId(null);
@@ -547,7 +552,7 @@ function Application(): React.ReactElement {
     const publicTokenPath =
       inviteTokenFromPath(window.location.pathname) !== null ||
       accountActionTokenFromPath(window.location.pathname) !== null;
-    if (token !== null || !publicTokenPath) {
+    if (authenticated || !publicTokenPath) {
       navigatePathRef.current("/", "replace");
     }
   }, []);
@@ -577,12 +582,8 @@ function Application(): React.ReactElement {
   }
 
   function handleLogout(): void {
-    const observedToken = observedTokenRef.current;
-    clearToken();
     window.localStorage.removeItem("al-medlit.currentAnnotatorId");
-    if (observedTokenRef.current === observedToken) {
-      resetForTokenChange(null);
-    }
+    void logout().catch(() => publishSessionChange(false));
   }
 
   function handleWorkspaceChange(workspaceId: number): void {
@@ -678,13 +679,10 @@ function Application(): React.ReactElement {
   }
 
   useEffect(() => {
-    const unsubscribe = subscribeTokenChanges(resetForTokenChange);
-    const currentToken = getToken();
-    if (currentToken !== observedTokenRef.current) {
-      resetForTokenChange(currentToken);
-    }
+    removeLegacyToken();
+    const unsubscribe = subscribeSessionChanges(resetForSessionChange);
     return unsubscribe;
-  }, [resetForTokenChange]);
+  }, [resetForSessionChange]);
 
   useEffect(() => {
     if (!authed) {
@@ -748,7 +746,7 @@ function Application(): React.ReactElement {
         }
       } catch {
         if (!cancelled && generation === sessionGenerationRef.current) {
-          clearToken();
+          publishSessionChange(false);
         }
       } finally {
         if (!cancelled && generation === sessionGenerationRef.current) {
@@ -1293,7 +1291,7 @@ function Application(): React.ReactElement {
   }, [authed, selectedDocumentId, sessionReady, setBusy, setError, workspaceRoute]);
 
   // Password activation/reset is public because the user may not have a usable
-  // account yet. Completion adopts the returned session and the token-change
+  // account yet. Completion adopts the returned cookie session and the session
   // subscription reloads the authenticated shell.
   if (accountActionToken !== null) {
     return (
@@ -1331,8 +1329,8 @@ function Application(): React.ReactElement {
         token={inviteToken}
         signedIn={authed && sessionReady}
         onAccepted={() => {
-          // A new or switched account already reset state through the token
-          // subscription. An existing signed-in user keeps their token, so bump
+          // A new or switched account already reset state through the session
+          // subscription. An existing signed-in user keeps their cookie, so bump
           // the session generation to re-run the workspace load and pick up the
           // new membership.
           setSessionReady(false);
