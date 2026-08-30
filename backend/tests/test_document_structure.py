@@ -161,6 +161,55 @@ def test_backfill_is_idempotent_and_reuses_ready_inactive_version(db):
     )
 
 
+def test_backfill_records_a_document_shaped_failure_and_keeps_going(db, monkeypatch):
+    project = _project(db, "structure-backfill-partial")
+    first_document = Document(project_id=project.id, text="First.", source="legacy")
+    second_document = Document(project_id=project.id, text="Second.", source="legacy")
+    db.add_all([first_document, second_document])
+    db.commit()
+
+    original_segment = corpus_service.segment_document
+
+    def fail_on_first(text, *, source_metadata=None):
+        if text == "First.":
+            raise ValueError("unparseable legacy text")
+        return original_segment(text, source_metadata=source_metadata)
+
+    monkeypatch.setattr(corpus_service, "segment_document", fail_on_first)
+    result = corpus_service.backfill_document_structures(db)
+
+    assert result.created == 1
+    assert result.failures == {first_document.id: "unparseable legacy text"}
+    db.refresh(second_document)
+    assert second_document.active_structure_version_id is not None
+
+
+def test_backfill_aborts_instead_of_walking_the_corpus_on_a_dead_session(db, monkeypatch):
+    from sqlalchemy.exc import OperationalError
+
+    project = _project(db, "structure-backfill-abort")
+    documents = [
+        Document(project_id=project.id, text=f"Legacy {index}.", source="legacy")
+        for index in range(3)
+    ]
+    db.add_all(documents)
+    db.commit()
+
+    attempted: list[str] = []
+
+    def fail_with_dead_connection(text, *, source_metadata=None):
+        attempted.append(text)
+        raise OperationalError("SELECT 1", {}, Exception("server closed the connection"))
+
+    monkeypatch.setattr(corpus_service, "segment_document", fail_with_dead_connection)
+    with pytest.raises(OperationalError):
+        corpus_service.backfill_document_structures(db)
+
+    # The run stops on the first document rather than reporting the same
+    # infrastructure failure once per remaining document.
+    assert len(attempted) == 1
+
+
 def test_structure_api_supports_ranges_rebuild_and_activation(client):
     project_response = client.post(
         "/api/projects",

@@ -4,6 +4,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 
 from sqlalchemy import func
+from sqlalchemy.exc import InterfaceError, OperationalError
 from sqlalchemy.orm import Session
 
 from al_medlit.auth.models import User
@@ -438,5 +439,12 @@ def backfill_document_structures(
             result.created += 1
         except Exception as exc:  # keep a large backfill retryable per document
             db.rollback()
+            if isinstance(exc, (OperationalError, InterfaceError)):
+                # The catch above is deliberately broad: segmentation runs over
+                # legacy free text, so one unparseable document must not end a
+                # corpus-wide run. A dead connection or a full disk is not
+                # document-shaped, though — recording it once per remaining
+                # document would bury the real cause, so stop the run instead.
+                raise
             result.failures[document_id] = str(exc)
     return result
