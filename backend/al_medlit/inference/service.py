@@ -3,8 +3,9 @@ from datetime import UTC, datetime
 from io import BytesIO
 from uuid import uuid4
 
+from sqlalchemy import and_, or_, select, tuple_
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from al_medlit.annotation.models import Annotation
 from al_medlit.auth.models import User
@@ -50,6 +51,8 @@ from al_medlit.training.windowing import (
 
 OPEN_RUN_STATUSES = {"queued", "submitted", "running"}
 TERMINAL_RUN_STATUSES = {"succeeded", "failed", "cancelled"}
+DEFAULT_CANDIDATE_PAGE_SIZE = 100
+MAX_CANDIDATE_PAGE_SIZE = 500
 
 
 def _find_inference_run_by_idempotency_key(
@@ -328,19 +331,34 @@ def persist_decoder_result(
         }
         window.status = "completed"
 
-    candidates: list[EvidenceCandidatePrediction] = []
-    for block in result.blocks:
-        existing = (
+    boundary_keys = {
+        (block.start_ordinal, block.end_ordinal)
+        for block in result.blocks
+    }
+    existing_by_boundary: dict[tuple[int, int], EvidenceCandidatePrediction] = {}
+    if boundary_keys:
+        existing_candidates = (
             db.query(EvidenceCandidatePrediction)
             .filter(
                 EvidenceCandidatePrediction.run_id == run.id,
                 EvidenceCandidatePrediction.document_id == document_id,
                 EvidenceCandidatePrediction.target_version_id == target_version_id,
-                EvidenceCandidatePrediction.start_sentence_ordinal == block.start_ordinal,
-                EvidenceCandidatePrediction.end_sentence_ordinal == block.end_ordinal,
+                tuple_(
+                    EvidenceCandidatePrediction.start_sentence_ordinal,
+                    EvidenceCandidatePrediction.end_sentence_ordinal,
+                ).in_(boundary_keys),
             )
-            .first()
+            .all()
         )
+        existing_by_boundary = {
+            (candidate.start_sentence_ordinal, candidate.end_sentence_ordinal): candidate
+            for candidate in existing_candidates
+        }
+
+    candidates: list[EvidenceCandidatePrediction] = []
+    for block in result.blocks:
+        boundary = (block.start_ordinal, block.end_ordinal)
+        existing = existing_by_boundary.get(boundary)
         if existing is not None:
             candidates.append(existing)
             continue
@@ -369,11 +387,21 @@ def persist_decoder_result(
             metadata_={"sentence_ordinals": list(block.sentence_ordinals)},
         )
         db.add(candidate)
+        existing_by_boundary[boundary] = candidate
         candidates.append(candidate)
+    db.flush()
+    candidate_ids = [candidate.id for candidate in candidates]
     db.commit()
-    for candidate in candidates:
-        db.refresh(candidate)
-    return candidates
+    if not candidate_ids:
+        return []
+    persisted = (
+        db.query(EvidenceCandidatePrediction)
+        .filter(EvidenceCandidatePrediction.id.in_(set(candidate_ids)))
+        .populate_existing()
+        .all()
+    )
+    persisted_by_id = {candidate.id: candidate for candidate in persisted}
+    return [persisted_by_id[candidate_id] for candidate_id in candidate_ids]
 
 
 def store_inference_diagnostics(
@@ -531,9 +559,65 @@ def list_candidates(
     document_id: int | None = None,
     target_version_id: int | None = None,
     status: str | None = None,
+    limit: int = DEFAULT_CANDIDATE_PAGE_SIZE,
+    offset: int = 0,
 ) -> list[EvidenceCandidatePrediction]:
+    if limit < 1 or limit > MAX_CANDIDATE_PAGE_SIZE:
+        raise ValidationError(
+            f"Candidate page size must be between 1 and {MAX_CANDIDATE_PAGE_SIZE}"
+        )
+    if offset < 0:
+        raise ValidationError("Candidate page offset cannot be negative")
+    if status not in {None, "pending", "accepted", "modified", "rejected"}:
+        raise ValidationError("Unknown candidate review status")
+
+    latest_assignment_id = (
+        select(TaskAssignment.id)
+        .select_from(TaskAssignment)
+        .join(ProjectTask, ProjectTask.id == TaskAssignment.task_id)
+        .where(
+            TaskAssignment.project_id == EvidenceCandidatePrediction.project_id,
+            TaskAssignment.document_id == EvidenceCandidatePrediction.document_id,
+            TaskAssignment.assignee_user_id == user.id,
+            TaskAssignment.target_version_id
+            == EvidenceCandidatePrediction.target_version_id,
+            TaskAssignment.structure_version_id
+            == EvidenceCandidatePrediction.structure_version_id,
+            ProjectTask.project_id == EvidenceCandidatePrediction.project_id,
+            ProjectTask.annotation_type == "evidence_block",
+            ProjectTask.enabled.is_(True),
+        )
+        .order_by(TaskAssignment.id.desc())
+        .limit(1)
+        .correlate(EvidenceCandidatePrediction)
+        .scalar_subquery()
+    )
+    latest_review_action = (
+        select(EvidencePredictionReview.action)
+        .where(
+            EvidencePredictionReview.prediction_id
+            == EvidenceCandidatePrediction.id,
+            EvidencePredictionReview.reviewer_user_id == user.id,
+            or_(
+                and_(
+                    latest_assignment_id.is_(None),
+                    EvidencePredictionReview.assignment_id.is_(None),
+                ),
+                EvidencePredictionReview.assignment_id == latest_assignment_id,
+            ),
+        )
+        .order_by(EvidencePredictionReview.revision.desc())
+        .limit(1)
+        .correlate(EvidenceCandidatePrediction)
+        .scalar_subquery()
+    )
     query = (
-        db.query(EvidenceCandidatePrediction)
+        db.query(
+            EvidenceCandidatePrediction,
+            latest_assignment_id.label("review_assignment_id"),
+            latest_review_action.label("review_action"),
+        )
+        .options(selectinload(EvidenceCandidatePrediction.reviews))
         .join(Project, Project.id == EvidenceCandidatePrediction.project_id)
         .join(Document, Document.id == EvidenceCandidatePrediction.document_id)
         .filter(
@@ -553,47 +637,35 @@ def list_candidates(
         query = query.filter(EvidenceCandidatePrediction.document_id == document_id)
     if target_version_id is not None:
         query = query.filter(EvidenceCandidatePrediction.target_version_id == target_version_id)
-    candidates = query.order_by(
+    if status is not None:
+        action = {
+            "accepted": "accept",
+            "modified": "modify",
+            "rejected": "reject",
+        }.get(status)
+        query = query.filter(
+            latest_review_action.is_(None)
+            if status == "pending"
+            else latest_review_action == action
+        )
+    rows = query.order_by(
         EvidenceCandidatePrediction.document_id,
         EvidenceCandidatePrediction.target_version_id,
         EvidenceCandidatePrediction.start_sentence_ordinal,
-    ).all()
-    visible: list[EvidenceCandidatePrediction] = []
-    for candidate in candidates:
-        assignment_id = _latest_candidate_assignment_id(db, candidate, user.id)
+        EvidenceCandidatePrediction.id,
+    ).offset(offset).limit(limit).all()
+    candidates: list[EvidenceCandidatePrediction] = []
+    review_statuses = {
+        "accept": "accepted",
+        "modify": "modified",
+        "reject": "rejected",
+        None: "pending",
+    }
+    for candidate, assignment_id, review_action in rows:
         candidate._review_assignment_id = assignment_id
-        set_candidate_review_status(
-            candidate,
-            user.id,
-            assignment_id=assignment_id,
-        )
-        if status is None or candidate.review_status == status:
-            visible.append(candidate)
-    return visible
-
-
-def _latest_candidate_assignment_id(
-    db: Session,
-    candidate: EvidenceCandidatePrediction,
-    reviewer_user_id: int,
-) -> int | None:
-    return (
-        db.query(TaskAssignment.id)
-        .join(ProjectTask, ProjectTask.id == TaskAssignment.task_id)
-        .filter(
-            TaskAssignment.project_id == candidate.project_id,
-            TaskAssignment.document_id == candidate.document_id,
-            TaskAssignment.assignee_user_id == reviewer_user_id,
-            TaskAssignment.target_version_id == candidate.target_version_id,
-            TaskAssignment.structure_version_id == candidate.structure_version_id,
-            ProjectTask.project_id == candidate.project_id,
-            ProjectTask.annotation_type == "evidence_block",
-            ProjectTask.enabled.is_(True),
-        )
-        .order_by(TaskAssignment.id.desc())
-        .limit(1)
-        .scalar()
-    )
+        candidate.review_status = review_statuses[review_action]
+        candidates.append(candidate)
+    return candidates
 
 
 _REVIEW_ASSIGNMENT_UNSET = object()

@@ -213,6 +213,12 @@ def list_predictions(
     document_id: int | None = Query(None),
     target_version_id: int | None = Query(None),
     status: str | None = Query(None, pattern="^(pending|accepted|modified|rejected)$"),
+    limit: int = Query(
+        service.DEFAULT_CANDIDATE_PAGE_SIZE,
+        ge=1,
+        le=service.MAX_CANDIDATE_PAGE_SIZE,
+    ),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -226,6 +232,8 @@ def list_predictions(
         document_id=document_id,
         target_version_id=target_version_id,
         status=status,
+        limit=limit,
+        offset=offset,
     )
     return [
         service.candidate_read_for_user(

@@ -899,6 +899,8 @@ export interface InferencePredictionFilters {
   documentId?: number;
   targetVersionId?: number;
   status?: PredictionStatus;
+  limit?: number;
+  offset?: number;
 }
 
 export function listInferencePredictions(
@@ -914,6 +916,12 @@ export function listInferencePredictions(
   }
   if (filters.status !== undefined) {
     params.set("status", filters.status);
+  }
+  if (filters.limit !== undefined) {
+    params.set("limit", String(filters.limit));
+  }
+  if (filters.offset !== undefined) {
+    params.set("offset", String(filters.offset));
   }
   const query = params.toString();
   return request<EvidenceCandidatePrediction[]>(
