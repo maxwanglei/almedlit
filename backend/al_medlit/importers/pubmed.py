@@ -18,7 +18,7 @@ from al_medlit.core.config import settings
 
 
 class ImporterFetchError(Exception):
-    """Raised when an NCBI request fails (network, timeout, or bad status)."""
+    """Raised when an NCBI request or upstream response cannot be used."""
 
 
 @dataclass
@@ -227,15 +227,22 @@ def parse_pmc_xml(xml: str) -> dict[str, str]:
     return {pmcid: body.text for pmcid, body in parse_pmc_xml_documents(xml).items()}
 
 
-def parse_idconv_json(data: dict) -> dict[str, str]:
+def parse_idconv_json(data: object) -> dict[str, str]:
     """Map PMID -> PMCID from a PMC ID Converter response, skipping records
     that have no PMCID (errors or PubMed-only articles)."""
+    if not isinstance(data, dict):
+        raise ValueError("PMC ID Converter response must be a JSON object")
+    records = data.get("records", [])
+    if not isinstance(records, list):
+        raise ValueError("PMC ID Converter records must be a JSON array")
     out: dict[str, str] = {}
-    for record in data.get("records", []):
+    for record in records:
+        if not isinstance(record, dict):
+            raise ValueError("PMC ID Converter records must be JSON objects")
         pmid = record.get("pmid")
         pmcid = record.get("pmcid")
         if pmid and pmcid:
-            out[str(pmid)] = pmcid
+            out[str(pmid)] = str(pmcid)
     return out
 
 
@@ -277,7 +284,16 @@ def resolve_pmcids(client: httpx.Client, pmids: list[str]) -> dict[str, str]:
         return {}
     params = {**_auth_params(), "format": "json", "idtype": "pmid", "ids": ",".join(pmids)}
     response = _get(client, settings.ncbi_idconv_base, params)
-    return parse_idconv_json(response.json())
+    try:
+        return parse_idconv_json(response.json())
+    except (TypeError, ValueError) as exc:
+        # A proxy or an overloaded upstream can return a successful HTTP status
+        # with an HTML error page or an unexpected JSON shape. Treat that as an
+        # upstream failure without copying its potentially sensitive body into
+        # our API response.
+        raise ImporterFetchError(
+            "NCBI PMC ID Converter returned malformed JSON"
+        ) from exc
 
 
 def fetch_pmc_fulltext(client: httpx.Client, pmcids: list[str]) -> dict[str, str]:

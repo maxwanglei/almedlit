@@ -204,6 +204,26 @@ def test_resolve_pmcids_marks_converter_input_as_pmids():
     assert seen_request.url.params["ids"] == "11111,33333"
 
 
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(200, text="<html>upstream error</html>"),
+        httpx.Response(200, json=[]),
+        httpx.Response(200, json={"records": {"pmid": "11111"}}),
+    ],
+)
+def test_resolve_pmcids_translates_malformed_json(response):
+    def malformed(_request: httpx.Request) -> httpx.Response:
+        return response
+
+    with httpx.Client(transport=httpx.MockTransport(malformed)) as client:
+        with pytest.raises(
+            pubmed.ImporterFetchError,
+            match="NCBI PMC ID Converter returned malformed JSON",
+        ):
+            pubmed.resolve_pmcids(client, ["11111"])
+
+
 def test_fetch_pmc_fulltext_calls_efetch_pmc_and_parses():
     with _fake_ncbi_client() as client:
         result = pubmed.fetch_pmc_fulltext(client, ["PMC9999", "PMC8888"])
@@ -403,6 +423,31 @@ def test_preview_endpoint_returns_classified_items(api_client):
     assert by_pmid["11111"]["status"] == "full_text"
     assert by_pmid["33333"]["status"] == "abstract_only"
     assert by_pmid["44444"]["status"] == "not_found"
+
+
+def test_preview_endpoint_returns_502_for_malformed_id_converter_json(api_client):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "idconv" in request.url.path:
+            return httpx.Response(200, text="<html>upstream error</html>")
+        return httpx.Response(200, text=PUBMED_XML)
+
+    def override_get_ncbi_client():
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            yield client
+
+    api_client.app.dependency_overrides[get_ncbi_client] = override_get_ncbi_client
+    project_id = _create_project_via_api(api_client)
+
+    response = api_client.post(
+        f"/api/projects/{project_id}/import/pubmed/preview",
+        json={"pmids": ["11111"]},
+    )
+
+    assert response.status_code == 502
+    assert response.json() == {
+        "detail": "NCBI PMC ID Converter returned malformed JSON"
+    }
+    assert "upstream error" not in response.text
 
 
 def test_import_endpoint_creates_documents(api_client):
