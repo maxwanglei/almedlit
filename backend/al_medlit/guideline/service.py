@@ -25,7 +25,7 @@ def create_guideline_version(db: Session, data: GuidelineVersionCreate) -> Guide
                 GuidelineVersion.project_id == payload["project_id"],
                 GuidelineVersion.status == "active",
             )
-            .update({"status": "superseded"}, synchronize_session=False)
+            .update({"status": "superseded"}, synchronize_session="fetch")
         )
 
     version = GuidelineVersion(**payload)
