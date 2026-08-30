@@ -24,3 +24,7 @@ class ForbiddenError(APIError):
 
 class UnauthorizedError(APIError):
     status_code = 401
+
+
+class RateLimitedError(APIError):
+    status_code = 429

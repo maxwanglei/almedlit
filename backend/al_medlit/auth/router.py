@@ -61,10 +61,16 @@ def login(
     response: Response,
     db: Session = Depends(get_db),
 ):
+    service.assert_login_not_throttled(db, payload.username)
     user = service.authenticate_user(db, payload.username, payload.password)
     if user is None:
+        service.record_login_failure(db, payload.username)
+        # The audit row is the whole point of this branch, so it has to be
+        # committed before the request unwinds -- get_db only closes.
+        db.commit()
         raise UnauthorizedError("Invalid username or password")
     user.last_login_at = datetime.now(UTC)
+    service.record_login_success(db, user)
     # authenticate_user may transparently upgrade a legacy password hash. The
     # request-scoped session otherwise rolls that flush back when it closes.
     db.commit()

@@ -61,13 +61,14 @@ def list_users(
     workspace_id: int | None = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=100),
-    _admin: User = Depends(require_active_superuser),
+    admin: User = Depends(require_active_superuser),
     db: Session = Depends(get_db),
 ):
     if is_active is None and status_filter is not None:
         is_active = status_filter == "active"
-    return service.list_users(
+    result = service.list_users(
         db,
+        actor_user_id=admin.id,
         search=search,
         is_active=is_active,
         is_superuser=is_superuser,
@@ -75,6 +76,9 @@ def list_users(
         page=page,
         page_size=page_size,
     )
+    # Reads are audited too, so this route commits like a mutation would.
+    db.commit()
+    return result
 
 
 @admin_router.post(
@@ -99,10 +103,12 @@ def create_user(
 @admin_router.get("/users/{user_id}", response_model=AdminUserDetail)
 def get_user(
     user_id: int,
-    _admin: User = Depends(require_active_superuser),
+    admin: User = Depends(require_active_superuser),
     db: Session = Depends(get_db),
 ):
-    return service.get_user_detail(db, user_id)
+    result = service.get_user_detail(db, user_id, actor_user_id=admin.id)
+    db.commit()
+    return result
 
 
 @admin_router.patch("/users/{user_id}/status", response_model=AdminUserDetail)

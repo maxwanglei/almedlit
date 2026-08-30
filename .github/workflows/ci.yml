@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A superseded run has nothing to tell us once a newer commit is in flight.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend (lint + tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Ruff
+        run: uv run ruff check backend/al_medlit backend/tests backend/scripts
+
+      # The suite runs on in-memory SQLite, so no service containers are needed.
+      # Tests that require a real PostgreSQL mark themselves and skip here.
+      - name: Pytest
+        working-directory: backend
+        run: uv run pytest tests -q
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      # Audit the resolved lockfile rather than the loose ranges in
+      # pyproject.toml, so this reports what a deployment would actually install.
+      # These flags mirror backend.Dockerfile: no dev tools, no runtime extras.
+      # The optional ML extras declare mutual conflicts and so cannot all be
+      # resolved into one requirements set; a worker image that installs one
+      # needs its own audit step.
+      - name: Export locked requirements
+        run: uv export --frozen --no-dev --no-emit-workspace --format requirements-txt > locked-requirements.txt
+
+      - name: pip-audit
+        run: uvx pip-audit --requirement locked-requirements.txt --disable-pip
+
+  frontend:
+    name: Frontend (lint + build + tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # Kept in sync with infra/docker/frontend.Dockerfile.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Lint
+        working-directory: frontend
+        run: npm run lint
+
+      - name: Unit tests
+        working-directory: frontend
+        run: npm run test
+
+      - name: Build
+        working-directory: frontend
+        run: npm run build
+
+      - name: npm audit
+        working-directory: frontend
+        # Advisory: a transitive dev-only advisory should not block a merge.
+        run: npm audit --audit-level=high || true

@@ -127,6 +127,7 @@ def _user_summary(db: Session, user: User, membership_count: int | None = None) 
 def list_users(
     db: Session,
     *,
+    actor_user_id: int,
     search: str | None,
     is_active: bool | None,
     is_superuser: bool | None,
@@ -164,6 +165,25 @@ def list_users(
         .limit(page_size)
         .all()
     )
+    # A superuser reads across every workspace by design -- assert_workspace_member
+    # already mints an admin membership for one anywhere. Auditing the read is
+    # therefore the control that applies here, not an authorization check: it is
+    # what makes "who enumerated this workspace's roster" answerable afterwards.
+    record_admin_event(
+        db,
+        event_type="directory.users_listed",
+        actor_user_id=actor_user_id,
+        workspace_id=workspace_id,
+        details={
+            "search": cleaned_search or None,
+            "is_active": is_active,
+            "is_superuser": is_superuser,
+            "page": page,
+            "page_size": page_size,
+            "returned": len(rows),
+            "total": total,
+        },
+    )
     return AdminUserList(
         items=[_user_summary(db, user, count) for user, count in rows],
         total=total,
@@ -172,7 +192,14 @@ def list_users(
     )
 
 
-def get_user_detail(db: Session, user_id: int) -> AdminUserDetail:
+def _user_detail(db: Session, user_id: int) -> AdminUserDetail:
+    """Build one account's detail payload without auditing the read.
+
+    Mutation flows reuse this to render their response. They record their own
+    event, and emitting a directory read alongside it would file a status change
+    as if someone had browsed the directory.
+    """
+
     user = db.get(User, user_id)
     if user is None:
         raise NotFoundError("User not found")
@@ -196,6 +223,22 @@ def get_user_detail(db: Session, user_id: int) -> AdminUserDetail:
             for membership, workspace in membership_rows
         ],
     )
+
+
+def get_user_detail(db: Session, user_id: int, *, actor_user_id: int) -> AdminUserDetail:
+    detail = _user_detail(db, user_id)
+    # This response is the broadest read in the system: one account's full
+    # membership graph across every workspace it belongs to. A superuser is
+    # entitled to it by design, so the control that applies is recording who
+    # took it, not refusing it.
+    record_admin_event(
+        db,
+        event_type="directory.user_viewed",
+        actor_user_id=actor_user_id,
+        target_user_id=detail.id,
+        details={"membership_count": len(detail.memberships)},
+    )
+    return detail
 
 
 def get_instance_settings(db: Session) -> InstanceSettingsRead:
@@ -622,7 +665,7 @@ def set_user_status(
     if user is None:
         raise NotFoundError("User not found")
     if user.is_active == is_active:
-        return get_user_detail(db, user.id)
+        return _user_detail(db, user.id)
 
     if not is_active:
         if user.id == actor_user_id:
@@ -678,7 +721,7 @@ def set_user_status(
             target_user_id=user.id,
         )
     db.flush()
-    return get_user_detail(db, user.id)
+    return _user_detail(db, user.id)
 
 
 def _valid_account_action(db: Session, token: str, *, for_update: bool) -> AccountActionToken:

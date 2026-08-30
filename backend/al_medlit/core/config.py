@@ -56,6 +56,13 @@ class Settings(BaseSettings):
     allow_self_registration: bool = True
     auth_cookie_secure: bool = True
 
+    # Per-account login backoff. The nginx limiter in front of the API counts
+    # per source address, so it never sees a distributed attempt against one
+    # account, and it is absent entirely from any topology that does not put
+    # that container in front. Set the threshold to 0 to disable the backoff.
+    login_failure_threshold: int = 10
+    login_failure_window_minutes: int = 15
+
     # Optional one-time bootstrap superuser credentials for the explicit
     # scripts.bootstrap_admin command. Migrations must not create loginable
     # accounts from these settings.
