@@ -41,6 +41,7 @@ def register_models() -> None:
     from al_medlit.lineage import models as _lineage_models  # noqa: F401
     from al_medlit.model_artifacts import models as _model_artifact_models  # noqa: F401
     from al_medlit.project import models as _project_models  # noqa: F401
+    from al_medlit.storage_reclaim import models as _storage_reclaim_models  # noqa: F401
     from al_medlit.submission import models as _submission_models  # noqa: F401
     from al_medlit.training import models as _training_models  # noqa: F401
     from al_medlit.workflow import models as _workflow_models  # noqa: F401

@@ -558,6 +558,42 @@ def test_submission_storage_failure_after_publish_cleans_object_and_rolls_back(
     assert assignment.status == "in_progress"
 
 
+def test_submission_create_queues_object_when_rollback_cleanup_fails(
+    client,
+    db,
+    object_storage,
+    monkeypatch,
+):
+    from al_medlit.storage_reclaim.models import OrphanedStorageObject
+    from al_medlit.submission.models import AnnotationSubmission
+
+    ctx = _setup_project_with_annotation(client)
+    original_put = object_storage.put_bytes
+
+    def store_then_fail(key, data, *, content_type=None):
+        original_put(key, data, content_type=content_type)
+        raise RuntimeError("forced post-publish storage failure")
+
+    def fail_delete(_key):
+        raise RuntimeError("forced storage cleanup failure")
+
+    monkeypatch.setattr(object_storage, "put_bytes", store_then_fail)
+    monkeypatch.setattr(object_storage, "delete", fail_delete)
+    with pytest.raises(RuntimeError, match="post-publish storage failure"):
+        client.post(
+            (
+                f"/api/projects/{ctx['project']['id']}"
+                f"/documents/{ctx['document']['id']}/submissions"
+            ),
+            json={"annotator_id": "alice"},
+        )
+
+    assert db.query(AnnotationSubmission).count() == 0
+    queued = db.query(OrphanedStorageObject).one()
+    assert queued.origin == "submission.create_rollback"
+    assert object_storage.get_bytes(queued.storage_key)
+
+
 def test_submission_lock_refresh_rejects_cached_finalized_assignment(
     client,
     object_storage,
@@ -690,9 +726,12 @@ def test_delete_submission_removes_record_and_file(client, object_storage):
 
 def test_submission_delete_remains_committed_when_storage_cleanup_fails(
     client,
+    db,
     object_storage,
     monkeypatch,
 ):
+    from al_medlit.storage_reclaim.models import OrphanedStorageObject
+
     ctx = _setup_project_with_annotation(client)
     submission = client.post(
         (
@@ -709,8 +748,17 @@ def test_submission_delete_remains_committed_when_storage_cleanup_fails(
     response = client.delete(f"/api/submissions/{submission['id']}")
     assert response.status_code == 204
     assert client.get(f"/api/submissions/{submission['id']}").status_code == 404
-    # The unreferenced object remains available for a later storage-GC pass.
+    # The unreferenced object survives the failed delete, so it must be queued
+    # for the reclaim sweep rather than left to leak.
     assert object_storage.get_bytes(submission["storage_key"])
+    queued = (
+        db.query(OrphanedStorageObject)
+        .filter(OrphanedStorageObject.storage_key == submission["storage_key"])
+        .one()
+    )
+    assert queued.origin == "submission.delete"
+    assert queued.attempts == 1
+    assert "forced storage cleanup failure" in queued.last_error
 
 
 def test_download_unknown_submission_returns_404(client):

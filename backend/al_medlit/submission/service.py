@@ -12,6 +12,7 @@ from al_medlit.core.storage import ObjectStorage
 from al_medlit.corpus.models import Document
 from al_medlit.project import service as project_service
 from al_medlit.project.models import Project, ProjectTask, TaskAssignment
+from al_medlit.storage_reclaim import service as storage_reclaim_service
 from al_medlit.submission.models import AnnotationSubmission
 from al_medlit.submission.schemas import SubmissionCreate
 from al_medlit.submission.snapshot import build_snapshot
@@ -278,10 +279,16 @@ def create_submission(
         db.rollback()
         try:
             storage.delete(storage_key)
-        except Exception:
+        except Exception as storage_error:
             logger.exception(
                 "Failed to remove submission object after submission creation failure",
                 extra={"storage_key": storage_key},
+            )
+            storage_reclaim_service.record_orphaned_object(
+                db,
+                storage_key,
+                origin="submission.create_rollback",
+                error=storage_error,
             )
         raise
     db.refresh(submission)
@@ -345,10 +352,17 @@ def delete_submission(db: Session, storage: ObjectStorage, submission_id: int) -
     db.commit()
     try:
         storage.delete(storage_key)
-    except Exception:
+    except Exception as storage_error:
         # The authoritative database deletion succeeded. Keep the API operation
-        # successful and leave the now-unreferenced object for storage GC.
+        # successful and hand the now-unreferenced object to the reclaim sweep
+        # so a failed delete cannot leak it.
         logger.exception(
             "Failed to remove unreferenced submission object",
             extra={"storage_key": storage_key},
+        )
+        storage_reclaim_service.record_orphaned_object(
+            db,
+            storage_key,
+            origin="submission.delete",
+            error=storage_error,
         )

@@ -48,6 +48,11 @@ app.conf.update(
             "schedule": 60 * 60.0,
             "options": {"queue": "control"},
         },
+        "reclaim-orphaned-storage-objects": {
+            "task": "al_medlit.storage.reclaim_orphaned_objects",
+            "schedule": 15 * 60.0,
+            "options": {"queue": "control"},
+        },
     },
 )
 

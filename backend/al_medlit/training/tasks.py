@@ -15,6 +15,7 @@ from al_medlit.core.storage import ObjectStorageError, get_object_storage
 from al_medlit.model_artifacts import quota as artifact_quota
 from al_medlit.model_artifacts import service as artifact_service
 from al_medlit.model_artifacts.models import ArtifactStorageReservation
+from al_medlit.storage_reclaim.service import reclaim_orphaned_objects
 from al_medlit.training.runtime_profiles import runtime_queue_for_environment_class
 
 logger = logging.getLogger(__name__)
@@ -271,6 +272,26 @@ def expire_artifact_storage_reservations_task(
             "expired_count": expired_count,
             "released_bytes": released_bytes,
         }
+    finally:
+        db.close()
+
+
+@app.task(name="al_medlit.storage.reclaim_orphaned_objects")
+def reclaim_orphaned_storage_objects_task(limit: int = 200) -> dict[str, int]:
+    """Retry storage deletes that were abandoned once the database had won."""
+
+    db = SessionLocal()
+    try:
+        result = reclaim_orphaned_objects(db, get_object_storage(), limit=limit)
+        db.commit()
+        return {
+            "scanned_count": result.scanned_count,
+            "reclaimed_count": result.reclaimed_count,
+            "failed_count": result.failed_count,
+        }
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()
 
