@@ -55,7 +55,9 @@ services:
       - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/certs
 
   minio:
-    image: minio/minio:latest
+    # Keep the human-auditable release tag and immutable multi-architecture
+    # manifest digest together. Update both only after validating an upgrade.
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     restart: unless-stopped
     command: server /data --console-address ":9001" --certs-dir /certs
     environment:
