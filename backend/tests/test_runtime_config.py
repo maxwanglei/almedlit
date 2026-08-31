@@ -26,6 +26,9 @@ ALLOW_SELF_REGISTRATION_LINE = (
     "AL_MEDLIT_ALLOW_SELF_REGISTRATION: ${AL_MEDLIT_ALLOW_SELF_REGISTRATION:-true}"
 )
 DEPLOYMENT_PROFILE_LINE = "AL_MEDLIT_DEPLOYMENT_PROFILE: ${AL_MEDLIT_DEPLOYMENT_PROFILE:-laptop}"
+AUTH_COOKIE_LINE = (
+    "AL_MEDLIT_AUTH_COOKIE_SECURE: ${AL_MEDLIT_AUTH_COOKIE_SECURE:-false}"
+)
 LOCAL_ATTEMPT_ROOT_LINE = "AL_MEDLIT_LOCAL_ATTEMPT_ROOT: /var/lib/al-medlit/attempts"
 LOCAL_ATTEMPT_VOLUME_LINE = "- attempt_data:/var/lib/al-medlit/attempts"
 SECURE_MINIO_LINE = 'AL_MEDLIT_STORAGE_SECURE: "true"'
@@ -115,6 +118,7 @@ def test_compose_requires_jwt_secret_for_backend_python_services():
     assert compose.count(REQUIRED_COMPOSE_JWT_LINE) == python_service_count
     assert compose.count(BOOTSTRAP_ADMIN_PASSWORD_LINE) == 1
     assert compose.count(ALLOW_SELF_REGISTRATION_LINE) == 1
+    assert compose.count(AUTH_COOKIE_LINE) == 1
     assert compose.count(DEPLOYMENT_PROFILE_LINE) == python_service_count
     assert compose.count(LOCAL_ATTEMPT_ROOT_LINE) == python_service_count
     assert compose.count(LOCAL_ATTEMPT_VOLUME_LINE) == python_service_count
@@ -128,6 +132,7 @@ def test_lab_make_target_sets_lab_deployment_profile():
     makefile = (ROOT_DIR / "Makefile").read_text()
 
     assert "AL_MEDLIT_DEPLOYMENT_PROFILE=lab" in makefile
+    assert "AL_MEDLIT_AUTH_COOKIE_SECURE=true" in makefile
 
 
 def test_default_api_install_excludes_training_and_accelerator_packages():
@@ -254,12 +259,21 @@ def test_runtime_guard_rejects_insecure_minio_transport(monkeypatch):
         settings.validate_runtime_secrets()
 
 
-def test_runtime_guard_rejects_insecure_auth_cookie(monkeypatch):
+def test_runtime_guard_rejects_insecure_auth_cookie_outside_laptop(monkeypatch):
     monkeypatch.setattr(settings, "auth_cookie_secure", False)
+    monkeypatch.setattr(settings, "deployment_profile", "lab")
     monkeypatch.setattr(settings, "jwt_secret", "configured-test-jwt-secret-32-byte-minimum")
 
     with pytest.raises(RuntimeError, match="AL_MEDLIT_AUTH_COOKIE_SECURE"):
         settings.validate_runtime_secrets()
+
+
+def test_runtime_guard_allows_insecure_auth_cookie_for_loopback_laptop(monkeypatch):
+    monkeypatch.setattr(settings, "auth_cookie_secure", False)
+    monkeypatch.setattr(settings, "deployment_profile", "laptop")
+    monkeypatch.setattr(settings, "jwt_secret", "configured-test-jwt-secret-32-byte-minimum")
+
+    settings.validate_runtime_secrets()
 
 
 def test_auth_cookie_is_secure_by_default():
@@ -288,6 +302,13 @@ def test_compose_publishes_datastores_on_loopback_only():
     # A bare host:container mapping publishes on every interface.
     for exposed in ('"5432:5432"', '"9000:9000"', '"9001:9001"'):
         assert exposed not in compose
+
+
+def test_compose_publishes_plain_http_frontend_on_loopback_only():
+    compose = (ROOT_DIR / "infra" / "docker-compose.yml").read_text()
+
+    assert '"127.0.0.1:${AL_MEDLIT_FRONTEND_HOST_PORT:-80}:80"' in compose
+    assert '"80:80"' not in compose
 
 
 def test_compose_minio_transport_uses_generated_tls_certificates():

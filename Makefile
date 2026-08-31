@@ -5,7 +5,8 @@ COMPOSE_ENV_FILE := .env
 COMPOSE := docker compose --env-file $(COMPOSE_ENV_FILE) -f $(COMPOSE_FILE)
 LAB_ENV := AL_MEDLIT_CELERY_BROKER_URL=redis://redis:6379/0 \
            AL_MEDLIT_CELERY_TASK_ALWAYS_EAGER=false \
-           AL_MEDLIT_DEPLOYMENT_PROFILE=lab
+           AL_MEDLIT_DEPLOYMENT_PROFILE=lab \
+           AL_MEDLIT_AUTH_COOKIE_SECURE=true
 UV := uv
 # Keep in sync with frontend.Dockerfile so lockfile updates use the same npm as `npm ci` in Docker.
 FRONTEND_NODE_IMAGE := node:20-alpine

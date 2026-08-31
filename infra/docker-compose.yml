@@ -109,6 +109,10 @@ services:
       AL_MEDLIT_BOOTSTRAP_ADMIN_PASSWORD: ${AL_MEDLIT_BOOTSTRAP_ADMIN_PASSWORD:-}
       AL_MEDLIT_ALLOW_SELF_REGISTRATION: ${AL_MEDLIT_ALLOW_SELF_REGISTRATION:-true}
       AL_MEDLIT_DEPLOYMENT_PROFILE: ${AL_MEDLIT_DEPLOYMENT_PROFILE:-laptop}
+      # The bundled laptop frontend is plain HTTP on loopback, so Secure
+      # cookies would be discarded by browsers. Shared deployments set this
+      # to true and terminate TLS at their public edge.
+      AL_MEDLIT_AUTH_COOKIE_SECURE: ${AL_MEDLIT_AUTH_COOKIE_SECURE:-false}
       AL_MEDLIT_LOCAL_ATTEMPT_ROOT: /var/lib/al-medlit/attempts
       # Laptop profile: no broker container, run tasks eagerly in-process.
       # Lab profile: either `make lab-up` or explicit `.env` overrides should
@@ -145,7 +149,9 @@ services:
     environment:
       AL_MEDLIT_AUTH_RATE: ${AL_MEDLIT_AUTH_RATE:-10r/m}
     ports:
-      - "80:80"
+      # Plain HTTP is a laptop-only convenience and must not be exposed beyond
+      # the host. Shared deployments put a TLS terminator in front.
+      - "127.0.0.1:${AL_MEDLIT_FRONTEND_HOST_PORT:-80}:80"
     depends_on:
       - backend
 

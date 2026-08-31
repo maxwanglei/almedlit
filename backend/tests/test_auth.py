@@ -465,6 +465,26 @@ def test_register_login_me_flow(client):
     assert bad.status_code == 401
 
 
+def test_laptop_http_session_cookie_is_not_marked_secure(client, monkeypatch):
+    from al_medlit.auth.cookies import CSRF_COOKIE_NAME, SESSION_COOKIE_NAME
+    from al_medlit.core.config import settings
+
+    monkeypatch.setattr(settings, "auth_cookie_secure", False)
+    registered = client.post(
+        "/api/auth/register",
+        json={"username": "laptop-http-user", "password": "strong-password"},
+    )
+
+    assert registered.status_code == 200
+    cookie_headers = {
+        value.split("=", 1)[0]: value
+        for value in registered.headers.get_list("set-cookie")
+    }
+    assert "Secure" not in cookie_headers[SESSION_COOKIE_NAME]
+    assert "HttpOnly" in cookie_headers[SESSION_COOKIE_NAME]
+    assert "Secure" not in cookie_headers[CSRF_COOKIE_NAME]
+
+
 def test_cookie_authenticated_mutations_require_csrf_and_logout_clears_session(client):
     from al_medlit.auth.cookies import CSRF_COOKIE_NAME, SESSION_COOKIE_NAME
 

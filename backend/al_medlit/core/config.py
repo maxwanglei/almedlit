@@ -111,10 +111,10 @@ class Settings(BaseSettings):
         self.validate_storage_transport()
 
     def validate_auth_cookie(self) -> None:
-        if not self.auth_cookie_secure:
+        if not self.auth_cookie_secure and self.deployment_profile.strip().lower() != "laptop":
             raise RuntimeError(
-                "AL_MEDLIT_AUTH_COOKIE_SECURE must be true; insecure browser "
-                "session cookies are not supported"
+                "AL_MEDLIT_AUTH_COOKIE_SECURE must be true outside the laptop "
+                "deployment profile"
             )
 
     def validate_storage_transport(self) -> None:
