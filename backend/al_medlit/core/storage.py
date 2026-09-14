@@ -244,9 +244,18 @@ class MinioObjectStorage:
                 raise ObjectStorageError(f"MinIO CA certificate not found: {ca_path}")
             import urllib3
 
+            # Passing a custom client bypasses MinIO's own pool construction.
+            # Preserve its finite timeouts and retries when overriding the CA.
             http_client = urllib3.PoolManager(
+                timeout=urllib3.Timeout(connect=300, read=300),
+                maxsize=10,
                 cert_reqs="CERT_REQUIRED",
                 ca_certs=str(ca_path),
+                retries=urllib3.Retry(
+                    total=5,
+                    backoff_factor=0.2,
+                    status_forcelist=[500, 502, 503, 504],
+                ),
             )
 
         normalized_mode = encryption_mode.strip().lower()

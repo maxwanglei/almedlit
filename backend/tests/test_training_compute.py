@@ -1,7 +1,13 @@
 import hashlib
 import json
+import os
 import shlex
+import subprocess
 import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 
@@ -237,6 +243,92 @@ def test_slurm_submit_poll_terminal_and_cancel_commands(tmp_path, monkeypatch):
     assert state.exit_code == 0
     assert any("sbatch" in command[-1] for command in runner.commands)
     assert any("sacct" in command[-1] for command in runner.commands)
+
+
+def test_concurrent_slurm_submissions_share_one_job_and_sentinel(tmp_path, monkeypatch):
+    """Execute the actual remote shell, replacing only cluster commands."""
+    remote_root = tmp_path / "remote"
+    remote_job = remote_root / "inference-1"
+    remote_job.mkdir(parents=True)
+    command_root = tmp_path / "bin"
+    command_root.mkdir()
+    attempts = tmp_path / "attempts"
+    attempts.mkdir()
+    release = tmp_path / "release"
+    # macOS lacks the Linux flock executable. This implements its -x FD form
+    # using the real OS lock, while exposing when both contenders reach it.
+    (command_root / "flock").write_text(
+        f"#!{sys.executable}\n"
+        "import fcntl, os, pathlib, sys\n"
+        f"pathlib.Path({str(attempts)!r}, f'lock-{{os.getpid()}}').touch()\n"
+        "fcntl.flock(int(sys.argv[-1]), fcntl.LOCK_EX)\n",
+        encoding="utf-8",
+    )
+    (command_root / "sbatch").write_text(
+        f"#!{sys.executable}\n"
+        "import os, pathlib, time\n"
+        f"pathlib.Path({str(attempts)!r}, f'job-{{os.getpid()}}').touch()\n"
+        "deadline = time.monotonic() + 10\n"
+        f"while not pathlib.Path({str(release)!r}).exists():\n"
+        "    if time.monotonic() > deadline: raise SystemExit('release timed out')\n"
+        "    time.sleep(0.01)\n"
+        "print(os.getpid())\n",
+        encoding="utf-8",
+    )
+    for executable in command_root.iterdir():
+        executable.chmod(0o755)
+    ready = threading.Barrier(2)
+
+    class LocalShellRunner:
+        def run(self, argv, **_kwargs):
+            ready.wait(timeout=5)
+            result = subprocess.run(
+                shlex.split(argv[-1]),
+                env={**os.environ, "PATH": f"{command_root}:{os.environ['PATH']}"},
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            return CommandResult(
+                argv=argv,
+                returncode=result.returncode,
+                stdout=result.stdout,
+                stderr=result.stderr,
+            )
+
+    backend = SSHSlurmComputeBackend(
+        replace(_slurm_config(tmp_path), remote_root=PurePosixPath(str(remote_root))),
+        LocalShellRunner(),
+    )
+    monkeypatch.setattr(backend, "_upload_verified_bundle", lambda _bundle: None)
+    bundle = JobBundle(
+        job_key="inference-1", command=("true",), local_bundle_path=tmp_path,
+    )
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(backend.submit, bundle) for _ in range(2)]
+        try:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                # The old shell reaches two sbatch invocations; the fixed
+                # shell leaves one contender waiting on the submission lock.
+                if len(list(attempts.glob("job-*"))) >= 2 or (
+                    len(list(attempts.glob("lock-*"))) == 2
+                    and list(attempts.glob("job-*"))
+                ):
+                    break
+                time.sleep(0.01)
+            else:
+                pytest.fail("Concurrent submitters did not reach the external call")
+        finally:
+            release.touch()
+        submissions = [future.result(timeout=15) for future in futures]
+
+    assert len(list(attempts.glob("job-*"))) == 1
+    assert submissions[0].external_job_id == submissions[1].external_job_id
+    assert (remote_job / ".submitted-job-id").read_text().strip() == (
+        submissions[0].external_job_id
+    )
+    assert not (remote_job / ".submitted-job-id.tmp").exists()
 
 
 def test_slurm_live_metric_reader_returns_only_complete_bounded_records(tmp_path):

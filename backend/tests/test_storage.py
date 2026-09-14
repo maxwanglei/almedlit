@@ -152,10 +152,16 @@ def test_minio_uses_configured_ca_certificate(monkeypatch, tmp_path):
         ca_cert_path=ca_certificate,
     )
 
-    assert captured["pool_kwargs"] == {
-        "cert_reqs": "CERT_REQUIRED",
-        "ca_certs": str(ca_certificate),
-    }
+    pool_options = captured["pool_kwargs"]
+    assert pool_options["cert_reqs"] == "CERT_REQUIRED"
+    assert pool_options["ca_certs"] == str(ca_certificate)
+    assert pool_options["timeout"].connect_timeout == 300
+    assert pool_options["timeout"].read_timeout == 300
+    assert pool_options["maxsize"] == 10
+    retry = pool_options["retries"]
+    assert retry.total == 5
+    assert retry.backoff_factor == 0.2
+    assert retry.status_forcelist == [500, 502, 503, 504]
     assert captured["minio_kwargs"]["http_client"].__class__ is FakePoolManager
 
 

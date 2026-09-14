@@ -835,7 +835,9 @@ def build_inference_bundle(
         relationship_type="bundled_for_inference",
     )
     run.metrics = {**run.metrics, "bundle_artifact_id": artifact.id}
-    db.commit()
+    # Submission owns the transaction: retain its run lock while publishing
+    # the external job ID, including the bundle's files and lineage records.
+    db.flush()
     return bundle
 
 
@@ -1046,6 +1048,9 @@ def execute_inference_run(
             run_id=run.id,
             work_root=work_root,
         )
+    # Keep the lock through bundle creation and submission. A retry must
+    # refresh the winner's state before deciding whether to submit again.
+    run = service.lock_inference_run(db, run_id)
     selected_backend = backend or build_compute_backend(run.compute_profile)
     if not isinstance(selected_backend, SSHSlurmComputeBackend):
         raise ValidationError("SSH/Slurm inference requires the SSHSlurm compute backend")

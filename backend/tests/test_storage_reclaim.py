@@ -1,6 +1,7 @@
 """The reclaim queue that keeps failed storage deletes from leaking objects."""
 
 from datetime import UTC, timedelta
+from threading import Event
 
 from al_medlit.core.models import utc_now
 from al_medlit.storage_reclaim.models import OrphanedStorageObject
@@ -110,3 +111,36 @@ def test_reclaim_processes_a_bounded_batch(db, object_storage):
 
     assert result.reclaimed_count == 2
     assert db.query(OrphanedStorageObject).count() == 1
+
+
+def test_reclaim_stops_between_objects_and_leaves_remaining_work_retryable(
+    db, object_storage, monkeypatch,
+):
+    for index in range(3):
+        _queue(db, object_storage, f"objects/{index}.json")
+    due = utc_now() + timedelta(seconds=RETRY_BASE_SECONDS + 1)
+    stop_requested = Event()
+    original_delete = object_storage.delete
+
+    def delete_then_stop(key):
+        original_delete(key)
+        stop_requested.set()
+
+    monkeypatch.setattr(object_storage, "delete", delete_then_stop)
+    result = reclaim_orphaned_objects(
+        db, object_storage, now=due, should_stop=stop_requested.is_set,
+    )
+    db.commit()
+
+    assert result.reclaimed_count == 1
+    assert result.failed_count == 0
+    remaining = db.query(OrphanedStorageObject).order_by(OrphanedStorageObject.id).all()
+    assert [entry.storage_key for entry in remaining] == [
+        "objects/1.json", "objects/2.json",
+    ]
+    assert all(entry.attempts == 1 for entry in remaining)
+    monkeypatch.setattr(object_storage, "delete", original_delete)
+    retried = reclaim_orphaned_objects(db, object_storage, now=due)
+    db.commit()
+    assert retried.reclaimed_count == 2
+    assert db.query(OrphanedStorageObject).count() == 0

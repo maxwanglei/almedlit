@@ -35,7 +35,11 @@ export default function EvidencePredictionPanel({
     (prediction) => prediction.review_status === "pending",
   ).length;
   return (
-    <section className="eb-predictions" aria-label="Model prediction candidates">
+    <section
+      className="eb-predictions"
+      aria-label="Model prediction candidates"
+      aria-busy={loading}
+    >
       <header>
         <div>
           <strong>{predictions.length} model candidates</strong>
@@ -45,7 +49,9 @@ export default function EvidencePredictionPanel({
           {loading ? "Refreshing…" : "Refresh"}
         </button>
       </header>
-      {predictions.length === 0 ? (
+      {loading ? (
+        <p className="aw-empty" role="status">Loading prediction candidates…</p>
+      ) : predictions.length === 0 ? (
         <p className="aw-empty">No candidates for this run, document, and target.</p>
       ) : null}
       {predictions.map((prediction) => {

@@ -1,3 +1,5 @@
+import json
+import os
 import re
 import shutil
 import subprocess
@@ -37,7 +39,7 @@ MINIO_CERT_MOUNT_LINE = (
     "- ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro"
 )
 PINNED_MINIO_IMAGE = (
-    "minio/minio:RELEASE.2025-09-07T16-13-09Z"
+    "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z"
     "@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"
 )
 HEAVY_TRAINING_PACKAGES = {
@@ -128,6 +130,32 @@ def test_compose_requires_jwt_secret_for_backend_python_services():
     assert "attempt_data:" in compose
 
 
+@pytest.mark.skipif(shutil.which("docker") is None, reason="Docker Compose CLI is unavailable")
+@pytest.mark.parametrize("threshold", ["0", "3"])
+def test_compose_passes_configured_login_backoff_to_backend(threshold):
+    result = subprocess.run(
+        [
+            "docker", "compose", "--env-file", ".env.example",
+            "-f", "infra/docker-compose.yml", "config", "--format", "json",
+        ],
+        cwd=ROOT_DIR,
+        env=os.environ | {
+            "POSTGRES_PASSWORD": "compose-test-database-password",
+            "MINIO_ROOT_PASSWORD": "compose-test-storage-password",
+            "AL_MEDLIT_JWT_SECRET": "compose-test-jwt-secret-at-least-32-bytes",
+            "AL_MEDLIT_LOGIN_FAILURE_THRESHOLD": threshold,
+            "AL_MEDLIT_LOGIN_FAILURE_WINDOW_MINUTES": "2",
+        },
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=15,
+    )
+    environment = json.loads(result.stdout)["services"]["backend"]["environment"]
+    assert environment["AL_MEDLIT_LOGIN_FAILURE_THRESHOLD"] == threshold
+    assert environment["AL_MEDLIT_LOGIN_FAILURE_WINDOW_MINUTES"] == "2"
+
+
 def test_lab_make_target_sets_lab_deployment_profile():
     makefile = (ROOT_DIR / "Makefile").read_text()
 
@@ -188,7 +216,7 @@ def test_compose_pins_minio_to_a_dated_release_manifest():
     assert f"image: {PINNED_MINIO_IMAGE}" in compose
     assert "minio/minio:latest" not in compose
     assert re.fullmatch(
-        r"minio/minio:RELEASE\.\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z"
+        r"quay\.io/minio/minio:RELEASE\.\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z"
         r"@sha256:[0-9a-f]{64}",
         PINNED_MINIO_IMAGE,
     )

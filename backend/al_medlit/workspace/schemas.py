@@ -1,8 +1,9 @@
 from datetime import datetime
+from typing import Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-from al_medlit.auth.schemas import PublicPassword
+from al_medlit.auth.schemas import validate_public_password
 
 
 class WorkspaceCreate(BaseModel):
@@ -92,9 +93,15 @@ class InvitePreview(BaseModel):
 
 class InviteAccept(BaseModel):
     username: str | None = Field(default=None, min_length=1, max_length=120)
-    password: PublicPassword | None = None
+    password: str | None = Field(default=None, min_length=1)
     display_name: str = Field(default="", max_length=120)
     create_account: bool = True
+
+    @model_validator(mode="after")
+    def validate_new_account_password(self) -> Self:
+        if self.create_account and self.password is not None:
+            validate_public_password(self.password)
+        return self
 
 
 class JoinRequestCreate(BaseModel):

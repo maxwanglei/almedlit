@@ -406,11 +406,22 @@ def backfill_document_structures(
 
     for document_id in ids:
         try:
-            document = db.get(Document, document_id)
+            # Rebuild, activation, and assignment creation lock this same row.
+            # Refresh after waiting so a concurrent activation cannot be
+            # overwritten using a cached, previously inactive document.
+            document = (
+                db.query(Document)
+                .filter(Document.id == document_id)
+                .populate_existing()
+                .with_for_update()
+                .first()
+            )
             if document is None:
+                db.commit()
                 result.skipped += 1
                 continue
             if document.active_structure_version_id is not None:
+                db.commit()
                 result.skipped += 1
                 continue
             current_hash = text_sha256(document.text or "")

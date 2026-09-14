@@ -1,5 +1,3 @@
-from datetime import UTC, datetime
-
 from fastapi import APIRouter, Depends, Header, Request, Response, status
 from sqlalchemy.orm import Session
 
@@ -11,7 +9,7 @@ from al_medlit.auth.schemas import SessionResponse, UserCreate
 from al_medlit.core import capabilities as cap
 from al_medlit.core.config import settings
 from al_medlit.core.database import get_db
-from al_medlit.core.exceptions import ForbiddenError, NotFoundError, UnauthorizedError
+from al_medlit.core.exceptions import ForbiddenError, NotFoundError
 from al_medlit.workspace import capability_service, service
 from al_medlit.workspace.dependencies import ROLE_ORDER, require_role
 from al_medlit.workspace.models import WorkspaceJoinRequest, WorkspaceMember
@@ -295,14 +293,7 @@ def accept_invite(
                 ),
             )
         else:
-            user = auth_service.authenticate_user(db, payload.username, payload.password)
-            if user is None:
-                raise UnauthorizedError("Invalid username or password")
-            user.last_login_at = datetime.now(UTC)
-            # Sessions deliberately disable autoflush. Persist the login stamp
-            # (and any legacy password-hash upgrade) before invite acceptance
-            # refreshes and locks the user row.
-            db.flush()
+            user = auth_service.authenticate_login(db, payload.username, payload.password)
     else:
         user = get_current_user(request=request, authorization=None, db=db)
 

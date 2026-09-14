@@ -139,6 +139,8 @@ interface AuthenticatedLayoutProps {
   announcement: string;
   onNavigate: (path: string) => void;
   onLogout: () => void;
+  logoutPending: boolean;
+  logoutError: string | null;
   redirecting: boolean;
   routeContext: ApplicationRouteContext;
 }
@@ -155,6 +157,8 @@ function AuthenticatedLayout({
   announcement,
   onNavigate,
   onLogout,
+  logoutPending,
+  logoutError,
   redirecting,
   routeContext,
 }: AuthenticatedLayoutProps): React.ReactElement {
@@ -172,6 +176,24 @@ function AuthenticatedLayout({
         onNavigate={onNavigate}
         onLogout={onLogout}
       >
+        {logoutError ? (
+          <Banner
+            className="shell-banner"
+            status="error"
+            title="Sign out failed"
+            description={logoutError}
+            role="alert"
+            container="section"
+            endContent={(
+              <Button label="Retry sign out" onClick={onLogout} />
+            )}
+          />
+        ) : null}
+        {logoutPending ? (
+          <div className="status" role="status" aria-live="polite">
+            Signing out…
+          </div>
+        ) : null}
         <Suspense
           fallback={(
             <main id="main-content" tabIndex={-1}>
@@ -346,6 +368,9 @@ function Application(): React.ReactElement {
   // HttpOnly cookies cannot be inspected by JavaScript. Start in a probing
   // state and let /auth/me establish whether a valid session exists.
   const [authed, setAuthed] = useState(true);
+  const [logoutPending, setLogoutPending] = useState(false);
+  const [logoutError, setLogoutError] = useState<string | null>(null);
+  const logoutInFlightRef = useRef(false);
   const [sessionReady, setSessionReady] = useState(false);
   const [justRegistered, setJustRegistered] = useState(false);
   const [onboarded, setOnboarded] = useState(false);
@@ -525,6 +550,7 @@ function Application(): React.ReactElement {
     useProjectWorkspaceStore.getState().reset();
     useEvidenceBlockStore.getState().reset();
     setAuthed(authenticated);
+    setLogoutError(null);
     setSessionReady(!authenticated);
     setJustRegistered(false);
     setOnboarded(false);
@@ -582,8 +608,27 @@ function Application(): React.ReactElement {
   }
 
   function handleLogout(): void {
-    window.localStorage.removeItem("al-medlit.currentAnnotatorId");
-    void logout().catch(() => publishSessionChange(false));
+    if (logoutInFlightRef.current) return;
+    logoutInFlightRef.current = true;
+    const generation = sessionGenerationRef.current;
+    setLogoutPending(true);
+    setLogoutError(null);
+    void logout()
+      .then(() => {
+        window.localStorage.removeItem("al-medlit.currentAnnotatorId");
+      })
+      .catch(() => {
+        if (generation === sessionGenerationRef.current) {
+          setLogoutError(
+            "Sign out could not be confirmed. Your session may still be active. " +
+            "Try again. If the problem continues, reload the page and sign out again.",
+          );
+        }
+      })
+      .finally(() => {
+        logoutInFlightRef.current = false;
+        setLogoutPending(false);
+      });
   }
 
   function handleWorkspaceChange(workspaceId: number): void {
@@ -1831,6 +1876,8 @@ function Application(): React.ReactElement {
             announcement={routeAnnouncement}
             onNavigate={navigatePath}
             onLogout={handleLogout}
+            logoutPending={logoutPending}
+            logoutError={logoutError}
             redirecting={routeRedirect !== null}
             routeContext={routeContext}
           />

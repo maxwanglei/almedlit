@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -9,7 +9,9 @@ import type {
   Document,
   DocumentStructureRead,
   EvidenceReviewCoverage,
+  EvidenceCandidatePrediction,
   EvidenceTarget,
+  InferenceRun,
   ProjectTask,
   TaskAssignment,
 } from "@/types/api";
@@ -209,6 +211,54 @@ const COVERAGE: EvidenceReviewCoverage = {
   fully_reviewed: false,
 };
 
+const INFERENCE_RUN: InferenceRun = {
+  id: 7,
+  project_id: 1,
+  corpus_snapshot_id: 1,
+  checkpoint_id: 5,
+  compute_profile_id: 1,
+  name: "Evidence model",
+  target_version_ids: [101],
+  window_config: {},
+  decoder_config: {},
+  status: "succeeded",
+  idempotency_key: "evidence-run",
+  external_job_id: null,
+  diagnostics_artifact_id: null,
+  started_at: null,
+  completed_at: null,
+  failure_reason: null,
+  metrics: {},
+};
+
+function prediction(id: number): EvidenceCandidatePrediction {
+  return {
+    id,
+    project_id: 1,
+    run_id: 7,
+    checkpoint_id: 5,
+    document_id: DOCUMENT.id,
+    structure_version_id: 201,
+    target_version_id: 101,
+    start_sentence_id: 701,
+    end_sentence_id: 702,
+    start_sentence_ordinal: 0,
+    end_sentence_ordinal: 1,
+    start_char: 0,
+    end_char: 30,
+    block_confidence: 0.87,
+    boundary_confidence: {},
+    uncertainty: 0.13,
+    decoder_version: "evidence-block-decoder-v1",
+    source_window_ids: [21],
+    status: "pending",
+    review_status: "pending",
+    diagnostics_artifact_id: null,
+    metadata_: {},
+    reviews: [],
+  };
+}
+
 function annotation(id = 901): Annotation {
   return {
     id,
@@ -296,6 +346,160 @@ afterEach(() => {
 });
 
 describe("EvidenceBlockCanvas", () => {
+  it("preserves run discovery errors after prediction refresh effects settle", async () => {
+    let rejectRuns!: (error: Error) => void;
+    api.listInferenceRuns.mockImplementationOnce(
+      () => new Promise<InferenceRun[]>((_resolve, reject) => { rejectRuns = reject; }),
+    );
+    renderCanvas();
+    await screen.findByLabelText("Note");
+
+    await act(async () => rejectRuns(new Error("Unable to discover inference runs.")));
+
+    expect(screen.getByText("Unable to discover inference runs.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(screen.getByText("Unable to discover inference runs.")).toBeTruthy();
+    expect(api.listInferencePredictions).not.toHaveBeenCalled();
+  });
+
+  it("loads every prediction page before displaying candidates, preserving scope filters", async () => {
+    const predictions = Array.from({ length: 102 }, (_, index) => prediction(1000 + index));
+    predictions[0].structure_version_id = 200;
+    let resolveSecondPage!: (items: EvidenceCandidatePrediction[]) => void;
+    api.listInferenceRuns.mockResolvedValue([INFERENCE_RUN]);
+    api.listInferencePredictions
+      .mockResolvedValueOnce(predictions.slice(0, 100))
+      .mockImplementationOnce(() => new Promise<EvidenceCandidatePrediction[]>((resolve) => {
+        resolveSecondPage = resolve;
+      }));
+    renderCanvas();
+
+    await waitFor(() => expect(api.listInferencePredictions).toHaveBeenCalledTimes(2));
+    expect(screen.getByText("Loading prediction candidates…")).toBeTruthy();
+    expect(screen.queryByText("No candidates for this run, document, and target.")).toBeNull();
+    expect(screen.queryByLabelText("Accept prediction 1001")).toBeNull();
+    await act(async () => resolveSecondPage(predictions.slice(100)));
+
+    expect(screen.getByText("101 model candidates")).toBeTruthy();
+    expect(screen.getByLabelText("Accept prediction 1101")).toBeTruthy();
+    expect(screen.queryByLabelText("Accept prediction 1000")).toBeNull();
+    expect(api.listInferencePredictions).toHaveBeenNthCalledWith(1, 7, {
+      documentId: 41, targetVersionId: 101, limit: 100, offset: 0,
+    });
+    expect(api.listInferencePredictions).toHaveBeenNthCalledWith(2, 7, {
+      documentId: 41, targetVersionId: 101, limit: 100, offset: 100,
+    });
+  });
+
+  it("reports a later prediction page failure and retries the complete list", async () => {
+    const firstPage = Array.from({ length: 100 }, (_, index) => prediction(1000 + index));
+    api.listInferenceRuns.mockResolvedValue([INFERENCE_RUN]);
+    api.listInferencePredictions
+      .mockResolvedValueOnce(firstPage)
+      .mockRejectedValueOnce(new Error("Prediction service unavailable"));
+    renderCanvas();
+
+    await screen.findByText("Prediction service unavailable");
+    expect(screen.queryByLabelText("Accept prediction 1000")).toBeNull();
+    api.listInferencePredictions
+      .mockResolvedValueOnce(firstPage)
+      .mockResolvedValueOnce([prediction(1100)]);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+
+    await screen.findByText("101 model candidates");
+    expect(screen.queryByText("Prediction service unavailable")).toBeNull();
+    expect(screen.getByLabelText("Accept prediction 1100")).toBeTruthy();
+  });
+
+  it("discards a pending page and stops pagination when the document scope changes", async () => {
+    const firstPage = Array.from({ length: 100 }, (_, index) => prediction(1000 + index));
+    let resolveOldPage!: (items: EvidenceCandidatePrediction[]) => void;
+    api.listInferenceRuns.mockResolvedValue([INFERENCE_RUN]);
+    api.listInferencePredictions
+      .mockResolvedValueOnce(firstPage)
+      .mockImplementationOnce(() => new Promise<EvidenceCandidatePrediction[]>((resolve) => {
+        resolveOldPage = resolve;
+      }))
+      .mockResolvedValueOnce([{ ...prediction(2000), document_id: 42, structure_version_id: 202 }]);
+    const props = {
+      projectId: 1,
+      task: TASK,
+      annotations: [],
+      annotatorId: "alice",
+      busy: false,
+      setBusy: vi.fn(),
+      setError: vi.fn(),
+      onAnnotationsChanged: vi.fn(),
+      onRefreshAnnotations: vi.fn().mockResolvedValue(undefined),
+    };
+    const { rerender } = render(
+      <EvidenceBlockCanvas {...props} document={DOCUMENT} assignments={[ASSIGNMENT]} />,
+    );
+    await waitFor(() => expect(api.listInferencePredictions).toHaveBeenCalledTimes(2));
+
+    rerender(
+      <EvidenceBlockCanvas
+        {...props}
+        document={{ ...DOCUMENT, id: 42, active_structure_version_id: 202 }}
+        assignments={[{ ...ASSIGNMENT, document_id: 42, structure_version_id: 202 }]}
+      />,
+    );
+    await screen.findByRole("button", { name: "Accept prediction 2000" });
+    await act(async () => resolveOldPage(
+      Array.from({ length: 100 }, (_, index) => prediction(1100 + index)),
+    ));
+
+    expect(screen.getByText("1 model candidates")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Accept prediction 2000" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Accept prediction 1100" })).toBeNull();
+    expect(api.listInferencePredictions).toHaveBeenCalledTimes(3);
+    expect(api.listInferencePredictions).toHaveBeenLastCalledWith(7, {
+      documentId: 42, targetVersionId: 101, limit: 100, offset: 0,
+    });
+  });
+
+  it("clears loading and ignores pending pages when the target has no compatible run", async () => {
+    let resolvePage!: (items: EvidenceCandidatePrediction[]) => void;
+    api.listEvidenceTargets.mockResolvedValue([
+      {
+        ...TARGETS[0],
+        versions: [
+          ...TARGETS[0].versions,
+          { ...TARGETS[0].versions[0], id: 102, version_number: 2 },
+        ],
+      },
+    ]);
+    api.listInferenceRuns.mockResolvedValue([INFERENCE_RUN]);
+    api.listInferencePredictions.mockImplementationOnce(
+      () => new Promise<EvidenceCandidatePrediction[]>((resolve) => { resolvePage = resolve; }),
+    );
+    renderCanvas([
+      ASSIGNMENT,
+      { ...ASSIGNMENT, id: 52, target_version_id: 102, assignment_scope_key: "target:102" },
+    ]);
+    await screen.findByText("Loading prediction candidates…");
+
+    fireEvent.change(screen.getByLabelText("Evidence target"), { target: { value: "102" } });
+    await screen.findByRole("option", { name: "No compatible runs" });
+    expect(screen.queryByText("Loading prediction candidates…")).toBeNull();
+    await act(async () => resolvePage([prediction(1000)]));
+
+    expect(screen.queryByRole("button", { name: "Accept prediction 1000" })).toBeNull();
+    expect(api.listInferencePredictions).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports repeated prediction pages instead of looping or displaying an incomplete list", async () => {
+    api.listInferenceRuns.mockResolvedValue([INFERENCE_RUN]);
+    api.listInferencePredictions.mockResolvedValue(
+      Array.from({ length: 100 }, (_, index) => prediction(1000 + index)),
+    );
+    renderCanvas();
+
+    await screen.findByText("Prediction loading did not advance. Please refresh to try again.");
+    expect(screen.queryByRole("button", { name: "Accept prediction 1000" })).toBeNull();
+    expect(api.listInferencePredictions).toHaveBeenCalledTimes(2);
+  });
+
   it("creates from sentence IDs after keyboard-safe boundary stepping", async () => {
     const user = userEvent.setup();
     renderCanvas();

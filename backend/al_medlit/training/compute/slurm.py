@@ -195,8 +195,16 @@ class SSHSlurmComputeBackend:
         remote_directory = self.remote_job_directory(bundle.job_key)
         sentinel = remote_directory / ".submitted-job-id"
         temporary_sentinel = remote_directory / ".submitted-job-id.tmp"
+        submission_lock = remote_directory / ".submission.lock"
         submit_script = (
             "set -e; "
+            "command -v flock >/dev/null 2>&1 || { "
+            "printf '%s\\n' 'Slurm submissions require flock on the login host' >&2; "
+            "exit 1; }; "
+            # Keep the lock file in place: unlinking it can split waiters
+            # across different inodes. The shell releases its lock on exit.
+            f"exec 9>{shlex.quote(str(submission_lock))}; "
+            "flock -x 9; "
             f"if test -s {shlex.quote(str(sentinel))}; then "
             f"cat {shlex.quote(str(sentinel))}; "
             "else "

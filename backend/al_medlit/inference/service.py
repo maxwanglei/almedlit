@@ -460,7 +460,7 @@ def submit_inference_run(
     bundle: JobBundle,
     backend: ComputeBackend,
 ) -> InferenceRun:
-    run = get_inference_run(db, run_id)
+    run = lock_inference_run(db, run_id)
     if run.external_job_id is not None:
         return run
     if run.status != "queued":
@@ -485,7 +485,7 @@ def reconcile_inference_run(
     run_id: int,
     backend: ComputeBackend,
 ) -> InferenceRun:
-    run = get_inference_run(db, run_id)
+    run = lock_inference_run(db, run_id)
     if run.external_job_id is None or run.status not in OPEN_RUN_STATUSES:
         return run
     _apply_run_state(run, backend.poll(run.external_job_id))
@@ -495,7 +495,7 @@ def reconcile_inference_run(
 
 
 def cancel_inference_run(db: Session, run_id: int) -> InferenceRun:
-    run = get_inference_run(db, run_id)
+    run = lock_inference_run(db, run_id)
     if run.status in TERMINAL_RUN_STATUSES:
         return run
     run.status = "cancelled"
@@ -511,7 +511,7 @@ def cancel_inference_run_with_backend(
     run_id: int,
     backend: ComputeBackend,
 ) -> InferenceRun:
-    run = get_inference_run(db, run_id)
+    run = lock_inference_run(db, run_id)
     if run.status not in OPEN_RUN_STATUSES:
         return run
     state = (
@@ -527,6 +527,20 @@ def cancel_inference_run_with_backend(
 
 def get_inference_run(db: Session, run_id: int) -> InferenceRun:
     run = db.get(InferenceRun, run_id)
+    if run is None:
+        raise NotFoundError("Inference run not found")
+    return run
+
+
+def lock_inference_run(db: Session, run_id: int) -> InferenceRun:
+    """Serialize external job transitions and refresh previously loaded state."""
+    run = (
+        db.query(InferenceRun)
+        .filter(InferenceRun.id == run_id)
+        .populate_existing()
+        .with_for_update()
+        .one_or_none()
+    )
     if run is None:
         raise NotFoundError("Inference run not found")
     return run

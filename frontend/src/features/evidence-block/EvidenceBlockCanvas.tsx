@@ -85,6 +85,8 @@ interface TargetOption {
   exclusionGuidance: string | null;
 }
 
+const PREDICTION_PAGE_SIZE = 100;
+
 const DEFAULT_SETTINGS: EvidenceBlockTaskSettingsV1 = {
   schema_version: "1",
   active_target_ids: [],
@@ -346,6 +348,7 @@ export default function EvidenceBlockCanvas({
   const [checkedBlockIds, setCheckedBlockIds] = useState<number[]>([]);
   const [dragging, setDragging] = useState(false);
   const [inferenceRuns, setInferenceRuns] = useState<InferenceRun[]>([]);
+  const [inferenceRunsError, setInferenceRunsError] = useState<string | null>(null);
   const [selectedInferenceRunId, setSelectedInferenceRunId] = useState<number | null>(null);
   const [predictions, setPredictions] = useState<EvidenceCandidatePrediction[]>([]);
   const [selectedPredictionId, setSelectedPredictionId] = useState<number | null>(null);
@@ -406,17 +409,17 @@ export default function EvidenceBlockCanvas({
 
   useEffect(() => {
     let active = true;
+    setInferenceRunsError(null);
     void listInferenceRuns(projectId)
       .then((items) => {
         if (active) {
           setInferenceRuns(items);
-          setPredictionMessage(null);
         }
       })
       .catch((error: unknown) => {
         if (active) {
           setInferenceRuns([]);
-          setPredictionMessage(
+          setInferenceRunsError(
             error instanceof Error ? error.message : "Unable to discover inference runs.",
           );
         }
@@ -467,11 +470,11 @@ export default function EvidenceBlockCanvas({
   const compatibleInferenceRuns = useMemo(
     () =>
       inferenceRuns.filter((run) =>
-        selectedTargetVersionId === null
+        run.project_id !== projectId || selectedTargetVersionId === null
           ? false
           : run.target_version_ids.includes(selectedTargetVersionId),
       ),
-    [inferenceRuns, selectedTargetVersionId],
+    [inferenceRuns, projectId, selectedTargetVersionId],
   );
 
   useEffect(() => {
@@ -489,26 +492,45 @@ export default function EvidenceBlockCanvas({
   }, [compatibleInferenceRuns, selectedInferenceRunId]);
 
   const refreshPredictions = useCallback(async (): Promise<void> => {
+    const generation = ++predictionLoadGeneration.current;
+    setPredictions([]);
+    setPredictionMessage(null);
     if (
       selectedInferenceRunId === null ||
       selectedTargetVersionId === null ||
-      structureVersionId === null
+      structureVersionId === null ||
+      !compatibleInferenceRuns.some((run) => run.id === selectedInferenceRunId)
     ) {
-      setPredictions([]);
+      setPredictionLoading(false);
       return;
     }
-    const generation = ++predictionLoadGeneration.current;
     setPredictionLoading(true);
-    setPredictionMessage(null);
     try {
-      const items = await listInferencePredictions(selectedInferenceRunId, {
-        documentId: document.id,
-        targetVersionId: selectedTargetVersionId,
-      });
-      if (generation === predictionLoadGeneration.current) {
-        setPredictions(
-          items.filter((prediction) => prediction.structure_version_id === structureVersionId),
-        );
+      const items = new Map<number, EvidenceCandidatePrediction>();
+      let offset = 0;
+      while (generation === predictionLoadGeneration.current) {
+        const page = await listInferencePredictions(selectedInferenceRunId, {
+          documentId: document.id,
+          targetVersionId: selectedTargetVersionId,
+          limit: PREDICTION_PAGE_SIZE,
+          offset,
+        });
+        if (generation !== predictionLoadGeneration.current) return;
+        const previousSize = items.size;
+        page.forEach((prediction) => items.set(prediction.id, prediction));
+        if (page.length > 0 && items.size === previousSize) {
+          throw new Error("Prediction loading did not advance. Please refresh to try again.");
+        }
+        // Advance by the API page size before filtering out other structures.
+        offset += page.length;
+        if (page.length < PREDICTION_PAGE_SIZE) {
+          setPredictions(
+            Array.from(items.values()).filter(
+              (prediction) => prediction.structure_version_id === structureVersionId,
+            ),
+          );
+          break;
+        }
       }
     } catch (error) {
       if (generation === predictionLoadGeneration.current) {
@@ -522,7 +544,13 @@ export default function EvidenceBlockCanvas({
         setPredictionLoading(false);
       }
     }
-  }, [document.id, selectedInferenceRunId, selectedTargetVersionId, structureVersionId]);
+  }, [
+    compatibleInferenceRuns,
+    document.id,
+    selectedInferenceRunId,
+    selectedTargetVersionId,
+    structureVersionId,
+  ]);
 
   const refreshCommands = useCallback(async (): Promise<void> => {
     if (selectedTargetVersionId === null || structureVersionId === null) {
@@ -1261,9 +1289,9 @@ export default function EvidenceBlockCanvas({
               : `${selectedAssignment?.status ?? "closed"} assignment · read-only`}
           </span>
         ) : null}
-        {predictionMessage ? (
+        {inferenceRunsError || predictionMessage ? (
           <span className="eb-prediction-message" role="status">
-            {predictionMessage}
+            {inferenceRunsError ?? predictionMessage}
           </span>
         ) : null}
         <div className="eb-selection-intent" role="group" aria-label="Selection purpose">

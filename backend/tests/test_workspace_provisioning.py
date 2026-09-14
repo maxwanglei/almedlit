@@ -1902,6 +1902,40 @@ def test_invite_accept_authenticates_an_existing_user_without_exposing_a_token(
     assert any(member["username"] == "credential-user" for member in members)
 
 
+def test_invite_login_accepts_and_upgrades_a_legacy_short_password(auth_client, db):
+    from passlib.context import CryptContext
+
+    from al_medlit.auth.models import User
+    from al_medlit.auth.security import verify_password
+
+    workspace = auth_client.post("/api/workspaces", json={"name": "Legacy Team"}).json()
+    token = auth_client.post(
+        f"/api/workspaces/{workspace['id']}/invites",
+        json={"role": "annotator"},
+    ).json()["token"]
+    existing = User(
+        username="legacy-invitee",
+        password_hash=CryptContext(schemes=["pbkdf2_sha256"]).hash("pw"),
+        is_active=True,
+    )
+    db.add(existing)
+    db.commit()
+
+    response = auth_client.post(
+        f"/api/invites/{token}/accept",
+        json={"username": existing.username, "password": "pw", "create_account": False},
+        headers={"Authorization": ""},
+    )
+
+    assert response.status_code == 200
+    db.refresh(existing)
+    assert existing.password_hash.startswith("$2")
+    assert verify_password("pw", existing.password_hash)
+    assert existing.last_login_at is not None
+    members = auth_client.get(f"/api/workspaces/{workspace['id']}/members").json()
+    assert any(member["username"] == existing.username for member in members)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

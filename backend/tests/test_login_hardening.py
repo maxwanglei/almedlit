@@ -61,6 +61,130 @@ def _login(client, username: str, password: str):
     )
 
 
+def _open_invite(db):
+    from al_medlit.workspace import service
+
+    owner = _make_user(db, "invite-owner")
+    workspace = service.create_team_workspace(db, owner, "Login audit team")
+    invite = service.create_invite(
+        db,
+        workspace.id,
+        created_by=owner.id,
+        role="annotator",
+        expires_minutes=60,
+    )
+    db.commit()
+    return invite
+
+
+def _invite_login(client, token: str, username: str, password: str):
+    return client.post(
+        f"/api/invites/{token}/accept",
+        json={"username": username, "password": password, "create_account": False},
+        headers={"Authorization": ""},
+    )
+
+
+@pytest.mark.parametrize("account", ["active", "inactive", "unknown"])
+def test_invite_login_failures_are_persisted_without_consuming_invite(client, db, account):
+    user = None
+    if account != "unknown":
+        user = _make_user(db, "invite-target", is_active=account == "active")
+    invite = _open_invite(db)
+
+    response = _invite_login(client, invite.token, "invite-target", "incorrect")
+
+    assert response.status_code == 401
+    events = _events(db, "auth.login_failed")
+    assert len(events) == 1
+    assert events[0].target_user_id == (user.id if user is not None else None)
+    assert events[0].details["reason"] == {
+        "active": "bad_password",
+        "inactive": "inactive_account",
+        "unknown": "unknown_user",
+    }[account]
+    db.refresh(invite)
+    assert invite.accepted_at is None
+
+
+@pytest.mark.parametrize("first_endpoint", ["login", "invite"])
+def test_invite_and_regular_login_share_the_failure_threshold(
+    client, db, monkeypatch, first_endpoint
+):
+    from al_medlit.core.config import settings
+
+    monkeypatch.setattr(settings, "login_failure_threshold", 2)
+    _make_user(db, "shared-login-target")
+    invite = _open_invite(db)
+
+    def login(password):
+        return _login(client, "shared-login-target", password)
+
+    def invite_login(password):
+        return _invite_login(client, invite.token, "shared-login-target", password)
+
+    first, second = (login, invite_login) if first_endpoint == "login" else (invite_login, login)
+
+    assert first("incorrect").status_code == 401
+    assert second("incorrect").status_code == 401
+    assert login("a-secure-password").status_code == 429
+    assert invite_login("a-secure-password").status_code == 429
+    assert len(_events(db, "auth.login_failed")) == 2
+    db.refresh(invite)
+    assert invite.accepted_at is None
+
+
+def test_successful_invite_login_audits_and_clears_the_failure_streak(
+    client, db, monkeypatch
+):
+    from al_medlit.core.config import settings
+
+    monkeypatch.setattr(settings, "login_failure_threshold", 2)
+    user = _make_user(db, "invite-success")
+    invite = _open_invite(db)
+    assert _login(client, user.username, "incorrect").status_code == 401
+
+    accepted = _invite_login(client, invite.token, user.username, "a-secure-password")
+
+    assert accepted.status_code == 200
+    events = _events(db, "auth.login_succeeded")
+    assert len(events) == 1
+    assert events[0].actor_user_id == events[0].target_user_id == user.id
+    db.refresh(user)
+    assert user.last_login_at is not None
+    assert _login(client, user.username, "incorrect").status_code == 401
+    assert _login(client, user.username, "a-secure-password").status_code == 200
+
+
+def test_rejected_invite_acceptance_rolls_back_login_success_and_hash_upgrade(
+    client, db, monkeypatch
+):
+    from passlib.context import CryptContext
+
+    from al_medlit.core.exceptions import ConflictError
+    from al_medlit.workspace import service
+
+    user = _make_user(db, "invite-race")
+    original_hash = CryptContext(schemes=["pbkdf2_sha256"]).hash("a-secure-password")
+    user.password_hash = original_hash
+    invite = _open_invite(db)
+
+    def reject_acceptance(*_args):
+        raise ConflictError("Invite was revoked before acceptance")
+
+    monkeypatch.setattr(service, "accept_invite", reject_acceptance)
+    response = _invite_login(client, invite.token, user.username, "a-secure-password")
+
+    assert response.status_code == 409
+    assert not response.cookies
+    assert _events(db, "auth.login_succeeded") == []
+    db.refresh(user)
+    db.refresh(invite)
+    assert user.password_hash == original_hash
+    assert user.last_login_at is None
+    assert invite.accepted_at is None
+
+
 def test_unknown_account_login_still_verifies_a_password_hash(db, monkeypatch):
     """The unknown-account path must not short-circuit ahead of bcrypt.
 

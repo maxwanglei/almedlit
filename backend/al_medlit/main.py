@@ -1,5 +1,6 @@
+import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -29,6 +30,7 @@ from al_medlit.lineage.router import router as lineage_router
 from al_medlit.model_artifacts.quota_router import router as artifact_quota_router
 from al_medlit.model_artifacts.router import router as model_artifact_router
 from al_medlit.project.router import router as project_router
+from al_medlit.storage_reclaim.maintenance import run_reclaim_loop
 from al_medlit.submission.router import router as submission_router
 from al_medlit.workflow.router import router as workflow_router
 from al_medlit.workspace import router as workspace_routes
@@ -40,7 +42,18 @@ API_PREFIX = "/api"
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     settings.validate_runtime_secrets()
     register_event_handlers()
-    yield
+    # Eager deployments have no beat process to drive periodic maintenance.
+    # Multiple API processes may sweep safely: reclamation uses SKIP LOCKED.
+    reclaim_task = (
+        asyncio.create_task(run_reclaim_loop()) if settings.celery_task_always_eager else None
+    )
+    try:
+        yield
+    finally:
+        if reclaim_task is not None:
+            reclaim_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await reclaim_task
 
 
 def create_app() -> FastAPI:

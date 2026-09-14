@@ -25,7 +25,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Query, Session, sessionmaker
 
 from al_medlit.administration.models import AccountActionToken
 from al_medlit.administration.service import (
@@ -39,13 +39,16 @@ from al_medlit.auth.tenancy import lock_project_member_for_mutation
 from al_medlit.co_learning.error_guideline_learning import service as error_pattern_service
 from al_medlit.co_learning.error_guideline_learning.models import ErrorPattern
 from al_medlit.core.exceptions import ForbiddenError, NotFoundError
-from al_medlit.corpus.models import Document
+from al_medlit.corpus import service as corpus_service
+from al_medlit.corpus.models import Document, DocumentStructureVersion
+from al_medlit.corpus.schemas import DocumentCreate
 from al_medlit.evidence.models import EvidenceTarget, EvidenceTargetVersion
 from al_medlit.inference import service as inference_service
 from al_medlit.inference.models import InferenceRun
 from al_medlit.inference.schemas import InferenceRunCreate
 from al_medlit.lineage.models import AnnotationSet, CorpusSnapshot, LineageArtifact
 from al_medlit.project.models import Project, ProjectTask
+from al_medlit.training.compute.base import ComputeSubmission, JobBundle, JobState
 from al_medlit.training.models import (
     ComputeProfile,
     ModelCheckpoint,
@@ -611,6 +614,194 @@ def test_inference_launch_returns_existing_run_under_contention(
             .all()
         )
         assert len(runs) == 1
+
+
+def _new_queued_inference_run(db: Session, prefix: str) -> int:
+    project_id, creator_id, snapshot_id, checkpoint_id, profile_id, target_id = (
+        _new_inference_scope(db, prefix)
+    )
+    return inference_service.launch_inference_run(
+        db,
+        project_id=project_id,
+        data=InferenceRunCreate(
+            name=prefix,
+            corpus_snapshot_id=snapshot_id,
+            checkpoint_id=checkpoint_id,
+            compute_profile_id=profile_id,
+            target_version_ids=[target_id],
+            idempotency_key=f"{prefix}-{uuid4().hex}",
+        ),
+        actor_user_id=creator_id,
+    ).id
+
+
+def test_inference_submission_serializes_cached_queued_runs(
+    postgres_session_factory: sessionmaker[Session],
+    tmp_path,
+) -> None:
+    with postgres_session_factory() as db:
+        run_id = _new_queued_inference_run(db, "inference-submit-contention")
+    loaded = threading.Barrier(2)
+    submitted = []
+
+    class Backend:
+        def submit(self, bundle):
+            job_id = str(len(submitted) + 1)
+            submitted.append(job_id)
+            return ComputeSubmission(external_job_id=job_id, status="submitted")
+
+    backend = Backend()
+    bundle = JobBundle(job_key=f"inference-{run_id}", command=("true",), local_bundle_path=tmp_path)
+
+    def submit(db: Session):
+        cached = db.get(InferenceRun, run_id)
+        assert cached.status == "queued"
+        loaded.wait(timeout=_LOCK_TIMEOUT_SECONDS)
+        return inference_service.submit_inference_run(
+            db, run_id=run_id, bundle=bundle, backend=backend,
+        ).external_job_id
+
+    left, right = _run_concurrently(postgres_session_factory, submit, submit)
+
+    assert left == right == ("ok", "1")
+    assert submitted == ["1"]
+    with postgres_session_factory() as db:
+        assert db.get(InferenceRun, run_id).external_job_id == "1"
+
+
+def test_inference_cancel_waits_for_submission_and_cancels_its_job(
+    postgres_session_factory: sessionmaker[Session],
+    monkeypatch,
+    tmp_path,
+) -> None:
+    with postgres_session_factory() as db:
+        run_id = _new_queued_inference_run(db, "inference-cancel-contention")
+    submitting = threading.Event()
+    cancelling = threading.Event()
+    cancelled_jobs = []
+    original_lock = inference_service.lock_inference_run
+
+    def observed_lock(db, selected_run_id):
+        if db.info.get("cancelling"):
+            cancelling.set()
+        return original_lock(db, selected_run_id)
+
+    monkeypatch.setattr(inference_service, "lock_inference_run", observed_lock)
+
+    class Backend:
+        def submit(self, bundle):
+            submitting.set()
+            assert cancelling.wait(timeout=_LOCK_TIMEOUT_SECONDS)
+            return ComputeSubmission(external_job_id="42", status="submitted")
+
+        def cancel(self, external_job_id):
+            cancelled_jobs.append(external_job_id)
+            return JobState(status="cancelled", raw_state="CANCELLED")
+
+    backend = Backend()
+    bundle = JobBundle(job_key=f"inference-{run_id}", command=("true",), local_bundle_path=tmp_path)
+
+    def submit(db: Session):
+        return inference_service.submit_inference_run(
+            db, run_id=run_id, bundle=bundle, backend=backend,
+        ).external_job_id
+
+    def cancel(db: Session):
+        assert submitting.wait(timeout=_LOCK_TIMEOUT_SECONDS)
+        cached = db.get(InferenceRun, run_id)
+        assert cached.external_job_id is None
+        db.info["cancelling"] = True
+        return inference_service.cancel_inference_run_with_backend(
+            db, run_id=run_id, backend=backend,
+        ).status
+
+    left, right = _run_concurrently(postgres_session_factory, submit, cancel)
+
+    assert left == ("ok", "42")
+    assert right == ("ok", "cancelled")
+    assert cancelled_jobs == ["42"]
+    with postgres_session_factory() as db:
+        run = db.get(InferenceRun, run_id)
+        assert run.status == "cancelled"
+        assert run.external_job_id == "42"
+
+
+def test_structure_rebuild_waits_for_backfill_activation(
+    postgres_session_factory: sessionmaker[Session],
+    monkeypatch,
+) -> None:
+    with postgres_session_factory() as db:
+        creator = _new_user(db, "structure-backfill")
+        workspace = workspace_service.create_team_workspace(db, creator, "Structure contention")
+        project = Project(
+            workspace_id=workspace.id, name="Structure contention", annotation_schema={},
+        )
+        db.add(project)
+        db.flush()
+        document = corpus_service.create_document(
+            db, DocumentCreate(project_id=project.id, text="The treatment improved outcomes."),
+        )
+        document_id = document.id
+        original_version_id = document.active_structure_version_id
+        document.active_structure_version = None
+        db.commit()
+
+    selected_existing = threading.Event()
+    rebuild_started = threading.Event()
+    rebuilt = threading.Event()
+    process_ids = {}
+    observed_blocking = []
+    original_first = Query.first
+
+    def paused_first(query):
+        result = original_first(query)
+        if (
+            query.session.info.get("backfill")
+            and query.column_descriptions[0]["entity"] is DocumentStructureVersion
+        ):
+            assert result.id == original_version_id
+            selected_existing.set()
+            assert rebuild_started.wait(timeout=_LOCK_TIMEOUT_SECONDS)
+            deadline = time.monotonic() + 3
+            with postgres_session_factory() as observer:
+                while time.monotonic() < deadline:
+                    blocked = observer.scalar(
+                        text("SELECT :backfill = ANY(pg_blocking_pids(:rebuild))"),
+                        process_ids,
+                    )
+                    if blocked or rebuilt.is_set():
+                        observed_blocking.append(blocked)
+                        break
+                    time.sleep(0.01)
+            assert observed_blocking == [True], "Rebuild bypassed the backfill document lock"
+        return result
+
+    monkeypatch.setattr(Query, "first", paused_first)
+
+    def backfill(db: Session):
+        db.info["backfill"] = True
+        process_ids["backfill"] = db.scalar(text("SELECT pg_backend_pid()"))
+        result = corpus_service.backfill_document_structures(db, document_ids=[document_id])
+        assert not result.failures
+        return result.activated_existing
+
+    def rebuild(db: Session):
+        assert selected_existing.wait(timeout=_LOCK_TIMEOUT_SECONDS)
+        process_ids["rebuild"] = db.scalar(text("SELECT pg_backend_pid()"))
+        rebuild_started.set()
+        version = corpus_service.rebuild_document_structure(db, document_id)
+        rebuilt.set()
+        return version.id, version.version
+
+    left, right = _run_concurrently(postgres_session_factory, backfill, rebuild)
+
+    assert left == ("ok", 1)
+    assert right[0] == "ok"
+    assert right[1][1] == 2
+    assert right[1][0] != original_version_id
+    assert observed_blocking == [True]
+    with postgres_session_factory() as db:
+        assert db.get(Document, document_id).active_structure_version_id == right[1][0]
 
 
 def test_invitee_deactivation_and_invite_acceptance_do_not_deadlock(

@@ -184,6 +184,31 @@ def test_backfill_records_a_document_shaped_failure_and_keeps_going(db, monkeypa
     assert second_document.active_structure_version_id is not None
 
 
+def test_backfill_refreshes_cached_document_after_another_session_activates(
+    db, testing_session_factory,
+):
+    project = _project(db, "structure-backfill-stale")
+    document = Document(project_id=project.id, text="Legacy text.", source="legacy")
+    db.add(document)
+    db.commit()
+    document_id = document.id
+    corpus_service.rebuild_document_structure(db, document_id, activate=False)
+
+    with testing_session_factory() as backfill_db:
+        cached = backfill_db.get(Document, document_id)
+        assert cached.active_structure_version_id is None
+        newer = corpus_service.rebuild_document_structure(db, document_id)
+
+        result = corpus_service.backfill_document_structures(
+            backfill_db, document_ids=[document_id],
+        )
+
+        assert result.skipped == 1
+        assert result.created == result.activated_existing == 0
+        assert result.failures == {}
+        assert cached.active_structure_version_id == newer.id
+
+
 def test_backfill_aborts_instead_of_walking_the_corpus_on_a_dead_session(db, monkeypatch):
     from sqlalchemy.exc import OperationalError
 

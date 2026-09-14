@@ -5,11 +5,12 @@ and cannot commit together. Every caller therefore makes the database
 authoritative first and treats the storage delete as best effort; without a
 follow-up the failed delete silently leaks the object. ``record_orphaned_object``
 queues the key instead, and ``reclaim_orphaned_objects`` — driven by the
-``al_medlit.storage.reclaim_orphaned_objects`` beat task — retries until
-storage confirms the object is gone.
+``al_medlit.storage.reclaim_orphaned_objects`` beat task or the eager API's
+periodic maintenance loop — retries until storage confirms the object is gone.
 """
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -100,12 +101,15 @@ def reclaim_orphaned_objects(
     *,
     limit: int = 200,
     now: datetime | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> OrphanReclaimResult:
     """Delete queued objects that are due, dropping each row once storage agrees.
 
     Rows are locked with ``skip_locked`` so concurrent sweeps take disjoint
     batches. A row that fails again keeps its place in the queue with an
     exponentially backed-off next attempt.
+    ``should_stop`` leaves unprocessed objects queued during worker shutdown;
+    the caller still commits completed work and releases the batch's locks.
     """
 
     moment = now or utc_now()
@@ -121,6 +125,8 @@ def reclaim_orphaned_objects(
     reclaimed = 0
     failed = 0
     for entry in candidates:
+        if should_stop is not None and should_stop():
+            break
         try:
             storage.delete(entry.storage_key)
         except Exception as exc:

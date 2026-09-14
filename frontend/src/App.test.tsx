@@ -12,6 +12,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
+import { publishSessionChange, subscribeSessionChanges } from "@/auth/session";
 
 const mocks = vi.hoisted(() => {
   const projectState = {
@@ -430,6 +431,58 @@ afterEach(() => {
 });
 
 describe("App workspace selection", () => {
+  it.each(["Failed to fetch", "Invalid CSRF token"])(
+    "preserves the session after logout fails with %s and allows a successful retry",
+    async (message) => {
+      window.localStorage.setItem("al-medlit.currentAnnotatorId", "alice");
+      mocks.logout.mockRejectedValueOnce(new Error(message));
+      const observed = vi.fn();
+      const unsubscribe = subscribeSessionChanges(observed);
+      try {
+        render(<App />);
+        await screen.findByLabelText("Mock annotator workspace");
+
+        fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+
+        expect((await screen.findByRole("alert")).textContent).toContain(
+          "Your session may still be active.",
+        );
+        expect(screen.getByLabelText("Mock annotator workspace")).toBeTruthy();
+        expect(screen.queryByRole("button", { name: "Register mock user" })).toBeNull();
+        expect(window.localStorage.getItem("al-medlit.currentAnnotatorId")).toBe("alice");
+        expect(observed).not.toHaveBeenCalled();
+
+        mocks.logout.mockImplementationOnce(async () => publishSessionChange(false));
+        fireEvent.click(screen.getByRole("button", { name: "Retry sign out" }));
+
+        await screen.findByRole("button", { name: "Register mock user" });
+        expect(observed).toHaveBeenCalledWith(false);
+        expect(window.localStorage.getItem("al-medlit.currentAnnotatorId")).toBeNull();
+        expect(screen.queryByRole("alert")).toBeNull();
+      } finally {
+        unsubscribe();
+      }
+    },
+  );
+
+  it("keeps a pending logout visible and prevents duplicate requests", async () => {
+    let resolveLogout!: () => void;
+    mocks.logout.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      resolveLogout = resolve;
+    }));
+    render(<App />);
+    await screen.findByLabelText("Mock annotator workspace");
+
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+
+    expect(screen.getByText("Signing out…")).toBeTruthy();
+    expect(screen.getByLabelText("Mock annotator workspace")).toBeTruthy();
+    expect(mocks.logout).toHaveBeenCalledTimes(1);
+    await act(async () => resolveLogout());
+    expect(screen.queryByText("Signing out…")).toBeNull();
+  });
+
   it("finishes onboarding with the refreshed capability snapshot", async () => {
     mocks.getMe
       .mockRejectedValueOnce(new Error("No active session"))

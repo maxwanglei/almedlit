@@ -11,7 +11,7 @@ from al_medlit.auth.models import User
 from al_medlit.auth.schemas import UserCreate
 from al_medlit.auth.security import hash_password, verify_password, verify_password_and_update
 from al_medlit.core.config import FORBIDDEN_BOOTSTRAP_ADMIN_PASSWORDS, settings
-from al_medlit.core.exceptions import ConflictError, RateLimitedError
+from al_medlit.core.exceptions import ConflictError, RateLimitedError, UnauthorizedError
 
 LOGIN_FAILED_EVENT = "auth.login_failed"
 LOGIN_SUCCEEDED_EVENT = "auth.login_succeeded"
@@ -157,7 +157,16 @@ def assert_login_not_throttled(db: Session, username: str) -> None:
     threshold = settings.login_failure_threshold
     if threshold <= 0:
         return
-    user = get_user_by_username(db, username.strip())
+    # Hold the same account lock as password verification until the login audit
+    # event commits. Waiting requests then count completed failures instead of
+    # all passing the threshold before they queue for password verification.
+    user = (
+        db.query(User)
+        .filter(User.username == username.strip())
+        .populate_existing()
+        .with_for_update()
+        .first()
+    )
     if user is None:
         return
     if _recent_login_failure_count(db, user.id) < threshold:
@@ -211,6 +220,28 @@ def record_login_success(db: Session, user: User) -> None:
         target_user_id=user.id,
         details={"is_superuser": user.is_superuser},
     )
+
+
+def authenticate_login(db: Session, username: str, password: str) -> User:
+    """Apply password-login controls before any other request mutations.
+
+    Rejected credentials commit their failure audit before raising. Successful
+    logins remain in the caller's transaction so invite acceptance, the password
+    hash upgrade, and the success audit either commit together or roll back.
+    """
+
+    assert_login_not_throttled(db, username)
+    user = authenticate_user(db, username, password)
+    if user is None:
+        record_login_failure(db, username)
+        db.commit()
+        raise UnauthorizedError("Invalid username or password")
+    user.last_login_at = datetime.now(UTC)
+    record_login_success(db, user)
+    # Invite acceptance refreshes the locked account. With autoflush disabled,
+    # its refresh would otherwise discard the new last-login timestamp.
+    db.flush()
+    return user
 
 
 @lru_cache(maxsize=8)
