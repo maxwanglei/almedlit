@@ -295,17 +295,25 @@ def execute_local_inference(
                 len(predictor.tokenizer.encode(text, add_special_tokens=False)),
             )
 
+    try:
+        windows = service.materialize_inference_windows(
+            db,
+            run_id=run.id,
+            token_counter=token_counter,
+        )
+    except ValidationError as exc:
+        run.status = "failed"
+        run.completed_at = datetime.now(UTC)
+        run.failure_reason = str(exc)
+        db.commit()
+        raise
+
     if run.started_at is None:
         run.started_at = datetime.now(UTC)
     run.status = "running"
     run.external_job_id = run.external_job_id or f"local:inference-{run.id}"
     db.commit()
 
-    windows = service.materialize_inference_windows(
-        db,
-        run_id=run.id,
-        token_counter=token_counter,
-    )
     windows_by_scope: dict[tuple[int, int, int], list[InferenceWindow]] = defaultdict(list)
     for window in windows:
         windows_by_scope[

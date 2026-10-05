@@ -46,6 +46,7 @@ from al_medlit.training.windowing import (
     EvidenceBlockWindowBuilder,
     TargetCondition,
     WindowBuilderConfig,
+    WindowBuildError,
     WindowSentenceInput,
 )
 
@@ -234,6 +235,7 @@ def materialize_inference_windows(
         overlap_tokens=run.window_config["overlap_tokens"],
         target_conditioning=run.checkpoint.training_mode == "conditioned",
         require_reviewed_gold=False,
+        reject_oversized_sentences=True,
     )
     builder = EvidenceBlockWindowBuilder(token_counter, config)
     existing_keys = {window.stable_key for window in run.windows}
@@ -260,17 +262,20 @@ def materialize_inference_windows(
         ]
         for target_id in run.target_version_ids:
             target_version = db.get(EvidenceTargetVersion, target_id)
-            result = builder.build(
-                document_id=document.id,
-                structure_version_id=snapshot_document.structure_version_id,
-                target=TargetCondition(
-                    id=target_version.id,
-                    key=target_version.target.key,
-                    name=target_version.target.name,
-                    text=target_version.text,
-                ),
-                sentences=sentence_inputs,
-            )
+            try:
+                result = builder.build(
+                    document_id=document.id,
+                    structure_version_id=snapshot_document.structure_version_id,
+                    target=TargetCondition(
+                        id=target_version.id,
+                        key=target_version.target.key,
+                        name=target_version.target.name,
+                        text=target_version.text,
+                    ),
+                    sentences=sentence_inputs,
+                )
+            except WindowBuildError as exc:
+                raise ValidationError(str(exc)) from exc
             for window in result.windows:
                 if window.id in existing_keys:
                     continue
@@ -285,9 +290,9 @@ def materialize_inference_windows(
                     token_count=window.token_count,
                     status="pending",
                 )
-                db.add(model)
                 created.append(model)
                 existing_keys.add(window.id)
+    db.add_all(created)
     db.commit()
     for window in created:
         db.refresh(window)

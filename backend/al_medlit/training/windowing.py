@@ -118,6 +118,8 @@ class WindowBuilderConfig:
     target_conditioning: bool = True
     prefer_boundary_min_fill: float = 0.5
     require_reviewed_gold: bool = True
+    # Inference needs complete coverage; training can exclude and report instead.
+    reject_oversized_sentences: bool = False
 
     def __post_init__(self) -> None:
         if self.max_tokens <= 0:
@@ -237,6 +239,19 @@ class EvidenceBlockWindowBuilder:
             for item in materialized
             if item.token_count > usable_tokens
         ]
+        if self.config.reject_oversized_sentences and report.oversized_sentences:
+            details = ", ".join(
+                f"sentence {item.id} (ordinal {item.start_ordinal}, {item.token_count} tokens)"
+                for item in report.oversized_sentences
+            )
+            raise WindowBuildError(
+                f"Oversized sentences in document {document_id} "
+                f"(structure version {structure_version_id}, target version {target.id}): "
+                f"{details}. Available sentence budget is {usable_tokens} tokens "
+                f"(max_tokens={self.config.max_tokens}, target_tokens={target_tokens}, "
+                f"reserved_special_tokens={self.config.reserved_special_tokens}). "
+                "Split oversized sentences or use a larger supported context."
+            )
 
         ordinal_to_index = {item.ordinal: index for index, item in enumerate(materialized)}
         fitting_blocks: list[GoldBlockRange] = []

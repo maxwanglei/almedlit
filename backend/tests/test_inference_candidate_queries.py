@@ -52,6 +52,7 @@ def _inference_scope(
     decoder_config: dict | None = None,
     run_status: str = "succeeded",
     with_window: bool = True,
+    document_text: str = "Alpha improved. Beta improved. Gamma improved. Delta improved.",
 ) -> InferenceScope:
     manifest = {"synthetic_mode": True} if checkpoint_manifest is None else checkpoint_manifest
     model_type = manifest.get("model_type", "evidence_block_sentence_tagger")
@@ -108,7 +109,7 @@ def _inference_scope(
         db,
         DocumentCreate(
             project_id=project.id,
-            text="Alpha improved. Beta improved. Gamma improved. Delta improved.",
+            text=document_text,
         ),
     )
     structure = document.active_structure_version

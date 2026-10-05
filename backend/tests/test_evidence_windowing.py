@@ -128,6 +128,47 @@ def test_oversized_sentence_and_gold_block_are_reported_without_truncation():
     )
 
 
+@pytest.mark.parametrize("token_count", [5, 6])
+def test_strict_windowing_uses_budget_after_target_and_special_tokens(token_count):
+    builder = EvidenceBlockWindowBuilder(
+        lambda text: len(text.split()),
+        WindowBuilderConfig(
+            max_tokens=15,
+            overlap_tokens=0,
+            reserved_special_tokens=4,
+            reject_oversized_sentences=True,
+        ),
+    )
+    # Target conditioning takes six tokens, leaving exactly five for sentences.
+    sentences = _sentences(1, tokens=token_count)
+    if token_count == 6:
+        with pytest.raises(WindowBuildError, match="Oversized sentence") as error:
+            builder.build(
+                document_id=1,
+                structure_version_id=2,
+                target=_target(),
+                sentences=sentences,
+            )
+        message = str(error.value)
+        assert "document 1" in message
+        assert "structure version 2" in message
+        assert "target version 7" in message
+        assert "sentence 100 (ordinal 0, 6 tokens)" in message
+        assert "5 tokens" in message
+        assert "max_tokens=15" in message
+    else:
+        result = builder.build(
+            document_id=1,
+            structure_version_id=2,
+            target=_target(),
+            sentences=sentences,
+        )
+        assert len(result.windows) == 1
+        assert result.windows[0].sentences[0].id == 100
+        assert result.windows[0].token_count == 15
+        assert result.report.oversized_sentences == []
+
+
 def test_rejects_overlapping_gold_blocks():
     builder = EvidenceBlockWindowBuilder(lambda _text: 1)
     with pytest.raises(WindowBuildError, match="may not overlap"):

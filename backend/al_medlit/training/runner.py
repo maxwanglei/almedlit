@@ -1509,6 +1509,7 @@ def run_inference_job(manifest_path: str | Path) -> dict:
         EvidenceBlockWindowBuilder,
         TargetCondition,
         WindowBuilderConfig,
+        WindowBuildError,
         WindowSentenceInput,
     )
 
@@ -1520,6 +1521,7 @@ def run_inference_job(manifest_path: str | Path) -> dict:
             overlap_tokens=int(window_config["overlap_tokens"]),
             target_conditioning=checkpoint["training_mode"] == "conditioned",
             require_reviewed_gold=False,
+            reject_oversized_sentences=True,
         ),
     )
     output_windows = []
@@ -1537,17 +1539,20 @@ def run_inference_job(manifest_path: str | Path) -> dict:
             for sentence in document["sentences"]
         ]
         for target in corpus_input["targets"]:
-            result = builder.build(
-                document_id=document["document_id"],
-                structure_version_id=document["structure_version_id"],
-                target=TargetCondition(
-                    id=target["id"],
-                    key=target["key"],
-                    name=target["name"],
-                    text=target["text"],
-                ),
-                sentences=sentence_inputs,
-            )
+            try:
+                result = builder.build(
+                    document_id=document["document_id"],
+                    structure_version_id=document["structure_version_id"],
+                    target=TargetCondition(
+                        id=target["id"],
+                        key=target["key"],
+                        name=target["name"],
+                        text=target["text"],
+                    ),
+                    sentences=sentence_inputs,
+                )
+            except WindowBuildError as exc:
+                raise RunnerError(str(exc)) from exc
             for window in result.windows:
                 if synthetic_mode:
                     logits = {

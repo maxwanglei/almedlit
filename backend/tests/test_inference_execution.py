@@ -9,8 +9,10 @@ from types import SimpleNamespace
 import pytest
 from test_inference_candidate_queries import _inference_scope
 
-from al_medlit.inference import execution
-from al_medlit.inference.models import EvidenceCandidatePrediction
+from al_medlit.core.exceptions import ValidationError
+from al_medlit.evidence.models import EvidenceTargetVersion
+from al_medlit.inference import execution, service
+from al_medlit.inference.models import EvidenceCandidatePrediction, InferenceWindow
 from al_medlit.lineage.models import LineageArtifact
 from al_medlit.training.model_types.catalog import builtin_model_descriptors
 from al_medlit.training.model_types.evidence_conventional import model as conventional
@@ -256,3 +258,91 @@ def test_local_inference_decodes_conventional_labels_as_probabilities(
     assert diagnostics["score_kind"] == "probabilities"
     assert diagnostics["decoder_version"] == "evidence-block-decoder-v2"
     assert diagnostics["scopes"][0]["sentences"][0]["probabilities"] == ONE_HOT["B"]
+
+
+@pytest.mark.parametrize("all_oversized", [False, True])
+def test_local_inference_rejects_oversized_sentences_before_prediction(
+    db,
+    object_storage,
+    tmp_path,
+    monkeypatch,
+    all_oversized,
+):
+    long_sentence = " ".join(["Beta"] * 20) + " improved."
+    document_text = (
+        " ".join([long_sentence] * 4)
+        if all_oversized
+        else f"Alpha improved. {long_sentence} Gamma improved. Delta improved."
+    )
+    archive = tmp_path / "checkpoint.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("checkpoint/model.json", "{}")
+    scope = _inference_scope(
+        db,
+        checkpoint_object=object_storage.put_file(
+            "checkpoints/synthetic.zip",
+            archive,
+            content_type="application/zip",
+        ),
+        window_config={**WINDOW_CONFIG, "max_tokens": 16, "overlap_tokens": 0},
+        decoder_config=DECODER_CONFIG,
+        run_status="queued",
+        with_window=False,
+        document_text=document_text,
+    )
+    prediction_calls = []
+    original_predict = execution._synthetic_logits
+
+    def predict(ordinal):
+        prediction_calls.append(ordinal)
+        return original_predict(ordinal)
+
+    monkeypatch.setattr(execution, "_synthetic_logits", predict)
+
+    with pytest.raises(ValidationError, match="Oversized sentence") as error:
+        execution.execute_local_inference(
+            db,
+            object_storage,
+            run_id=scope.run.id,
+            work_root=tmp_path / "work",
+        )
+
+    assert prediction_calls == []
+    assert scope.run.windows == []
+    assert scope.run.diagnostics_artifact_id is None
+    db.expire(scope.run)
+    assert scope.run.status == "failed"
+    assert scope.run.failure_reason == str(error.value)
+    assert scope.run.completed_at is not None
+    assert scope.run.started_at is None
+    assert scope.run.external_job_id is None
+
+
+def test_inference_window_validation_leaves_no_partial_windows_for_earlier_targets(db):
+    scope = _inference_scope(
+        db,
+        window_config={**WINDOW_CONFIG, "max_tokens": 16, "overlap_tokens": 0},
+        run_status="queued",
+        with_window=False,
+    )
+    long_target = EvidenceTargetVersion(
+        target_id=scope.target_version.target_id,
+        version_number=2,
+        text="one two three four five six seven eight",
+        created_by_user_id=scope.user.id,
+    )
+    db.add(long_target)
+    db.flush()
+    # Every sentence fits the first target's budget, but fails the second's.
+    scope.run.target_version_ids = [scope.target_version.id, long_target.id]
+    db.commit()
+
+    with pytest.raises(ValidationError, match=f"target version {long_target.id}"):
+        service.materialize_inference_windows(
+            db,
+            run_id=scope.run.id,
+            token_counter=lambda text: len(text.split()),
+        )
+
+    db.commit()
+    assert db.query(InferenceWindow).filter(InferenceWindow.run_id == scope.run.id).count() == 0
