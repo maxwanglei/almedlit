@@ -28,6 +28,7 @@ export type RouteReleaseState = "released" | "legacy";
 export type ProjectSectionId =
   | "overview"
   | "data"
+  | "inference"
   | "tasks"
   | "rounds"
   | "quality"
@@ -137,6 +138,7 @@ export const WORKSPACE_SETTINGS_DESTINATION = {
 const PROJECT_SECTIONS = new Set([
   "overview",
   "data",
+  "inference",
   "tasks",
   "rounds",
   "quality",
@@ -277,6 +279,7 @@ export function canAccessProjectSection(
       context.blockedCapabilities.annotation === undefined
     );
   }
+  if (section === "inference") return canPerform(context, "inference:run");
   if (section === "tasks" || section === "quality") {
     return (
       canPerform(context, "tasks:manage") &&

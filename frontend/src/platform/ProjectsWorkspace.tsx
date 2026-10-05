@@ -201,7 +201,7 @@ export default function ProjectsWorkspace({
                           }
                         />
                       </td>
-                      <td data-label="Tasks">{project.tasks.length}</td>
+                      <td data-label="Tasks">{project.tasks.length + (project.workflow_task_count ?? 0)}</td>
                       <td data-label="Workspace">#{project.workspace_id}</td>
                       <td data-label="Action" data-priority="action">
                         <PlatformRouteLink

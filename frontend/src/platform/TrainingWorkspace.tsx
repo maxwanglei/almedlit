@@ -19,6 +19,7 @@ import {
   verifyExecutionEnvironment,
 } from "./api";
 import DataScreen from "./DataScreen";
+import TrainingDatasetBuilder from "./TrainingDatasetBuilder";
 import PlatformDialog from "./PlatformDialog";
 import TrainingScreen, { type TrainingLaunchDraft } from "./TrainingScreen";
 import {
@@ -51,6 +52,12 @@ export interface TrainingWorkspaceProps {
   runId?: number | null;
   initialProjectId?: number | null;
   initialDatasetId?: number | null;
+  initialDatasetVersionId?: number | null;
+  initialTaskVersionId?: number | null;
+  initialLabelSetVersionId?: number | null;
+  initialTrainingDatasetVersionId?: number | null;
+  initialTrainingDatasetId?: number | null;
+  search?: string;
   currentUserId: number;
   currentUserName: string;
   canCreateTrainingProject: boolean;
@@ -585,6 +592,7 @@ function NewTraining({
   projects,
   initialProjectId,
   initialDatasetId,
+  initialTrainingDatasetVersionId,
   currentUserName,
   canCreateTrainingProject,
   onNavigate,
@@ -952,7 +960,7 @@ function NewTraining({
         />
       </div>
       <TrainingScreen
-        key={trainingDraftKey(workspaceId, projectId, initialDatasetId)}
+        key={`${trainingDraftKey(workspaceId, projectId, initialDatasetId)}:${initialTrainingDatasetVersionId ?? "none"}`}
         data={data}
         busy={busy}
         contextLabel={
@@ -968,6 +976,7 @@ function NewTraining({
         title="New training"
         showRecentRuns={false}
         initialDatasetId={initialDatasetId}
+        initialTrainingDatasetVersionId={initialTrainingDatasetVersionId}
         initialEnvironmentId={
           typeof contextProject?.settings.default_environment_id === "number"
             ? contextProject.settings.default_environment_id
@@ -1003,6 +1012,12 @@ function TrainingData({
   initialProjectId,
   initialDatasetId,
   canCreateTask,
+  initialDatasetVersionId,
+  initialTaskVersionId,
+  initialLabelSetVersionId,
+  initialTrainingDatasetVersionId,
+  search = "",
+  onNavigate,
 }: TrainingWorkspaceProps): React.ReactElement {
   const [contexts, setContexts] = useState<WorkspaceTrainingContext[]>([]);
   const [contextsWorkspaceId, setContextsWorkspaceId] = useState<number | null>(
@@ -1017,6 +1032,9 @@ function TrainingData({
   const [dialogDatasetId, setDialogDatasetId] = useState<number | null>(null);
   const [requestedDatasetHandled, setRequestedDatasetHandled] =
     useState(false);
+  const [builderOpen, setBuilderOpen] = useState(new URLSearchParams(search).get("flow") === "prepare");
+  const [savedMessage, setSavedMessage] = useState<string | null>(null);
+  const dataTab = new URLSearchParams(search).get("tab") === "source" ? "source" : "training";
   const reloadRequestIdRef = useRef(0);
   const reloadContextKey = `${workspaceId}:${contextsWorkspaceId ?? "none"}:${projectId}`;
   const reloadContextKeyRef = useRef(reloadContextKey);
@@ -1128,7 +1146,7 @@ function TrainingData({
       return;
     }
     setDialogDatasetId(initialDatasetId);
-    setDialog("trainingData");
+    setBuilderOpen(true);
     setRequestedDatasetHandled(true);
   }, [
     data.datasets,
@@ -1138,6 +1156,7 @@ function TrainingData({
   ]);
 
   const context = contexts.find((item) => item.project_id === projectId);
+  useEffect(() => { setBuilderOpen(new URLSearchParams(search).get("flow") === "prepare"); }, [search, projectId]);
 
   async function mutate(operation: () => Promise<unknown>): Promise<void> {
     setBusy(true);
@@ -1155,6 +1174,7 @@ function TrainingData({
 
   return (
     <>
+      {builderOpen ? <PlatformPageHeader title="Training data" description="Prepare a named training dataset from submitted annotations or external labels." /> : null}
       <PlatformSection title="Project context">
         <div className="platform-form-grid">
           <ProjectContextPicker
@@ -1165,9 +1185,22 @@ function TrainingData({
         </div>
       </PlatformSection>
       {error ? <p role="alert" className="platform-form-warning">{error}</p> : null}
+      {savedMessage ? <p role="status">{savedMessage}</p> : null}
+      {builderOpen && projectId && !loading ? <TrainingDatasetBuilder key={`${workspaceId}:${projectId}:${initialTrainingDatasetVersionId ?? "new"}:${initialDatasetVersionId ?? dialogDatasetId ?? initialDatasetId ?? "all"}:${initialTaskVersionId ?? "task"}`}
+        projectId={projectId} data={data} initialDatasetId={dialogDatasetId ?? initialDatasetId}
+        initialDatasetVersionId={initialDatasetVersionId} initialTaskVersionId={initialTaskVersionId} initialLabelSetVersionId={initialLabelSetVersionId}
+        parent={data.trainingDatasets.find((version) => version.id === initialTrainingDatasetVersionId)}
+        onImport={() => setDialog("dataset")} onDefineTask={canCreateTask ? () => setDialog("task") : undefined}
+        onCancel={() => { setBuilderOpen(false); onNavigate(`/training/data?projectId=${projectId}&tab=training`); }}
+        onCreated={async (version) => {
+          setSavedMessage(`${version.name} · v${version.version_number ?? 1} saved. Choose Train model to launch training.`);
+          await reload();
+          setBuilderOpen(false);
+          onNavigate(`/training/data?projectId=${projectId}&tab=training`);
+        }} /> : null}
       {loading && !projectId ? (
         <p className="platform-inline-empty" role="status">Loading training contexts…</p>
-      ) : projectId ? (
+      ) : projectId ? (builderOpen ? null : (
         <DataScreen
           data={data}
           legacyDocumentCount={0}
@@ -1184,103 +1217,23 @@ function TrainingData({
             ) : undefined
           }
           onCreate={() => setDialog("dataset")}
+          activeTab={dataTab}
+          onTabChange={(tab) => onNavigate(`/training/data?projectId=${projectId}&tab=${tab}`)}
+          onCreateTraining={() => { setBuilderOpen(true); onNavigate(`/training/data?projectId=${projectId}&flow=prepare`); }}
+          onTrain={(version) => onNavigate(`/training/new?projectId=${projectId}&trainingDatasetVersionId=${version.id}`)}
+          onNewTrainingVersion={(version) => onNavigate(`/training/data?projectId=${projectId}&flow=prepare&trainingDatasetId=${version.training_dataset_id}&trainingDatasetVersionId=${version.id}`)}
           onPrepareTraining={(dataset) => {
             setDialogDatasetId(dataset.id);
-            setDialog("trainingData");
+            setBuilderOpen(true);
+            onNavigate(`/training/data?projectId=${projectId}&flow=prepare&datasetId=${dataset.id}`);
           }}
         />
-      ) : (
+      )) : (
         <PlatformEmpty
           title="No training project"
           detail="A manager must create a project with Training enabled before data can be imported."
         />
       )}
-      {projectId ? (
-        <PlatformSection
-          title="Composed training datasets"
-          description="Each entry pins source data, labels, preprocessing, and a protected split map."
-        >
-          {data.trainingDatasets.length ? (
-            <div
-              className="platform-table-scroll platform-table-scroll--summary"
-              role="region"
-              aria-label="Composed training datasets"
-              tabIndex={0}
-            >
-              <table className="platform-table platform-table--summary">
-                <thead>
-                  <tr>
-                    <th scope="col">Training dataset</th>
-                    <th scope="col">Project</th>
-                    <th scope="col">Task</th>
-                    <th scope="col">Source version</th>
-                    <th scope="col">Label layers</th>
-                    <th scope="col">Split map</th>
-                    <th scope="col">Fingerprint</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.trainingDatasets.map((dataset) => {
-                    const taskVersion = data.taskVersions.find(
-                      (item) => item.id === dataset.task_version_id,
-                    );
-                    const task = taskVersion
-                      ? data.taskDefinitions.find(
-                          (item) =>
-                            item.id === taskVersion.task_definition_id,
-                        )
-                      : undefined;
-                    const sourceVersion = data.datasetVersions.find(
-                      (item) => item.id === dataset.dataset_version_id,
-                    );
-                    const split = data.splitMaps.find(
-                      (item) => item.id === dataset.split_map_id,
-                    );
-                    return (
-                      <tr key={dataset.id}>
-                        <td
-                          data-label="Training dataset"
-                          data-priority="identity"
-                        >
-                          <strong>{dataset.name}</strong>
-                        </td>
-                        <td data-label="Project">{context?.project_name}</td>
-                        <td data-label="Task">
-                          {task?.name ??
-                            taskVersion?.task_kind.replace(/_/g, " ") ??
-                            `Task version ${dataset.task_version_id}`}
-                          {taskVersion ? (
-                            <span>v{taskVersion.version_number}</span>
-                          ) : null}
-                        </td>
-                        <td data-label="Source version">
-                          {sourceVersion
-                            ? `v${sourceVersion.version_number}`
-                            : `ID ${dataset.dataset_version_id}`}
-                        </td>
-                        <td data-label="Label layers">
-                          {dataset.label_set_version_ids.length}
-                        </td>
-                        <td data-label="Split map">
-                          {split?.name ?? `Split ${dataset.split_map_id}`}
-                        </td>
-                        <td data-label="Fingerprint">
-                          <code>{dataset.content_hash.slice(0, 10)}</code>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <p className="platform-inline-empty">
-              No composed training dataset yet. Prepare one from a source
-              dataset after defining its task and label source.
-            </p>
-          )}
-        </PlatformSection>
-      ) : null}
       {dialog && projectId ? (
         <PlatformDialog
           kind={dialog}

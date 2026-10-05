@@ -2,6 +2,9 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { expandEffectiveRoles } from "@/navigation/AccessContext";
+import type { WorkspaceRole } from "@/types/api";
+
 import {
   createDatasetWithVersion,
   createExecutionEnvironment,
@@ -26,6 +29,7 @@ import {
 import {
   EMPTY_PLATFORM_PROJECT_DATA,
   type PlatformProjectData,
+  type ProjectModule,
   type RoundWorkRound,
   type TrainingRecipeDescriptor,
 } from "./types";
@@ -285,7 +289,7 @@ describe("platform API orchestration", () => {
     ).not.toContain("annotate");
   });
 
-  it("loads Data without training, model, round, or future-learning collections", async () => {
+  it("loads source and training registries with annotation prerequisites without model or future-learning collections", async () => {
     mocks.request.mockImplementation(async (path: string) => {
       if (path === "/projects/7/modules") {
         return {
@@ -301,6 +305,8 @@ describe("platform API orchestration", () => {
       if (path.startsWith("/datasets/versions?")) return [{ id: 22 }];
       if (path.startsWith("/datasets/label-sets?")) return [{ id: 31 }];
       if (path.startsWith("/datasets/split-maps?")) return [{ id: 41 }];
+      if (path.startsWith("/datasets/training-versions?")) return [{ id: 51 }];
+      if (path.startsWith("/rounds?")) return [{ id: 71 }];
       throw new Error(`Unexpected request: ${path}`);
     });
 
@@ -311,7 +317,8 @@ describe("platform API orchestration", () => {
     expect(data.datasetVersions).toEqual([{ id: 22 }]);
     expect(data.labelSets).toEqual([{ id: 31 }]);
     expect(data.splitMaps).toEqual([{ id: 41 }]);
-    expect(paths).not.toContain("/rounds?project_id=7");
+    expect(data.rounds).toEqual([{ id: 71 }]);
+    expect(data.trainingDatasets).toEqual([{ id: 51 }]);
     expect(paths).not.toContain("/training-runs?project_id=7");
     expect(paths).not.toContain("/models?project_id=7");
     expect(paths.some((path) => path.startsWith("/cycles?"))).toBe(false);
@@ -419,6 +426,131 @@ describe("platform API orchestration", () => {
     expect(paths).not.toContain("/rounds/71/items?project_id=7");
   });
 
+  it.each([
+    { role: "manager", modules: [], preset: "annotate" },
+    { role: "manager", modules: [], preset: "annotate_train with Activity disabled" },
+    { role: "trainer", modules: [], preset: "annotate" },
+    { role: "trainer", modules: ["activity"], preset: "annotate_train" },
+    { role: "trainer", modules: ["activity", "learning"], preset: "annotate_train_al" },
+    { role: "trainer", modules: ["activity", "guidelines", "learning"], preset: "full" },
+    { role: undefined, modules: ["activity", "guidelines"], preset: "unknown role" },
+  ] satisfies Array<{ role: WorkspaceRole | undefined; modules: ProjectModule[]; preset: string }>)(
+    "loads rounds for $role on $preset without requesting forbidden guidelines",
+    async ({ role, modules }) => {
+      mocks.request.mockImplementation(async (path: string) => {
+        if (path === "/projects/7/modules") {
+          return {
+            project_id: 7,
+            selected: ["data", "annotate", "activity", "guidelines", ...modules],
+            effective: ["data", "annotate", ...modules],
+            workspace_capabilities: ["annotation"],
+          };
+        }
+        if (path.startsWith("/workflow-guidelines")) {
+          throw { status: 403, detail: "Guidelines unavailable for this role or module configuration" };
+        }
+        if (path === "/tasks?project_id=7") return [{ id: 11 }];
+        if (path === "/tasks/versions?project_id=7&task_definition_id=11") return [{ id: 12 }];
+        if (path === "/datasets?project_id=7") return [{ id: 21 }];
+        if (path === "/datasets/versions?project_id=7&dataset_id=21") return [{ id: 22 }];
+        if (path === "/rounds?project_id=7") return [{ id: 71 }];
+        if (path === "/cycles?project_id=7") return [];
+        if (path === "/feedback-runs?project_id=7") return [];
+        if (path === "/feedback-runs/sets?project_id=7") return [];
+        if (path === "/datasets/split-maps?project_id=7") return [];
+        throw new Error(`Unexpected request: ${path}`);
+      });
+
+      const data = await loadPlatformProject(7, "rounds", 5, expandEffectiveRoles(role, "team"));
+
+      expect(data.rounds).toEqual([{ id: 71 }]);
+      expect(data.taskVersions).toEqual([{ id: 12 }]);
+      expect(data.datasetVersions).toEqual([{ id: 22 }]);
+      expect(data.guidelines).toEqual([]);
+      expect(data.guidelineRevisions).toEqual([]);
+      expect(mocks.request.mock.calls.some(([path]) => String(path).startsWith("/workflow-guidelines"))).toBe(false);
+    },
+  );
+
+  describe("optional guideline resources for rounds", () => {
+    let responses: Record<string, unknown>;
+
+    beforeEach(() => {
+      responses = {
+        "/projects/7/modules": {
+          project_id: 7,
+          selected: ["data", "annotate", "activity", "guidelines"],
+          effective: ["data", "annotate", "activity"],
+          workspace_capabilities: ["annotation", "lineage"],
+        },
+        "/tasks?project_id=7": [{ id: 11 }],
+        "/tasks/versions?project_id=7&task_definition_id=11": [{ id: 12 }],
+        "/datasets?project_id=7": [{ id: 21 }],
+        "/datasets/versions?project_id=7&dataset_id=21": [{ id: 22 }],
+        "/rounds?project_id=7": [{ id: 71 }],
+        "/workflow-guidelines?project_id=7": [{ id: 81 }, { id: 82 }],
+        "/workflow-guidelines/revisions?project_id=7&guideline_id=81": [{ id: 91 }],
+        "/workflow-guidelines/revisions?project_id=7&guideline_id=82": [{ id: 92 }],
+      };
+      mocks.request.mockImplementation(async (path: string) => {
+        const response = responses[path];
+        if (response instanceof Error) throw response;
+        if (response === undefined) throw new Error(`Unexpected request: ${path}`);
+        return response;
+      });
+    });
+
+    it.each([
+      { role: "manager", kind: "team", module: "activity" },
+      { role: "manager", kind: "team", module: "guidelines" },
+      { role: "admin", kind: "team", module: "activity" },
+      { role: "admin", kind: "team", module: "guidelines" },
+      { role: "annotator", kind: "individual", module: "guidelines" },
+    ])("loads guidelines for $kind $role with effective $module", async ({ role, kind, module }) => {
+      responses["/projects/7/modules"] = {
+        project_id: 7,
+        selected: ["data", "annotate", module],
+        effective: ["data", "annotate", module],
+        workspace_capabilities: ["annotation", "co_learning", "lineage"],
+      };
+
+      const data = await loadPlatformProject(7, "rounds", 5, expandEffectiveRoles(role, kind));
+
+      expect(data.guidelines).toEqual([{ id: 81 }, { id: 82 }]);
+      expect(data.guidelineRevisions).toEqual([{ id: 91 }, { id: 92 }]);
+      expect(data.rounds).toEqual([{ id: 71 }]);
+    });
+
+    it.each([
+      { path: "/workflow-guidelines?project_id=7", status: 403 },
+      { path: "/workflow-guidelines?project_id=7", status: 500 },
+      { path: "/workflow-guidelines/revisions?project_id=7&guideline_id=81", status: 403 },
+      { path: "/workflow-guidelines/revisions?project_id=7&guideline_id=81", status: 500 },
+    ])("retains rounds and other successful resources when $path fails with $status", async ({ path, status }) => {
+      responses[path] = Object.assign(new Error("Guidelines unavailable"), { status });
+
+      const data = await loadPlatformProject(7, "rounds", 5, expandEffectiveRoles("manager", "team"));
+
+      expect(data.rounds).toEqual([{ id: 71 }]);
+      expect(data.taskVersions).toEqual([{ id: 12 }]);
+      expect(data.datasetVersions).toEqual([{ id: 22 }]);
+      expect(data.guidelines).toEqual(path.includes("/revisions?") ? [{ id: 81 }, { id: 82 }] : []);
+      expect(data.guidelineRevisions).toEqual(path.includes("/revisions?") ? [{ id: 92 }] : []);
+    });
+
+    it.each([
+      "/projects/7/modules",
+      "/rounds?project_id=7",
+      "/tasks/versions?project_id=7&task_definition_id=11",
+      "/datasets/versions?project_id=7&dataset_id=21",
+    ])("still rejects when required resource %s fails", async (path) => {
+      const error = Object.assign(new Error("Required resource unavailable"), { status: 403 });
+      responses[path] = error;
+
+      await expect(loadPlatformProject(7, "rounds", 5, ["manager"])).rejects.toBe(error);
+    });
+  });
+
   it("loads scoring resources on rounds only when learning and models are enabled", async () => {
     mocks.request.mockImplementation(async (path: string) => {
       if (path === "/projects/7/modules") {
@@ -487,6 +619,21 @@ describe("platform API orchestration", () => {
     ]);
   });
 
+  it("loads canonical task references for inference-only overview readiness", async () => {
+    mocks.request.mockImplementation(async (path: string) => {
+      if (path === "/projects/7/modules") return { project_id: 7, selected: ["data", "models"], effective: ["data", "models"], workspace_capabilities: ["inference"] };
+      if (path === "/tasks?project_id=7") return [{ id: 11 }];
+      if (path.startsWith("/tasks/versions?")) return [{ id: 12, task_kind: "classification" }];
+      return [];
+    });
+    const data = await loadPlatformProject(7, "overview");
+    expect(data.taskVersions).toEqual([{ id: 12, task_kind: "classification" }]);
+    const paths = mocks.request.mock.calls.map(([path]) => String(path));
+    expect(paths).not.toContain("/rounds?project_id=7");
+    expect(paths).not.toContain("/training-runs?project_id=7");
+    expect(paths).not.toContain("/datasets/training-versions?project_id=7");
+  });
+
   it("keeps Activity on released operational history without future datasets", async () => {
     mocks.request.mockImplementation(async (path: string) => {
       if (path === "/projects/7/modules") {
@@ -531,6 +678,8 @@ describe("platform API orchestration", () => {
         "/models?project_id=7",
         "/rounds?project_id=7",
         "/training-runs?project_id=7",
+        "/tasks?project_id=7",
+        "/datasets/training-versions?project_id=7",
       ],
       loadsMembers: false,
     },
@@ -579,7 +728,7 @@ describe("platform API orchestration", () => {
         return [];
       });
 
-      await loadPlatformProject(7, scope, 5);
+      await loadPlatformProject(7, scope, 5, expandEffectiveRoles("manager", "team"));
       const collectionPaths = mocks.request.mock.calls
         .map(([path]) => String(path))
         .filter((path) => path !== "/projects/7/modules")
@@ -891,6 +1040,45 @@ describe("platform API orchestration", () => {
       open_to_all_annotators: false,
     });
     expect(bodyOf(mocks.request.mock.calls[3])).toEqual({ status: "open" });
+  });
+
+  it("lets the server assign a fresh selection seed for each targeted round", async () => {
+    mocks.request.mockImplementation(async (path: string) => {
+      if (path === "/selection-runs") return { id: 61 };
+      if (path === "/projects/7/selection-runs/61/materialize") return { id: 62 };
+      if (path === "/rounds") return { id: 71 };
+      if (path === "/rounds/71/transition?project_id=7") {
+        return { id: 71, status: "open" };
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+
+    for (let index = 0; index < 2; index += 1) {
+      await createRound(7, {
+        name: `Random round ${index + 1}`,
+        datasetVersionId: 22,
+        taskVersionId: 12,
+        cycleId: null,
+        splitMapId: 41,
+        guidelineRevisionId: null,
+        feedbackSetVersionId: null,
+        assistancePolicy: "reveal_after_first_pass",
+        reannotationMode: "targeted_subset",
+        selectionStrategy: "random",
+        selectionLimit: 25,
+        annotatorUserIds: [7],
+        openToAllAnnotators: false,
+        reason: "Expand the annotation pool",
+      });
+    }
+
+    const selectionRequests = mocks.request.mock.calls.filter(
+      ([path]) => path === "/selection-runs",
+    );
+    expect(selectionRequests).toHaveLength(2);
+    for (const call of selectionRequests) {
+      expect(bodyOf(call)).not.toHaveProperty("seed");
+    }
   });
 
   it("validates configuration and pins recipe, model, runtime, and storage at launch", async () => {

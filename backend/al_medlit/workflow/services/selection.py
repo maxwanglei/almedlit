@@ -92,6 +92,74 @@ def _filter_value_set(eligibility_filter: dict, key: str) -> set[str] | None:
     return set(value)
 
 
+def _unavailable_selection_item_ids(db: Session, run: models.SelectionRun) -> set[int]:
+    """Find submitted or reserved items for the run's pinned dataset and task."""
+    round_scope = (
+        models.AnnotationRound.project_id == run.project_id,
+        models.AnnotationRound.dataset_version_id == run.dataset_version_id,
+        models.AnnotationRound.task_version_id == run.task_version_id,
+    )
+    unavailable = {
+        item_id
+        for (item_id,) in db.query(models.RoundItem.dataset_item_id)
+        .join(
+            models.AnnotationRound,
+            models.RoundItem.annotation_round_id == models.AnnotationRound.id,
+        )
+        .filter(
+            *round_scope,
+            models.RoundItem.project_id == run.project_id,
+            models.AnnotationRound.status == "open",
+        )
+        .all()
+    }
+    submitted_decisions: dict[tuple[int, int], set[int]] = {}
+    for round_id, actor_id, decision_ids in (
+        db.query(
+            models.RoundSubmission.annotation_round_id,
+            models.RoundSubmission.annotator_user_id,
+            models.RoundSubmission.decision_ids,
+        )
+        .join(
+            models.AnnotationRound,
+            models.RoundSubmission.annotation_round_id == models.AnnotationRound.id,
+        )
+        .filter(*round_scope, models.RoundSubmission.project_id == run.project_id)
+        .all()
+    ):
+        submitted_decisions.setdefault((round_id, actor_id), set()).update(decision_ids)
+    if not submitted_decisions:
+        return unavailable
+
+    # Membership lives in JSON; match it in Python for both SQLite and PostgreSQL.
+    decisions = (
+        db.query(
+            models.RoundAnnotationDecision.id,
+            models.RoundAnnotationDecision.annotator_user_id,
+            models.RoundItem.annotation_round_id,
+            models.RoundItem.dataset_item_id,
+        )
+        .join(
+            models.RoundItem,
+            models.RoundAnnotationDecision.round_item_id == models.RoundItem.id,
+        )
+        .join(
+            models.AnnotationRound,
+            models.RoundItem.annotation_round_id == models.AnnotationRound.id,
+        )
+        .filter(
+            *round_scope,
+            models.RoundAnnotationDecision.project_id == run.project_id,
+            models.RoundItem.project_id == run.project_id,
+        )
+        .all()
+    )
+    for decision_id, actor_id, round_id, item_id in decisions:
+        if decision_id in submitted_decisions.get((round_id, actor_id), ()):
+            unavailable.add(item_id)
+    return unavailable
+
+
 def _eligible_selection_items(
     db: Session,
     run: models.SelectionRun,
@@ -115,6 +183,7 @@ def _eligible_selection_items(
     include_groups = _filter_value_set(eligibility_filter, "include_group_keys")
     exclude_groups = _filter_value_set(eligibility_filter, "exclude_group_keys") or set()
     allowed_splits = _filter_value_set(eligibility_filter, "splits")
+    unavailable_item_ids = _unavailable_selection_item_ids(db, run)
 
     split_assignments: dict[str, str] = {}
     protected_splits: set[str] = set()
@@ -144,6 +213,8 @@ def _eligible_selection_items(
     )
     eligible: list[models.DatasetItem] = []
     for item in items:
+        if item.id in unavailable_item_ids:
+            continue
         split = split_assignments.get(item.stable_key)
         if split in protected_splits:
             continue
@@ -672,7 +743,8 @@ def _materialized_selection_items(
     eligible = _eligible_selection_items(db, run)
     if not eligible:
         raise ValidationError(
-            "No eligible dataset items remain after protected-split and eligibility filtering"
+            "No eligible dataset items remain after excluding submitted annotations, "
+            "open-round items, protected splits, and eligibility filtering"
         )
     parameters = run.parameters or {}
     limit = _selection_limit(parameters, len(eligible), run.strategy)

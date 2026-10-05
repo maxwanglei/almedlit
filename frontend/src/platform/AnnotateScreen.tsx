@@ -12,6 +12,7 @@ export default function AnnotateScreen({
   data,
   onCreateRound,
   onCreateTask,
+  onSetupTask,
   onOpenRound,
   currentUserId,
   canManage,
@@ -24,6 +25,7 @@ export default function AnnotateScreen({
   data: PlatformProjectData;
   onCreateRound: () => void;
   onCreateTask: () => void;
+  onSetupTask?: (taskVersionId: number) => void;
   onOpenRound: (roundId: number) => void;
   currentUserId: number | null;
   canManage: boolean;
@@ -40,7 +42,7 @@ export default function AnnotateScreen({
         title={showingTasks ? "Tasks" : "Team & Rounds"}
         description={
           showingTasks
-            ? "Define immutable task contracts for the annotation interfaces enabled in this project."
+            ? "Manage annotation tasks and start work on a saved source collection."
             : "Organize assignments, monitor rounds, and retain immutable submission history."
         }
         actionLabel={
@@ -60,14 +62,14 @@ export default function AnnotateScreen({
       />
 
       {showingTasks ? <PlatformSection
-        title="Task contracts"
-        description="Each version pins the NLP task kind, schemas, label rules, annotation UI, metrics, and compatible trainers."
+        title="Annotation tasks"
+        description="Choose a task and collection to start annotation. Earlier task versions and submitted work remain available."
       >
         {data.taskDefinitions.length ? (
           <div
             className="platform-table-scroll"
             role="region"
-            aria-label="Task contracts table"
+            aria-label="Annotation tasks table"
             tabIndex={0}
           >
             <table className="platform-table">
@@ -77,30 +79,34 @@ export default function AnnotateScreen({
                   <th scope="col">Version</th>
                   <th scope="col">Kind</th>
                   <th scope="col">Metrics</th>
-                  <th scope="col">Fingerprint</th>
+                  <th scope="col">Annotation</th>
                 </tr>
               </thead>
               <tbody>
-                {data.taskDefinitions.flatMap((task) =>
-                  data.taskVersions
+                {data.taskDefinitions.flatMap((task) => {
+                  const versions = data.taskVersions
                     .filter((version) => version.task_definition_id === task.id)
-                    .map((version, index) => (
+                    .sort((left, right) => right.version_number - left.version_number);
+                  if (!versions.length) return [<tr key={`task-${task.id}`}><td><strong>{task.name}</strong></td><td colSpan={4}>Task setup is incomplete. No task version has been saved yet.</td></tr>];
+                  return versions.map((version, index) => (
                       <tr key={version.id}>
-                        <td><strong>{index === 0 ? task.name : ""}</strong></td>
-                        <td>v{version.version_number}</td>
-                        <td>{version.task_kind.replace(/_/g, " ")}</td>
+                        <td><strong>{task.name}</strong></td>
+                        <td>v{version.version_number}{index > 0 ? " · Previous version" : " · Current"}</td>
+                        <td>{version.annotation_ui?.preset === "document_entities" ? "Named entities (NER)" : version.task_kind === "token_labeling" ? "Token labeling (tokenized data)" : version.task_kind.replace(/_/g, " ")}</td>
                         <td>{version.metrics.join(", ") || "Not set"}</td>
-                        <td><code>{version.content_hash.slice(0, 10)}</code></td>
+                        <td>{data.rounds.filter((round) => round.task_version_id === version.id && round.status === "open" && (round.open_to_all_annotators || (currentUserId !== null && round.annotator_user_ids.includes(currentUserId)))).map((round) => <button key={round.id} type="button" className="platform-text-action" onClick={() => onOpenRound(round.id)}>Continue {task.name} · {round.name}</button>)}
+                          {canManage && onSetupTask ? <button type="button" className="platform-text-action" onClick={() => onSetupTask(version.id)}>Set up {task.name}{index > 0 ? ` · v${version.version_number}` : ""}</button> : null}
+                        </td>
                       </tr>
-                    )),
-                )}
+                    ));
+                })}
               </tbody>
             </table>
           </div>
         ) : (
           <PlatformEmpty
-            title="No task contract"
-            detail="Define classification, regression, token labeling, extraction, ranking, generation, or instruction tuning."
+            title="No annotation tasks yet"
+            detail="Create a classification or named entity task for papers, or configure another task for compatible data."
             actionLabel={canManage ? "Create task" : undefined}
             onAction={canManage ? onCreateTask : undefined}
           />

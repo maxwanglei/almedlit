@@ -111,6 +111,43 @@ def _selection_context(client, name: str) -> dict:
     }
 
 
+def test_named_collections_snapshot_only_selected_project_documents(client):
+    project = _create_project(client, "named-paper-collections")
+    documents = []
+    for index in range(3):
+        response = client.post("/api/documents", json={
+            "project_id": project["id"], "external_id": str(10000 + index),
+            "title": f"Paper {index}", "text": f"Paper {index} abstract.",
+        })
+        assert response.status_code == 200, response.text
+        documents.append(response.json())
+    dataset = _create_dataset(client, project["id"], "Selected papers", "project_corpus")
+    path = f"/api/projects/{project['id']}/datasets/{dataset['id']}/versions/project-corpus"
+    selected = [documents[0]["id"], documents[2]["id"]]
+    first = client.post(path, json={"document_ids": selected})
+    assert first.status_code == 201, first.text
+    assert first.json()["item_count"] == 2
+    assert first.json()["provenance"]["source_document_ids"] == selected
+    retry = client.post(path, json={"document_ids": selected[::-1] + selected})
+    assert retry.json()["id"] == first.json()["id"]
+    extended = client.post(path, json={"document_ids": [item["id"] for item in documents]})
+    assert extended.status_code == 201, extended.text
+    assert extended.json()["version_number"] == 2
+    assert extended.json()["item_count"] == 3
+    assert client.post(path, json={"document_ids": []}).status_code == 422
+    assert client.post(path, json={"document_ids": [selected[0], 999999]}).status_code == 422
+    other = _create_project(client, "another-paper-project")
+    other_doc = client.post("/api/documents", json={
+        "project_id": other["id"], "text": "Another project's paper.",
+    }).json()
+    assert client.post(path, json={"document_ids": [other_doc["id"]]}).status_code == 422
+    versions = client.get("/api/datasets/versions", params={
+        "project_id": project["id"], "dataset_id": dataset["id"],
+    }).json()
+    assert len(versions) == 2
+    assert next(item for item in versions if item["id"] == first.json()["id"])["item_count"] == 2
+
+
 def _create_feedback_set(client, context: dict, candidates: list[dict]) -> dict:
     run_response = client.post(
         "/api/feedback-runs",

@@ -62,6 +62,7 @@ from al_medlit.training.trainers.contracts import (
 from al_medlit.workflow import models as workflow_models
 from al_medlit.workflow import schemas as workflow_schemas
 from al_medlit.workflow import service as workflow_service
+from al_medlit.workflow.services.holdouts import validate_source_split_assignments
 from al_medlit.workspace.dependencies import ROLE_RANK
 from al_medlit.workspace.models import WorkspaceMember
 
@@ -526,6 +527,14 @@ def _training_input(
         .order_by(workflow_models.DatasetItem.stable_key)
         .all()
     }
+    validate_source_split_assignments(
+        db,
+        pinned.dataset,
+        item_by_key.values(),
+        pinned.split_map.assignments,
+        pinned.task.id,
+        protected_splits=pinned.split_map.protected_splits,
+    )
     target_field = _target_field(config)
     rows_by_split: dict[str, list[dict]] = {"train": [], "validation": []}
     labels_used: list[Any] = []
@@ -611,23 +620,12 @@ def _requested_evaluation_metrics(pinned: _PinnedRun) -> tuple[str, ...]:
     return tuple(dict.fromkeys(metric.strip() for metric in raw_metrics))
 
 
-def _protected_test_evaluation_input(
+def _protected_test_labels(
     db: Session,
     pinned: _PinnedRun,
-    config: Mapping,
-    training_input: TrainingInput,
-    *,
-    model_fingerprint: str,
-) -> EvaluationInput:
+) -> dict[str, Any]:
     if "test" not in set(pinned.split_map.protected_splits):
         raise ValidationError("Test evaluation requires a protected test split")
-    item_by_key = {
-        item.stable_key: item
-        for item in db.query(workflow_models.DatasetItem)
-        .filter(workflow_models.DatasetItem.dataset_version_id == pinned.dataset.id)
-        .order_by(workflow_models.DatasetItem.stable_key)
-        .all()
-    }
     test_keys = sorted(
         stable_key
         for stable_key, split in pinned.split_map.assignments.items()
@@ -646,9 +644,28 @@ def _protected_test_evaluation_input(
             "Protected test evaluation requires labels for every test item: "
             + ", ".join(missing_labels[:5])
         )
+    return {stable_key: composed.labels[stable_key] for stable_key in test_keys}
+
+
+def _protected_test_evaluation_input(
+    db: Session,
+    pinned: _PinnedRun,
+    config: Mapping,
+    training_input: TrainingInput,
+    *,
+    model_fingerprint: str,
+) -> EvaluationInput:
+    labels = _protected_test_labels(db, pinned)
+    item_by_key = {
+        item.stable_key: item
+        for item in db.query(workflow_models.DatasetItem)
+        .filter(workflow_models.DatasetItem.dataset_version_id == pinned.dataset.id)
+        .order_by(workflow_models.DatasetItem.stable_key)
+        .all()
+    }
     target_field = _target_field(config)
     rows = []
-    for stable_key in test_keys:
+    for stable_key, label in labels.items():
         item = item_by_key.get(stable_key)
         if item is None:
             raise ValidationError(
@@ -656,7 +673,7 @@ def _protected_test_evaluation_input(
             )
         row = dict(item.payload)
         row[target_field] = _label_value(
-            composed.labels[stable_key],
+            label,
             target_field,
         )
         rows.append(row)
@@ -1703,6 +1720,18 @@ def execute_training_run(
         preflight = plugin.preflight(pinned.recipe.key)
         _validate_preflight(preflight, pinned)
 
+        evaluation_requested = "test" in _evaluation_plan_splits(pinned)
+        evaluator = None
+        if evaluation_requested:
+            if evaluator_registry is None:
+                from al_medlit.training.evaluators import evaluator_plugins
+
+                evaluator_registry = evaluator_plugins
+            evaluator = evaluator_registry.find_for_recipe(pinned.recipe.key)
+            # Historical compositions may have unlabeled protected items.
+            # Reject them before training or publishing a pinned candidate.
+            _protected_test_labels(db, pinned)
+
         with tempfile.TemporaryDirectory(prefix=f"al-medlit-run-{run.id}-") as temporary:
             root = Path(temporary)
             base_model = _stage_base_model(
@@ -1739,14 +1768,6 @@ def execute_training_run(
                 destination=output_root,
                 seed=run.seed,
             )
-            evaluation_requested = "test" in _evaluation_plan_splits(pinned)
-            evaluator = None
-            if evaluation_requested:
-                if evaluator_registry is None:
-                    from al_medlit.training.evaluators import evaluator_plugins
-
-                    evaluator_registry = evaluator_plugins
-                evaluator = evaluator_registry.find_for_recipe(pinned.recipe.key)
             files = _safe_output_files(output, output_root)
             references, upstream_ids = _package_lineage(db, pinned, base_model)
             package_kind, package_format = _package_contract(descriptor)

@@ -296,5 +296,7 @@ class ProjectUpdate(BaseModel):
 class ProjectRead(ProjectCreate):
     id: int
     tasks: list[ProjectTaskRead] = Field(default_factory=list)
+    workflow_task_count: int = 0
+    workflow_round_count: int = 0
 
     model_config = {"from_attributes": True}

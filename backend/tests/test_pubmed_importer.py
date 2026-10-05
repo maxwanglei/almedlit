@@ -329,6 +329,8 @@ def test_run_import_creates_abstract_document_when_included(db):
 
 
 def test_run_import_skips_duplicate_external_id(db):
+    from al_medlit.corpus.models import Document
+
     project = _make_project(db)
     with _fake_ncbi_client() as client:
         importer_service.run_import(
@@ -341,6 +343,30 @@ def test_run_import_skips_duplicate_external_id(db):
     assert result.created == []
     assert len(result.skipped) == 1
     assert "duplicate" in result.skipped[0].reason.lower()
+    assert result.skipped[0].document_id is not None
+    assert db.get(Document, result.skipped[0].document_id).external_id == "11111"
+
+
+def test_existing_project_papers_preview_and_reuse_without_network(db, monkeypatch):
+    project = _make_project(db)
+    with _fake_ncbi_client() as client:
+        initial = importer_service.run_import(
+            db, client, project.id, ["11111"], include_abstract_only=False
+        )
+
+        def unexpected_fetch(*_args):
+            raise AssertionError("Existing project papers must not need another remote fetch")
+
+        monkeypatch.setattr(importer_service, "_gather", unexpected_fetch)
+        preview = importer_service.preview_import(
+            client, ["11111"],
+            existing=importer_service.project_documents_by_pmid(db, project.id),
+        )
+        reused = importer_service.run_import(
+            db, client, project.id, ["11111"], include_abstract_only=False
+        )
+    assert preview[0].status == "full_text"
+    assert reused.skipped[0].document_id == initial.created[0].document_id
 
 
 # --- Router -----------------------------------------------------------------

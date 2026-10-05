@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from itertools import batched
 from xml.etree import ElementTree as ET
 
 import httpx
@@ -248,6 +249,10 @@ def parse_idconv_json(data: object) -> dict[str, str]:
 
 # --- HTTP layer (NCBI E-utilities) ------------------------------------------
 
+# The converter rejects more than 200 IDs; keep EFetch GET URLs bounded too.
+# https://pmc.ncbi.nlm.nih.gov/tools/id-converter-api/
+NCBI_BATCH_SIZE = 200
+
 
 def _auth_params() -> dict[str, str]:
     params = {"tool": settings.ncbi_tool}
@@ -262,8 +267,20 @@ def _get(client: httpx.Client, url: str, params: dict[str, str]) -> httpx.Respon
     try:
         response = client.get(url, params=params, timeout=settings.ncbi_request_timeout)
         response.raise_for_status()
-    except httpx.HTTPError as exc:  # network, timeout, or non-2xx status
-        raise ImporterFetchError(f"NCBI request failed: {exc}") from exc
+    except httpx.HTTPStatusError as exc:
+        # HTTPX's exception includes the full URL (IDs and possibly API keys).
+        status = exc.response.status_code
+        if status == 429:
+            message = "NCBI is receiving too many requests. Wait a moment and try again."
+        elif status >= 500:
+            message = f"NCBI is temporarily unavailable (HTTP {status}). Please try again."
+        else:
+            message = f"NCBI rejected the article request (HTTP {status}). Please try again."
+        raise ImporterFetchError(message) from exc
+    except httpx.TimeoutException as exc:
+        raise ImporterFetchError("NCBI took too long to respond. Please try again.") from exc
+    except httpx.HTTPError as exc:
+        raise ImporterFetchError("Could not connect to NCBI. Please try again.") from exc
     return response
 
 
@@ -271,39 +288,41 @@ def fetch_pubmed_metadata(
     client: httpx.Client, pmids: list[str]
 ) -> dict[str, PubMedMeta]:
     """Batched efetch ``db=pubmed`` -> PMID -> metadata."""
-    if not pmids:
-        return {}
-    params = {**_auth_params(), "db": "pubmed", "retmode": "xml", "id": ",".join(pmids)}
-    response = _get(client, f"{settings.ncbi_eutils_base}/efetch.fcgi", params)
-    return parse_pubmed_xml(response.text)
+    metadata: dict[str, PubMedMeta] = {}
+    for batch in batched(pmids, NCBI_BATCH_SIZE):
+        params = {
+            **_auth_params(), "db": "pubmed", "retmode": "xml",
+            "id": ",".join(batch), "retmax": str(len(batch)),
+        }
+        response = _get(client, f"{settings.ncbi_eutils_base}/efetch.fcgi", params)
+        metadata.update(parse_pubmed_xml(response.text))
+    return metadata
 
 
 def resolve_pmcids(client: httpx.Client, pmids: list[str]) -> dict[str, str]:
     """Batched PMC ID Converter -> PMID -> PMCID (only those with a PMCID)."""
-    if not pmids:
-        return {}
-    params = {**_auth_params(), "format": "json", "idtype": "pmid", "ids": ",".join(pmids)}
-    response = _get(client, settings.ncbi_idconv_base, params)
-    try:
-        return parse_idconv_json(response.json())
-    except (TypeError, ValueError) as exc:
-        # A proxy or an overloaded upstream can return a successful HTTP status
-        # with an HTML error page or an unexpected JSON shape. Treat that as an
-        # upstream failure without copying its potentially sensitive body into
-        # our API response.
-        raise ImporterFetchError(
-            "NCBI PMC ID Converter returned malformed JSON"
-        ) from exc
+    pmcids: dict[str, str] = {}
+    for batch in batched(pmids, NCBI_BATCH_SIZE):
+        params = {
+            **_auth_params(), "format": "json", "idtype": "pmid", "ids": ",".join(batch),
+        }
+        response = _get(client, settings.ncbi_idconv_base, params)
+        try:
+            pmcids.update(parse_idconv_json(response.json()))
+        except (TypeError, ValueError) as exc:
+            # A proxy or an overloaded upstream can return a successful HTTP status
+            # with an HTML error page or an unexpected JSON shape. Treat that as an
+            # upstream failure without copying its potentially sensitive body into
+            # our API response.
+            raise ImporterFetchError(
+                "NCBI PMC ID Converter returned malformed JSON"
+            ) from exc
+    return pmcids
 
 
 def fetch_pmc_fulltext(client: httpx.Client, pmcids: list[str]) -> dict[str, str]:
     """Batched efetch ``db=pmc`` -> PMCID -> body text (open-access only)."""
-    if not pmcids:
-        return {}
-    ids = ",".join(pmcid.removeprefix("PMC") for pmcid in pmcids)
-    params = {**_auth_params(), "db": "pmc", "retmode": "xml", "id": ids}
-    response = _get(client, f"{settings.ncbi_eutils_base}/efetch.fcgi", params)
-    return parse_pmc_xml(response.text)
+    return {pmcid: body.text for pmcid, body in fetch_pmc_documents(client, pmcids).items()}
 
 
 def fetch_pmc_documents(
@@ -311,9 +330,13 @@ def fetch_pmc_documents(
     pmcids: list[str],
 ) -> dict[str, JATSBody]:
     """Batched PMC fetch retaining canonical JATS section/paragraph locators."""
-    if not pmcids:
-        return {}
-    ids = ",".join(pmcid.removeprefix("PMC") for pmcid in pmcids)
-    params = {**_auth_params(), "db": "pmc", "retmode": "xml", "id": ids}
-    response = _get(client, f"{settings.ncbi_eutils_base}/efetch.fcgi", params)
-    return parse_pmc_xml_documents(response.text)
+    documents: dict[str, JATSBody] = {}
+    for batch in batched(pmcids, NCBI_BATCH_SIZE):
+        ids = ",".join(pmcid.removeprefix("PMC") for pmcid in batch)
+        params = {
+            **_auth_params(), "db": "pmc", "retmode": "xml",
+            "id": ids, "retmax": str(len(batch)),
+        }
+        response = _get(client, f"{settings.ncbi_eutils_base}/efetch.fcgi", params)
+        documents.update(parse_pmc_xml_documents(response.text))
+    return documents

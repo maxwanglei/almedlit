@@ -16,6 +16,7 @@ from al_medlit.core.exceptions import (
 from al_medlit.core.storage import ObjectStorage
 from al_medlit.model_artifacts import service as artifact_service
 from al_medlit.model_artifacts.schemas import ArtifactPackageCreate
+from al_medlit.project.models import Project
 from al_medlit.workflow import models, schemas
 
 from .common import (
@@ -26,6 +27,7 @@ from .common import (
     _validate_task_input,
     _validate_task_output,
 )
+from .holdouts import validate_source_split_assignments
 
 MAX_DATASET_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_DATASET_UPLOAD_ITEMS = 100_000
@@ -264,14 +266,14 @@ def create_imported_label_set_from_field(
     )
 
 
-def create_round_label_set(
+def resolve_round_labels(
     db: Session,
     annotation_round_id: int,
     data: schemas.RoundLabelSetCreate,
-    actor: User,
     *,
-    storage: ObjectStorage | None = None,
-) -> models.LabelSetVersion:
+    allow_open: bool = False,
+) -> dict:
+    """Resolve immutable submitted decisions without publishing or closing a round."""
     annotation_round = _scoped(
         db,
         models.AnnotationRound,
@@ -279,7 +281,10 @@ def create_round_label_set(
         data.project_id,
         "Annotation round",
     )
-    if annotation_round.status != "closed":
+    snapshot = allow_open or data.publication_mode == "submitted_snapshot"
+    if snapshot and annotation_round.status not in {"open", "closed"}:
+        raise ConflictError("Only open or closed rounds have publishable submitted annotations")
+    if not snapshot and annotation_round.status != "closed":
         raise ConflictError(
             "A round must be closed before its finalized decisions become a label set"
         )
@@ -298,11 +303,12 @@ def create_round_label_set(
     if any(submission.annotation_round_id != annotation_round.id for submission in submissions):
         raise ValidationError("All submissions must belong to the selected round")
 
-    selected_decisions: list[models.RoundAnnotationDecision] = []
+    latest_by_item: dict[tuple[int, int], tuple[int, models.RoundAnnotationDecision]] = {}
     accepted_kinds = (
         {"adjudication"} if data.source_kind == "adjudicated" else {"annotation", "correction"}
     )
-    for submission in submissions:
+    for submission in sorted(submissions, key=lambda item: item.id):
+        seen_items: set[int] = set()
         for decision_id in submission.decision_ids:
             decision = _scoped(
                 db,
@@ -316,7 +322,13 @@ def create_round_label_set(
                 or decision.decision_kind not in accepted_kinds
             ):
                 continue
-            selected_decisions.append(decision)
+            if decision.round_item_id in seen_items:
+                raise ValidationError("A submission contains multiple decisions for the same item")
+            seen_items.add(decision.round_item_id)
+            latest_by_item[(decision.round_item_id, decision.annotator_user_id)] = (
+                submission.id, decision
+            )
+    selected_decisions = [item[1] for item in latest_by_item.values()]
     if not selected_decisions:
         raise ValidationError(
             f"No submitted {data.source_kind} decisions are available for composition"
@@ -358,23 +370,63 @@ def create_round_label_set(
             + ", ".join(disagreements[:5])
         )
 
+    return {
+        "labels": labels,
+        "dataset_version_id": annotation_round.dataset_version_id,
+        "task_version_id": annotation_round.task_version_id,
+        "source_submission_ids": sorted({item[0] for item in latest_by_item.values()}),
+        "source_decision_ids": sorted(decision.id for decision in selected_decisions),
+    }
+
+
+def create_round_label_set(
+    db: Session,
+    annotation_round_id: int,
+    data: schemas.RoundLabelSetCreate,
+    actor: User,
+    *,
+    storage: ObjectStorage | None = None,
+    commit: bool = True,
+) -> models.LabelSetVersion:
+    resolved = resolve_round_labels(db, annotation_round_id, data)
+    if data.publication_mode == "submitted_snapshot":
+        db.query(models.DatasetVersion).filter(
+            models.DatasetVersion.id == resolved["dataset_version_id"]
+        ).with_for_update().one()
+        candidates = db.query(models.LabelSetVersion).filter(
+            models.LabelSetVersion.dataset_version_id == resolved["dataset_version_id"],
+            models.LabelSetVersion.task_version_id == resolved["task_version_id"],
+            models.LabelSetVersion.name == data.name,
+            models.LabelSetVersion.source_kind == data.source_kind,
+            models.LabelSetVersion.composition_policy == data.composition_policy,
+            models.LabelSetVersion.source_annotation_round_id == annotation_round_id,
+        ).all()
+        for candidate in candidates:
+            if (
+                sorted(candidate.source_submission_ids) == resolved["source_submission_ids"]
+                and sorted(candidate.source_decision_ids) == resolved["source_decision_ids"]
+                and candidate.labels == resolved["labels"]
+            ):
+                return candidate
+
     return create_label_set_version(
         db,
         schemas.LabelSetVersionCreate(
             project_id=data.project_id,
-            dataset_version_id=annotation_round.dataset_version_id,
-            task_version_id=annotation_round.task_version_id,
+            dataset_version_id=resolved["dataset_version_id"],
+            task_version_id=resolved["task_version_id"],
             parent_version_id=data.parent_version_id,
             name=data.name,
             source_kind=data.source_kind,
             composition_policy=data.composition_policy,
-            labels=labels,
+            labels=resolved["labels"],
         ),
         actor,
         storage=storage,
-        source_annotation_round_id=annotation_round.id,
-        source_submission_ids=[submission.id for submission in submissions],
-        source_decision_ids=[decision.id for decision in selected_decisions],
+        source_annotation_round_id=annotation_round_id,
+        source_submission_ids=resolved["source_submission_ids"],
+        source_decision_ids=resolved["source_decision_ids"],
+        commit=commit,
     )
 
 
@@ -405,6 +457,7 @@ def create_split_map(
     actor: User,
     *,
     commit: bool = True,
+    task_version_id: int | None = None,
 ) -> models.SplitMap:
     dataset_version = _scoped(
         db,
@@ -413,6 +466,9 @@ def create_split_map(
         data.project_id,
         "Dataset version",
     )
+    # Serialize governance checks with prepared snapshot creation before
+    # publishing another immutable source split.
+    db.query(Project).filter(Project.id == data.project_id).with_for_update().one()
     items = (
         db.query(models.DatasetItem)
         .filter(models.DatasetItem.dataset_version_id == dataset_version.id)
@@ -442,6 +498,15 @@ def create_split_map(
         if prior != split:
             raise ValidationError(f"Dataset group {item.group_key!r} cannot span multiple splits")
 
+    validate_source_split_assignments(
+        db,
+        dataset_version,
+        items,
+        data.assignments,
+        task_version_id=task_version_id,
+        prepared_only=True,
+        protected_splits=data.protected_splits,
+    )
     split_map = models.SplitMap(
         **data.model_dump(),
         content_hash=_canonical_hash(data.model_dump(exclude={"project_id"})),
@@ -538,6 +603,7 @@ def create_training_dataset_version(
         data.project_id,
         "Dataset version",
     )
+    db.query(Project).filter(Project.id == data.project_id).with_for_update().one()
     task_version = _scoped(
         db,
         models.TaskVersion,
@@ -545,12 +611,13 @@ def create_training_dataset_version(
         data.project_id,
         "Task version",
     )
-    for dataset_item in (
+    items = (
         db.query(models.DatasetItem)
         .filter(models.DatasetItem.dataset_version_id == dataset_version.id)
         .order_by(models.DatasetItem.id)
         .all()
-    ):
+    )
+    for dataset_item in items:
         _validate_task_input(
             task_version,
             dataset_item.payload,
@@ -566,6 +633,14 @@ def create_training_dataset_version(
     }
     if "test" not in set(split_map.protected_splits) or "test" not in protected_assignments:
         raise ValidationError("Training datasets require a non-empty protected test split")
+    validate_source_split_assignments(
+        db,
+        dataset_version,
+        items,
+        split_map.assignments,
+        task_version_id=task_version.id,
+        protected_splits=split_map.protected_splits,
+    )
     label_sets = [
         _scoped(db, models.LabelSetVersion, item_id, data.project_id, "Label set version")
         for item_id in data.label_set_version_ids
@@ -592,8 +667,16 @@ def create_training_dataset_version(
         "composition": normalized_composition,
         "composed_labels_hash": _canonical_hash(composed_labels),
     }
+    from .preparation import create_legacy_training_series
+
+    series = create_legacy_training_series(
+        db, project_id=data.project_id, name=data.name,
+        task_version_id=data.task_version_id, actor=actor,
+    )
     training_dataset = models.TrainingDatasetVersion(
         **payload,
+        training_dataset_id=series.id,
+        version_number=1,
         artifact_package_id=data.artifact_package_id,
         content_hash=_canonical_hash(content),
         created_by_user_id=actor.id,

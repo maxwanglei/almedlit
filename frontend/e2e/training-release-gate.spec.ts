@@ -1,4 +1,4 @@
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, test, type Locator } from "@playwright/test";
 
 import {
   installPlatformApiMock,
@@ -23,18 +23,6 @@ function requestFor(
 async function submitDialog(dialog: Locator): Promise<void> {
   await dialog.getByRole("button", { name: "Create", exact: true }).click();
   await expect(dialog).toBeHidden();
-}
-
-async function selectTrainingOnlyContext(page: Page): Promise<void> {
-  await page
-    .getByRole("radio", { name: /Training-only project/ })
-    .check();
-  await page
-    .getByRole("combobox", { name: "Existing training-only project" })
-    .selectOption("2");
-  await page
-    .getByRole("button", { name: "Use selected project" })
-    .click();
 }
 
 test("individual owner completes standalone public-dataset training with immutable model lineage", async ({
@@ -72,7 +60,8 @@ test("individual owner completes standalone public-dataset training with immutab
   await expect(
     page.getByRole("heading", { level: 1, name: "Training data" }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Add dataset" }).first().click();
+  await page.getByRole("button", { name: "Source datasets", exact: true }).click();
+  await page.getByRole("button", { name: "Import source data", exact: true }).first().click();
 
   let dialog = page.getByRole("dialog", { name: "Add dataset version" });
   await dialog.getByRole("textbox", { name: "Name" }).fill(
@@ -121,36 +110,38 @@ test("individual owner completes standalone public-dataset training with immutab
   await submitDialog(dialog);
 
   await datasetRegistry
-    .getByRole("button", { name: "Prepare training" })
+    .getByRole("button", { name: "Prepare for training" })
     .click();
-  dialog = page.getByRole("dialog", { name: "Prepare training data" });
-  await dialog
+  const preparation = page.locator("section").filter({
+    has: page.getByRole("heading", { name: "Create training dataset", exact: true }),
+  });
+  await preparation
     .getByRole("textbox", { name: "Training dataset name" })
     .fill("IMDb sentiment training set");
   await expect(
-    dialog.getByRole("combobox", { name: "Task version" }),
+    preparation.getByRole("combobox", { name: "Task", exact: true }),
   ).toHaveValue("212");
   await expect(
-    dialog.getByRole("combobox", { name: "Dataset version" }),
+    preparation.getByRole("combobox", { name: "Source dataset version" }),
   ).toHaveValue("222");
   await expect(
-    dialog.getByRole("radio", { name: /Dataset field/ }),
+    preparation.getByRole("radio", { name: "Import external labeled data" }),
   ).toBeChecked();
-  await expect(dialog).toContainText(
-    "protected from training, selection, prompt tuning, and guideline mining",
+  await expect(preparation.getByRole("combobox", { name: "Labels from" })).toHaveValue("field");
+  await expect(preparation).toContainText(
+    "Existing protected evaluation groups stay protected",
   );
-  await submitDialog(dialog);
+  await preparation.getByRole("button", { name: "Preview training dataset" }).click();
+  const preview = page.getByRole("region", { name: "Training dataset preview" });
+  await expect(preview).toContainText("50000 records");
+  await expect(preview).toContainText("train: 40000 · validation: 5000 · test: 5000");
+  await preview.getByRole("button", { name: "Create training dataset", exact: true }).click();
 
-  await expect(
-    page.getByRole("region", { name: "Composed training datasets" }),
-  ).toContainText("IMDb sentiment training set");
+  const trainingDatasets = page.getByRole("region", { name: "Training datasets", exact: true });
+  await expect(trainingDatasets).toContainText("IMDb sentiment training set");
 
-  await page
-    .getByRole("navigation", { name: "Training sections" })
-    .getByRole("link", { name: "New training" })
-    .click();
-  await expect(page).toHaveURL("/training/new");
-  await selectTrainingOnlyContext(page);
+  await trainingDatasets.getByRole("button", { name: "Train model", exact: true }).click();
+  await expect(page).toHaveURL("/training/new?projectId=2&trainingDatasetVersionId=251");
 
   await expect(
     page.getByRole("button", {
@@ -284,16 +275,15 @@ test("individual owner completes standalone public-dataset training with immutab
   expect(
     requestFor(
       api.requests,
-      "/api/datasets/training-versions/compose",
+      "/api/projects/2/training-datasets/prepare",
     ).body,
   ).toMatchObject({
-    project_id: 2,
-    dataset_version_id: 222,
     task_version_id: 212,
-    input_field: "text",
-    label_field: "label",
+    sources: [{ dataset_version_id: 222, input_mapping: { text: "text" }, label_field: "label" }],
     train_percent: 80,
     validation_percent: 10,
+    preview_manifest_hash: expect.any(String),
+    idempotency_key: expect.any(String),
   });
   expect(requestFor(api.requests, "/api/models").body).toMatchObject({
     project_id: 2,

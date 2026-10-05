@@ -20,6 +20,7 @@ export type AccessCommand =
   | "tasks:manage"
   | "rounds:manage"
   | "learning:score"
+  | "inference:run"
   | "quality:review"
   | "training:read"
   | "training:launch"
@@ -124,6 +125,8 @@ export function canPerform(
         hasEffectiveRole(access, "trainer") &&
         hasEffectiveCapability(access, "active_learning")
       );
+    case "inference:run":
+      return hasEffectiveRole(access, "trainer") && hasEffectiveCapability(access, "inference");
     case "projects:create":
     case "tasks:manage":
     case "rounds:manage":

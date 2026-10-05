@@ -2,6 +2,7 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable
 
 from pydantic import ValidationError as PydanticValidationError
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
@@ -32,6 +33,7 @@ from al_medlit.project.schemas import (
     EvidenceBlockTaskSettingsV1,
     ProjectCreate,
     ProjectProgressRead,
+    ProjectRead,
     ProjectTaskCreate,
     ProjectTaskUpdate,
     ProjectUpdate,
@@ -480,6 +482,42 @@ def list_my_work_projects(
 
 def get_project(db: Session, project_id: int) -> Project | None:
     return db.get(Project, project_id)
+
+
+def read_projects(db: Session, projects: Iterable[Project]) -> list[ProjectRead]:
+    """Include workflow counts without conflating versioned and document tasks.
+
+    Callers authorize the project collection before passing it here. Both count
+    queries are limited to those project IDs and remain constant in number for
+    the project directory; task versions do not inflate the task count.
+    """
+    from al_medlit.workflow.models import AnnotationRound, TaskDefinition
+
+    projects = list(projects)
+    if not projects:
+        return []
+    project_ids = [project.id for project in projects]
+    task_counts = dict(
+        db.query(TaskDefinition.project_id, func.count(TaskDefinition.id))
+        .filter(TaskDefinition.project_id.in_(project_ids))
+        .group_by(TaskDefinition.project_id)
+        .all()
+    )
+    round_counts = dict(
+        db.query(AnnotationRound.project_id, func.count(AnnotationRound.id))
+        .filter(AnnotationRound.project_id.in_(project_ids))
+        .group_by(AnnotationRound.project_id)
+        .all()
+    )
+    return [
+        ProjectRead.model_validate(project).model_copy(
+            update={
+                "workflow_task_count": task_counts.get(project.id, 0),
+                "workflow_round_count": round_counts.get(project.id, 0),
+            }
+        )
+        for project in projects
+    ]
 
 
 def update_project(db: Session, project_id: int, data: ProjectUpdate) -> Project:

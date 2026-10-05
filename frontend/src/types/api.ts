@@ -100,6 +100,8 @@ export interface Project {
   annotation_schema: LabelSet;
   annotation_validation_mode: AnnotationValidationMode;
   tasks: ProjectTask[];
+  workflow_task_count?: number;
+  workflow_round_count?: number;
   settings: Record<string, unknown>;
   workspace_id: number | null;
 }

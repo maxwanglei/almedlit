@@ -79,6 +79,9 @@ import {
   withSearchAndHash,
 } from "@/platform/navigation";
 import { usePlatformProject } from "@/platform/usePlatformProject";
+import { supportsPaperAnnotation } from "@/platform/paperTaskContracts";
+import ActiveRoundQueue from "@/platform/ActiveRoundQueue";
+import MyWorkTaskInventory from "@/platform/MyWorkTaskInventory";
 import { useProjectWorkspaceStore } from "@/store/projectWorkspaceStore";
 import type { MeMembership } from "@/api/client";
 import type {
@@ -93,6 +96,7 @@ const PlatformDialog = lazy(() => import("@/platform/PlatformDialog"));
 const ProjectPlatform = lazy(() => import("@/platform/ProjectPlatform"));
 const ProjectsWorkspace = lazy(() => import("@/platform/ProjectsWorkspace"));
 const RoundWorkbench = lazy(() => import("@/platform/RoundWorkbench"));
+const PaperRoundWorkspace = lazy(() => import("@/platform/PaperRoundWorkspace"));
 const SystemAdministration = lazy(
   () => import("@/platform/SystemAdministration"),
 );
@@ -392,6 +396,7 @@ function Application(): React.ReactElement {
   const accountActionToken = accountActionTokenFromPath(location.pathname);
   const workspaceRoute = resolveWorkspaceRoute(pathname);
   const routeSearch = new URLSearchParams(location.search);
+  const myWorkProjectId = positiveInteger(routeSearch.get("project") ?? undefined);
   const queryProjectValue = routeSearch.get("projectId");
   const queryProjectId =
     queryProjectValue !== null &&
@@ -406,6 +411,13 @@ function Application(): React.ReactElement {
     Number(queryDatasetValue) > 0
       ? Number(queryDatasetValue)
       : null;
+  const queryDatasetVersionId = positiveInteger(routeSearch.get("datasetVersionId") ?? undefined);
+  const queryTaskVersionId = positiveInteger(routeSearch.get("taskVersionId") ?? undefined);
+  const queryLabelSetVersionId = positiveInteger(routeSearch.get("labelSetVersionId") ?? undefined);
+  const queryTrainingDatasetId = positiveInteger(routeSearch.get("trainingDatasetId") ?? undefined);
+  const queryTrainingDatasetVersionId = positiveInteger(
+    routeSearch.get("trainingDatasetVersionId") ?? undefined,
+  );
   const roundRouteMatch = useMatch("/my-work/rounds/:roundId");
   const roundRouteId = positiveInteger(roundRouteMatch?.params.roundId);
   const parsedProjectRoute = useMemo(
@@ -533,6 +545,7 @@ function Application(): React.ReactElement {
         )
       ),
     platformLoadScope,
+    navigationContext.effectiveRoles,
   );
 
   const navigatePath = useCallback(
@@ -773,9 +786,7 @@ function Application(): React.ReactElement {
           pendingWorkspaceSwitchRef.current ||
           isEntryPath(window.location.pathname)
         ) {
-          pendingWorkspaceSwitchRef.current = false;
-          navigatePathRef.current(
-            defaultModulePath({
+          const destination = defaultModulePath({
               ...createAccessSnapshot({
                 workspaceId,
                 workspaceKind: selectedMembership?.workspace_kind,
@@ -785,9 +796,13 @@ function Application(): React.ReactElement {
                 isSuperuser: me.user.is_superuser,
               }),
               selectedProjectId: null,
-            }),
-            "replace",
-          );
+            });
+          // Reloading My Work must retain its paper, task, and editor view.
+          // A workspace switch deliberately clears the previous workspace's context.
+          if (pendingWorkspaceSwitchRef.current || destination !== normalizePathname(window.location.pathname)) {
+            navigatePathRef.current(destination, "replace");
+          }
+          pendingWorkspaceSwitchRef.current = false;
         }
       } catch {
         if (!cancelled && generation === sessionGenerationRef.current) {
@@ -1059,6 +1074,14 @@ function Application(): React.ReactElement {
   ]);
 
   useEffect(() => {
+    if (workspaceRoute === "/my-work" && roundRouteId === null && projectsReady &&
+      myWorkProjectId !== null && myWorkProjectId !== selectedProjectId &&
+      projects.some((project) => project.id === myWorkProjectId)) {
+      setSelectedProjectId(myWorkProjectId);
+    }
+  }, [myWorkProjectId, projects, projectsReady, roundRouteId, selectedProjectId, setSelectedProjectId, workspaceRoute]);
+
+  useEffect(() => {
     const shouldLoadSharedData =
       routeRedirect === null &&
       (
@@ -1083,7 +1106,7 @@ function Application(): React.ReactElement {
       setError(null);
       try {
         await loadProjects(
-          undefined,
+          workspaceRoute === "/my-work" ? myWorkProjectId ?? undefined : undefined,
           true,
           activeWorkspaceId,
           !canPerform(access, "projects:read"),
@@ -1108,6 +1131,7 @@ function Application(): React.ReactElement {
     access,
     authed,
     loadProjects,
+    myWorkProjectId,
     projectsReady,
     routeRedirect,
     sessionReady,
@@ -1172,7 +1196,6 @@ function Application(): React.ReactElement {
       !sessionReady ||
       activeWorkspaceId === null ||
       workspaceRoute !== "/my-work" ||
-      roundRouteId !== null ||
       routeRedirect !== null ||
       !canPerform(access, "annotation:work")
     ) {
@@ -1616,6 +1639,7 @@ function Application(): React.ReactElement {
     ) : (
       <ProjectPlatform
         pathname={pathname}
+        search={location.search}
         project={routedProject}
         projects={projects}
         documents={documents}
@@ -1637,7 +1661,11 @@ function Application(): React.ReactElement {
             },
           });
         }}
-        onRefresh={platform.reload}
+        onRefresh={async () => {
+          await platform.reload();
+          if (activeWorkspaceId !== null) await loadProjects(routedProject.id, true, activeWorkspaceId);
+        }}
+        onDocumentsImported={() => loadProjectData(routedProject.id, true, "all")}
         dialog={platformDialog}
         onDialogChange={setPlatformDialog}
         onProjectSelect={(projectId, nextTab) => {
@@ -1645,7 +1673,7 @@ function Application(): React.ReactElement {
           navigatePath(projectPlatformPath(projectId, nextTab));
         }}
         onNavigate={navigatePath}
-        onOpenRound={(roundId) => navigatePath(`/my-work/rounds/${roundId}`)}
+        onOpenRound={(roundId) => navigatePath(`/my-work/rounds/${roundId}?view=annotate`)}
         onUpdateProject={async (payload: ProjectUpdate) => {
           const updated = await updateProject(routedProject.id, payload);
           replaceProject(updated);
@@ -1657,13 +1685,18 @@ function Application(): React.ReactElement {
                 kind={platformDialog}
                 data={platform.data}
                 busy={platform.busy}
+                currentUserId={currentUserId}
+                isPersonalWorkspace={activeWorkspaceIsIndividual}
                 onClose={() => setPlatformDialog(null)}
                 onCreateDataset={platform.addDataset}
                 onCreateCycle={platform.addCycle}
                 onCreateRound={platform.addRound}
                 onScoreFeedback={platform.scoreFeedback}
                 onCreateGuideline={platform.addGuideline}
-                onCreateTask={platform.addTask}
+                onCreateTask={async (draft) => {
+                  await platform.addTask(draft);
+                  if (activeWorkspaceId !== null) await loadProjects(routedProject.id, true, activeWorkspaceId);
+                }}
                 onPrepareTrainingData={platform.prepareTrainingData}
               />
             </Suspense>
@@ -1687,11 +1720,17 @@ function Application(): React.ReactElement {
     ) : (
       <TrainingWorkspace
         workspaceId={activeWorkspaceId}
+        search={location.search}
         projects={projects}
         view={view}
         runId={runId}
         initialProjectId={queryProjectId}
         initialDatasetId={queryDatasetId}
+        initialDatasetVersionId={queryDatasetVersionId}
+        initialTaskVersionId={queryTaskVersionId}
+        initialLabelSetVersionId={queryLabelSetVersionId}
+        initialTrainingDatasetId={queryTrainingDatasetId}
+        initialTrainingDatasetVersionId={queryTrainingDatasetVersionId}
         currentUserId={currentUserId}
         currentUserName={currentUsername}
         canCreateTrainingProject={canPerform(access, "projects:create")}
@@ -1736,6 +1775,21 @@ function Application(): React.ReactElement {
         <div className="status" role="status" aria-live="polite">
           Loading round…
         </div>
+      ) : context && currentUserId !== null && context.round.status === "open" && context.round.assistance_policy === "blind" && supportsPaperAnnotation(context.task_version) ? (
+        <PaperRoundWorkspace
+          context={context}
+          contexts={roundContexts}
+          currentUserId={currentUserId}
+          annotatorId={currentUsername ?? ""}
+          canManage={canPerform(access, "rounds:manage")}
+          onClose={() => {
+            const params = new URLSearchParams({ project: String(context.project.id), datasetVersionId: String(context.round.dataset_version_id) });
+            const documentId = new URLSearchParams(location.search).get("document");
+            if (documentId) params.set("document", documentId);
+            navigatePath(`/my-work?${params}`);
+          }}
+          onOpenProjectTasks={() => navigatePath(`/projects/${context.project.id}/tasks`)}
+        />
       ) : context ? (
         <RoundWorkbench
           round={context.round}
@@ -1778,8 +1832,55 @@ function Application(): React.ReactElement {
     );
   };
 
-  const renderMyWork = (): React.ReactElement => (
+  const renderMyWork = (): React.ReactElement => {
+    if (!projectsReady || (myWorkProjectId !== null && myWorkProjectId !== selectedProjectId && projects.some((project) => project.id === myWorkProjectId))) {
+      return <main id="main-content" tabIndex={-1}><p role="status">Loading your annotation workspace…</p></main>;
+    }
+    const projectRounds = roundContexts.filter((context) => context.project.id === selectedProjectId);
+    if (selectedProject && currentUserId !== null && !selectedProject.tasks.some((task) => task.enabled) &&
+      ((selectedProject.workflow_task_count ?? 0) > 0 || projectRounds.length > 0)) {
+      const paperRounds = projectRounds.filter((context) => context.round.status === "open" && context.round.assistance_policy === "blind" && supportsPaperAnnotation(context.task_version));
+      const requestedSource = positiveInteger(new URLSearchParams(location.search).get("datasetVersionId") ?? undefined);
+      const sourceIds = [...new Set(paperRounds.map((context) => context.round.dataset_version_id))];
+      const primary = [...paperRounds].sort((a, b) => b.round.id - a.round.id)
+        .find((context) => requestedSource === null || context.round.dataset_version_id === requestedSource);
+      const overviewControls = <div className="paper-overview-controls">
+          <label>Project <select value={selectedProject.id} onChange={(event) => {
+            const next = Number(event.target.value); setSelectedProjectId(next);
+            navigatePath(`/my-work?project=${next}`);
+          }}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
+          {sourceIds.length > 1 ? <label>Source collection version <select value={primary?.round.dataset_version_id ?? ""} onChange={(event) => navigatePath(`/my-work?project=${selectedProject.id}&datasetVersionId=${event.target.value}`)}>
+            {!primary ? <option value="">Choose a source version</option> : null}
+            {sourceIds.map((id) => <option key={id} value={id}>Source version {id}</option>)}
+          </select></label> : null}
+        </div>;
+      const taskInventory = <MyWorkTaskInventory key={`${activeWorkspaceId}:${selectedProject.id}`} project={selectedProject} contexts={projectRounds}
+          canReadAllTasks={canPerform(access, "projects:read") && projectSupportsSection(selectedProject, "data")}
+          canManage={canPerform(access, "tasks:manage")} onNavigate={navigatePath} />;
+      return <main id="main-content" tabIndex={-1}>
+        {roundContextsLoading ? <p role="status">Loading annotation tasks…</p> : roundContextsError ? <p role="alert">{roundContextsError}</p> : <>
+          {primary ? <PaperRoundWorkspace key={`${activeWorkspaceId}:${primary.project.id}:${primary.round.dataset_version_id}`}
+            defaultView="progress"
+            overviewControls={overviewControls} taskInventory={taskInventory}
+            context={primary} contexts={projectRounds} currentUserId={currentUserId} annotatorId={currentUsername ?? ""}
+            canManage={canPerform(access, "rounds:manage")}
+            onClose={() => navigatePath(`/projects/${selectedProject.id}/overview`)}
+            onOpenProjectTasks={() => navigatePath(`/projects/${selectedProject.id}/tasks`)} /> : <section className="paper-empty-work">
+            <h1>My Work</h1>
+            {overviewControls}
+            {taskInventory}
+            <ActiveRoundQueue contexts={projectRounds} onOpenRound={(id) => navigatePath(`/my-work/rounds/${id}?view=annotate`)} />
+            {!projectRounds.length ? <p>No annotation round is ready yet. Choose a task and source collection from the project’s Tasks page.</p> : null}
+          </section>}
+        </>}
+      </main>;
+    }
+    return (
     <>
+      {selectedProject && ((selectedProject.workflow_task_count ?? 0) > 0 || projectRounds.length > 0) ? <MyWorkTaskInventory
+        key={`${activeWorkspaceId}:${selectedProject.id}`} project={selectedProject} contexts={projectRounds}
+        canReadAllTasks={canPerform(access, "projects:read") && projectSupportsSection(selectedProject, "data")}
+        canManage={canPerform(access, "tasks:manage")} onNavigate={navigatePath} /> : null}
       {error ? (
         <Banner
           className="shell-banner"
@@ -1838,11 +1939,12 @@ function Application(): React.ReactElement {
           navigatePath(`/projects/${selectedProjectId}/${tab}`);
         }}
         onOpenRound={(nextRoundId) =>
-          navigatePath(`/my-work/rounds/${nextRoundId}`)
+          navigatePath(`/my-work/rounds/${nextRoundId}?view=annotate`)
         }
       />
     </>
-  );
+    );
+  };
 
   const routeContext: ApplicationRouteContext = {
     renderMyWork,

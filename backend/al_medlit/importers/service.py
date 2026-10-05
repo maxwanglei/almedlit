@@ -1,7 +1,7 @@
 """Orchestration for the PubMed/PMC importer: preview and import.
 
-Two-phase and stateless: ``preview_import`` classifies PMIDs without touching
-the database; ``run_import`` re-fetches and persists the user's selection.
+Preview classifies PMIDs without writes; import persists the user's selection.
+Previously imported papers can be reused without fetching them again.
 """
 
 from __future__ import annotations
@@ -45,12 +45,36 @@ def _gather(
     return metadata, pmcids, fulltext
 
 
-def preview_import(client: httpx.Client, pmids: list[str]) -> list[ImportPreviewItem]:
+def project_documents_by_pmid(db: Session, project_id: int) -> dict[str, Document]:
+    return {
+        document.external_id: document
+        for document in db.query(Document).filter(Document.project_id == project_id).all()
+        if document.external_id is not None
+    }
+
+
+def preview_import(
+    client: httpx.Client, pmids: list[str], *, existing: dict[str, Document] | None = None,
+) -> list[ImportPreviewItem]:
     normalized = normalize_pmids(pmids)
-    metadata, pmcids, fulltext = _gather(client, normalized)
+    existing = existing or {}
+    missing = [pmid for pmid in normalized if pmid not in existing]
+    metadata, pmcids, fulltext = _gather(client, missing) if missing else ({}, {}, {})
 
     items: list[ImportPreviewItem] = []
     for pmid in normalized:
+        if pmid in existing:
+            document = existing[pmid]
+            full_text = document.source == "pmc"
+            items.append(ImportPreviewItem(
+                pmid=pmid, title=document.title or "",
+                status="full_text" if full_text else "abstract_only",
+                has_full_text=full_text, has_abstract=not full_text,
+                journal=str((document.metadata_ or {}).get("journal", "")),
+                year=str((document.metadata_ or {}).get("year", "")),
+                pmcid=(document.metadata_ or {}).get("pmcid"),
+            ))
+            continue
         meta = metadata.get(pmid)
         if meta is None:
             items.append(ImportPreviewItem(pmid=pmid, status="not_found"))
@@ -58,7 +82,7 @@ def preview_import(client: httpx.Client, pmids: list[str]) -> list[ImportPreview
         pmcid = pmcids.get(pmid)
         has_full_text = bool(pmcid and pmcid in fulltext)
         has_abstract = bool(meta.abstract)
-        status = "full_text" if has_full_text else "abstract_only"
+        status = "full_text" if has_full_text else "abstract_only" if has_abstract else "error"
         items.append(
             ImportPreviewItem(
                 pmid=pmid,
@@ -82,33 +106,34 @@ def run_import(
     include_abstract_only: bool,
 ) -> ImportResponse:
     normalized = normalize_pmids(pmids)
-    metadata, pmcids, fulltext = _gather(client, normalized)
+    known = project_documents_by_pmid(db, project_id)
+    missing = [pmid for pmid in normalized if pmid not in known]
+    metadata, pmcids, fulltext = _gather(client, missing) if missing else ({}, {}, {})
 
-    existing = {
-        external_id
-        for (external_id,) in db.query(Document.external_id)
-        .filter(Document.project_id == project_id)
-        .all()
-        if external_id is not None
-    }
+    # Keep the duplicate check and all inserts in one project-scoped transaction.
+    # Fetch remote data before taking the lock so other imports can still progress.
+    db.query(Project).filter(Project.id == project_id).with_for_update().one()
+
+    existing = project_documents_by_pmid(db, project_id)
 
     response = ImportResponse()
     for pmid in normalized:
+        if pmid in existing:
+            document = existing[pmid]
+            response.skipped.append(
+                ImportOutcome(
+                    pmid=pmid,
+                    status="full_text" if document.source == "pmc" else "abstract_only",
+                    title=document.title or "",
+                    document_id=document.id,
+                    reason="Duplicate: already in this project; available to reuse",
+                )
+            )
+            continue
         meta = metadata.get(pmid)
         if meta is None:
             response.skipped.append(
                 ImportOutcome(pmid=pmid, status="not_found", reason="No PubMed record")
-            )
-            continue
-
-        if pmid in existing:
-            response.skipped.append(
-                ImportOutcome(
-                    pmid=pmid,
-                    status="full_text" if (pmcids.get(pmid) in fulltext) else "abstract_only",
-                    title=meta.title,
-                    reason="Duplicate: already imported in this project",
-                )
             )
             continue
 
@@ -132,7 +157,7 @@ def run_import(
                 },
                 structure_source_metadata=body.structure_source,
             )
-            existing.add(pmid)
+            existing[pmid] = doc
             response.created.append(
                 ImportOutcome(
                     pmid=pmid,
@@ -157,7 +182,7 @@ def run_import(
                     "year": meta.year,
                 },
             )
-            existing.add(pmid)
+            existing[pmid] = doc
             response.created.append(
                 ImportOutcome(
                     pmid=pmid,
@@ -179,6 +204,7 @@ def run_import(
             )
         )
 
+    db.commit()
     return response
 
 
@@ -204,6 +230,7 @@ def _create_document(
             metadata_=metadata,
         ),
         structure_source_metadata=structure_source_metadata,
+        commit=False,
     )
 
 

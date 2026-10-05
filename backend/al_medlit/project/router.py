@@ -42,7 +42,7 @@ def create_project(
         workspace_id = workspace_service.ensure_default_workspace(db).id
         payload = payload.model_copy(update={"workspace_id": workspace_id})
     assert_workspace_member(db, current_user, workspace_id, min_role="manager")
-    return service.create_project(db, payload)
+    return service.read_projects(db, [service.create_project(db, payload)])[0]
 
 
 @router.get("", response_model=list[ProjectRead])
@@ -68,7 +68,8 @@ def list_projects(
         .first()
     ):
         raise ForbiddenError("Insufficient workspace role")
-    return service.list_projects(db, current_user, workspace_id=workspace_id)
+    projects = service.list_projects(db, current_user, workspace_id=workspace_id)
+    return service.read_projects(db, projects)
 
 
 @router.get("/my-work", response_model=list[ProjectRead])
@@ -93,8 +94,10 @@ def list_my_work_projects(
             "tasks": [task for task in project.tasks if task.enabled],
             "settings": {},
             "workspace_id": project.workspace_id,
+            "workflow_task_count": project.workflow_task_count,
+            "workflow_round_count": project.workflow_round_count,
         }
-        for project in projects
+        for project in service.read_projects(db, projects)
     ]
 
 
@@ -107,7 +110,7 @@ def get_project(
     project = service.get_project(db, project_id)
     if not project:
         raise NotFoundError("Project not found")
-    return project
+    return service.read_projects(db, [project])[0]
 
 
 @router.patch("/{project_id}", response_model=ProjectRead)
@@ -117,7 +120,9 @@ def update_project(
     _member=Depends(require_project_access(min_role="manager")),
     db: Session = Depends(get_db),
 ):
-    return service.update_project(db, project_id, payload)
+    return service.read_projects(
+        db, [service.update_project(db, project_id, payload)]
+    )[0]
 
 
 @router.get("/{project_id}/tasks", response_model=list[ProjectTaskRead])

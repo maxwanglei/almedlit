@@ -37,7 +37,10 @@ def preview_pubmed_import(
 ) -> ImportPreviewResponse:
     service.ensure_project(db, project_id)
     try:
-        items = service.preview_import(client, payload.pmids)
+        items = service.preview_import(
+            client, payload.pmids,
+            existing=service.project_documents_by_pmid(db, project_id),
+        )
     except ImporterFetchError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return ImportPreviewResponse(items=items)

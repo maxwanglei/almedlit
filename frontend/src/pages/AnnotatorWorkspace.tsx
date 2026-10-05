@@ -156,6 +156,15 @@ interface RelationArc {
   by: number;
 }
 
+export interface AnnotationMutationAdapter {
+  createAnnotation: typeof createAnnotation;
+  updateAnnotation: typeof updateAnnotation;
+  deleteAnnotation: typeof deleteAnnotation;
+  createSubmission: typeof createSubmission;
+  reopenPersonalTaskAssignment: typeof reopenPersonalTaskAssignment;
+  setDocumentLabel: (documentId: number, label: string) => Promise<Annotation>;
+}
+
 interface AnnotatorWorkspaceProps {
   projects: Project[];
   selectedProject: Project | null;
@@ -178,6 +187,12 @@ interface AnnotatorWorkspaceProps {
   allowAssignmentlessSubmit?: boolean;
   onOpenProjectTab?: (tab: ProjectSetupTab) => void;
   onOpenRound?: (roundId: number) => void;
+  annotationApi?: AnnotationMutationAdapter;
+  defaultView?: AnnotatorTab;
+  overviewControls?: React.ReactNode;
+  taskInventory?: React.ReactNode;
+  onBackToMyWork?: () => void;
+  canManageTasks?: boolean;
   /** Legacy caller compatibility; sign-out now belongs to AppShell. */
   onLogout?: () => void;
 }
@@ -320,11 +335,13 @@ function effectiveWorkbenchTasks(
   workbench: AnnotationWorkbench | null,
   selectedProject: Project | null,
 ): AnnotationWorkbenchTask[] {
-  if (workbench?.tasks && workbench.tasks.length > 0) {
+  if (workbench) {
+    // The authenticated workbench already filters tasks by permission. An empty
+    // response must not resurrect disabled or unauthorized schema tasks.
     return sortTasks(workbench.tasks);
   }
 
-  const project = workbench?.project ?? selectedProject;
+  const project = selectedProject;
   const projectTasks = project?.tasks.filter((task) => task.enabled) ?? [];
   if (projectTasks.length > 0) {
     return sortTasks(projectTasks.map((task) => toWorkbenchTask(task)));
@@ -611,13 +628,25 @@ export default function AnnotatorWorkspace({
   allowAssignmentlessSubmit = false,
   onOpenProjectTab,
   onOpenRound,
+  annotationApi,
+  defaultView = "progress",
+  overviewControls,
+  taskInventory,
+  onBackToMyWork,
+  canManageTasks = true,
 }: AnnotatorWorkspaceProps): React.ReactElement {
+  const WorkspaceMain = annotationApi ? "div" : "main";
+  const createAnnotationRecord = annotationApi?.createAnnotation ?? createAnnotation;
+  const updateAnnotationRecord = annotationApi?.updateAnnotation ?? updateAnnotation;
+  const deleteAnnotationRecord = annotationApi?.deleteAnnotation ?? deleteAnnotation;
+  const submitAnnotationRecord = annotationApi?.createSubmission ?? createSubmission;
+  const reopenAnnotationRecord = annotationApi?.reopenPersonalTaskAssignment ?? reopenPersonalTaskAssignment;
   const [searchParams, updateSearch] = useSearchState();
   const initialView = allowedSearchValue(
     searchParams,
     "view",
     ["progress", "annotate"] as const,
-    "progress",
+    defaultView,
   ).value;
   const initialTool = allowedSearchValue(
     searchParams,
@@ -790,7 +819,7 @@ export default function AnnotatorWorkspace({
     currentDocumentAssignments.find((assignment) => assignment.id === submissionAssignmentId) ??
     currentDocumentAssignments.find((assignment) => isMutableAssignment(assignment)) ??
     null;
-  const annotationEditable = selectedSubmissionAssignment
+  const annotationEditable = annotationApi ? currentDocumentAssignments.some(isMutableAssignment) : selectedSubmissionAssignment
     ? isMutableAssignment(selectedSubmissionAssignment)
     : allowAssignmentlessSubmit && currentDocumentAssignments.length === 0;
   const annotationGuidelineVersionId =
@@ -859,14 +888,17 @@ export default function AnnotatorWorkspace({
   const isTaskEditable = useCallback(
     (taskId: number | null | undefined): boolean =>
       isTaskEditableForAssignment(
-        selectedSubmissionAssignment,
+        annotationApi
+          ? currentDocumentAssignments.find((assignment) => assignment.task_id === taskId) ?? null
+          : selectedSubmissionAssignment,
         taskId,
         allowAssignmentlessSubmit,
         currentDocumentAssignments.length,
       ),
     [
+      annotationApi,
+      currentDocumentAssignments,
       allowAssignmentlessSubmit,
-      currentDocumentAssignments.length,
       selectedSubmissionAssignment,
     ],
   );
@@ -878,10 +910,14 @@ export default function AnnotatorWorkspace({
 
   const changeView = useCallback(
     (view: AnnotatorTab, mode: "push" | "replace" = "push"): void => {
+      if (view === "progress" && onBackToMyWork) {
+        onBackToMyWork();
+        return;
+      }
       setActiveTab(view);
       updateSearch({ view }, mode);
     },
-    [updateSearch],
+    [onBackToMyWork, updateSearch],
   );
 
   const changeWorkspacePane = useCallback(
@@ -917,11 +953,16 @@ export default function AnnotatorWorkspace({
   );
 
   useEffect(() => {
+    // Router navigation can commit after the local selection render. Do not
+    // replay an older URL over a click that has already changed browser history.
+    if (new URLSearchParams(window.location.search).toString() !== searchParams.toString()) {
+      return;
+    }
     const view = allowedSearchValue(
       searchParams,
       "view",
       ["progress", "annotate"] as const,
-      "progress",
+      defaultView,
     );
     const tool = allowedSearchValue(
       searchParams,
@@ -965,17 +1006,8 @@ export default function AnnotatorWorkspace({
     ) {
       setSelectedDocumentId(documentId);
     }
-    const assignmentId = Number(searchParams.get("assignment"));
-    if (
-      Number.isInteger(assignmentId) &&
-      currentDocumentAssignments.some(
-        (assignment) => assignment.id === assignmentId,
-      )
-    ) {
-      setSubmissionAssignmentId(assignmentId);
-    }
   }, [
-    currentDocumentAssignments,
+    defaultView,
     projects,
     searchParams,
     selectedDocumentId,
@@ -987,41 +1019,32 @@ export default function AnnotatorWorkspace({
   ]);
 
   useEffect(() => {
-    updateSearch(
-      {
-        project: selectedProjectId,
-        document: selectedDocumentId,
-        assignment: submissionAssignmentId,
-      },
-      "replace",
-    );
-  }, [
-    selectedDocumentId,
-    selectedProjectId,
-    submissionAssignmentId,
-    updateSearch,
-  ]);
-
-  useEffect(() => {
-    setSubmissionAssignmentId((current) => {
-      if (
-        allowAssignmentlessSubmit &&
-        recentlyFinished?.documentId === selectedDocumentId
-      ) {
-        const finishedAssignment = currentDocumentAssignments.find(
-          (assignment) => assignment.id === recentlyFinished.assignmentId,
-        );
-        if (finishedAssignment) {
-          return finishedAssignment.id;
-        }
-      }
-      return preferredAssignmentId(currentDocumentAssignments, current);
-    });
+    if (new URLSearchParams(window.location.search).toString() !== searchParams.toString()) return;
+    // Resolve an assignment only after URL and document selection agree. An
+    // assignment from the previous paper must never write its document back.
+    const requestedDocumentId = Number(searchParams.get("document"));
+    if (requestedDocumentId !== selectedDocumentId) return;
+    const requestedAssignmentId = Number(searchParams.get("assignment"));
+    const requestedAssignment = currentDocumentAssignments.find((assignment) => assignment.id === requestedAssignmentId);
+    const finishedAssignment = allowAssignmentlessSubmit && recentlyFinished?.documentId === selectedDocumentId
+      ? currentDocumentAssignments.find((assignment) => assignment.id === recentlyFinished.assignmentId)
+      : undefined;
+    const current = requestedAssignment?.id ?? submissionAssignmentId;
+    const nextAssignmentId = finishedAssignment?.id
+      ?? (annotationApi && currentDocumentAssignments.some((assignment) => assignment.id === current)
+        ? current
+        : preferredAssignmentId(currentDocumentAssignments, current));
+    setSubmissionAssignmentId(nextAssignmentId);
+    updateSearch({ assignment: nextAssignmentId }, "replace");
   }, [
     allowAssignmentlessSubmit,
+    annotationApi,
     currentDocumentAssignments,
     recentlyFinished,
+    searchParams,
     selectedDocumentId,
+    submissionAssignmentId,
+    updateSearch,
   ]);
 
   useEffect(() => {
@@ -1303,7 +1326,9 @@ export default function AnnotatorWorkspace({
   const isPersonalReview =
     allowAssignmentlessSubmit &&
     selectedDocument !== null &&
-    !annotationEditable;
+    (annotationApi && selectedSubmissionAssignment
+      ? !isMutableAssignment(selectedSubmissionAssignment)
+      : !annotationEditable);
   const isRecentlyFinishedReview =
     isPersonalReview &&
     recentlyFinished?.documentId === selectedDocumentId &&
@@ -1353,6 +1378,12 @@ export default function AnnotatorWorkspace({
     if (!selectedAnnotatorId) {
       return;
     }
+    if (new URLSearchParams(window.location.search).toString() !== searchParams.toString()) return;
+    const requestedProjectId = Number(searchParams.get("project"));
+    if (projects.some((project) => project.id === requestedProjectId) && requestedProjectId !== selectedProjectId) return;
+    const requestedDocumentId = Number(searchParams.get("document"));
+    // A valid deep link/back navigation takes precedence over the local default.
+    if (visibleDocuments.some((document) => document.id === requestedDocumentId)) return;
     if (visibleDocuments.length === 0) {
       if (selectedDocumentId !== null) {
         setSelectedDocumentId(null);
@@ -1365,7 +1396,9 @@ export default function AnnotatorWorkspace({
     ) {
       setSelectedDocumentId(visibleDocuments[0].id);
     }
-  }, [selectedAnnotatorId, selectedDocumentId, setSelectedDocumentId, visibleDocuments]);
+    const documentId = visibleDocuments.find((document) => document.id === selectedDocumentId)?.id ?? visibleDocuments[0].id;
+    updateSearch({ project: selectedProjectId, document: documentId, assignment: null }, "replace");
+  }, [projects, searchParams, selectedAnnotatorId, selectedDocumentId, selectedProjectId, setSelectedDocumentId, updateSearch, visibleDocuments]);
 
   useEffect(() => {
     const firstSpanTask = spanTasks[0] ?? null;
@@ -1640,7 +1673,7 @@ export default function AnnotatorWorkspace({
     }
 
     await runMutation(async () => {
-      const created = await createAnnotation({
+      const created = await createAnnotationRecord({
         project_id: activeWorkbench.project.id,
         document_id: activeWorkbench.document.id,
         annotation_type: annotationType,
@@ -1662,13 +1695,13 @@ export default function AnnotatorWorkspace({
       setPendingSelection(null);
       window.getSelection()?.removeAllRanges();
     }, "Unable to create annotation", tasksByType.get(annotationType)?.id ?? null);
-  }, [activeWorkbench, addWorkbenchAnnotation, annotationGuidelineVersionId, annotationStructureVersionId, pendingSelection, runMutation, selectedAnnotatorId, setError, tasksByType]);
+  }, [createAnnotationRecord, activeWorkbench, addWorkbenchAnnotation, annotationGuidelineVersionId, annotationStructureVersionId, pendingSelection, runMutation, selectedAnnotatorId, setError, tasksByType]);
 
   async function relabelSpan(annotationId: number, nextLabel: string): Promise<void> {
     const annotation = spanById.get(annotationId);
     const taskId = annotation ? tasksByType.get(annotation.annotation_type)?.id : null;
     await runMutation(async () => {
-      const updated = await updateAnnotation(annotationId, { label: nextLabel });
+      const updated = await updateAnnotationRecord(annotationId, { label: nextLabel });
       patchWorkbenchAnnotation(updated);
       setActiveSpanLabel(nextLabel);
       setSpanMenu(null);
@@ -1688,7 +1721,7 @@ export default function AnnotatorWorkspace({
     const taskId = annotation ? tasksByType.get(annotation.annotation_type)?.id : null;
 
     await runMutation(async () => {
-      await deleteAnnotation(annotationId);
+      await deleteAnnotationRecord(annotationId);
       removeWorkbenchAnnotations([annotationId]);
       setSpanMenu(null);
       setSelectedAnnotationId(null);
@@ -1696,11 +1729,11 @@ export default function AnnotatorWorkspace({
       setRelationChoice(null);
       setRelationMenu(null);
     }, "Unable to delete annotation", taskId);
-  }, [correctionLockedIds, relationLockedIds, removeWorkbenchAnnotations, runMutation, setError, spanById, tasksByType]);
+  }, [deleteAnnotationRecord, correctionLockedIds, relationLockedIds, removeWorkbenchAnnotations, runMutation, setError, spanById, tasksByType]);
 
   async function deleteRelation(annotationId: number): Promise<void> {
     await runMutation(async () => {
-      await deleteAnnotation(annotationId);
+      await deleteAnnotationRecord(annotationId);
       removeWorkbenchAnnotations([annotationId]);
       setRelationMenu(null);
       if (hoveredRelationId === annotationId) {
@@ -1711,7 +1744,7 @@ export default function AnnotatorWorkspace({
 
   async function relabelRelation(annotationId: number, nextLabel: string): Promise<void> {
     await runMutation(async () => {
-      const updated = await updateAnnotation(annotationId, { label: nextLabel });
+      const updated = await updateAnnotationRecord(annotationId, { label: nextLabel });
       patchWorkbenchAnnotation(updated);
       setRelationMenu(null);
     }, "Unable to update relation", activeRelationTask?.id ?? null);
@@ -1719,7 +1752,7 @@ export default function AnnotatorWorkspace({
 
   async function swapRelationDirection(relation: Annotation): Promise<void> {
     await runMutation(async () => {
-      const updated = await updateAnnotation(relation.id, {
+      const updated = await updateAnnotationRecord(relation.id, {
         head_annotation_id: relation.tail_annotation_id,
         tail_annotation_id: relation.head_annotation_id,
       });
@@ -1738,7 +1771,7 @@ export default function AnnotatorWorkspace({
     }
 
     await runMutation(async () => {
-      const created = await createAnnotation({
+      const created = await createAnnotationRecord({
         project_id: activeWorkbench.project.id,
         document_id: activeWorkbench.document.id,
         annotation_type: "relation",
@@ -1756,7 +1789,7 @@ export default function AnnotatorWorkspace({
       setRelationSourceId(null);
       setRelationChoice(null);
     }, "Unable to create relation", activeRelationTask?.id ?? null);
-  }, [activeRelationTask, activeWorkbench, addWorkbenchAnnotation, annotationGuidelineVersionId, annotationStructureVersionId, relationChoice, runMutation, selectedAnnotatorId, setError]);
+  }, [createAnnotationRecord, activeRelationTask, activeWorkbench, addWorkbenchAnnotation, annotationGuidelineVersionId, annotationStructureVersionId, relationChoice, runMutation, selectedAnnotatorId, setError]);
 
   async function setDocumentLabel(labelName: string): Promise<void> {
     if (!activeWorkbench || !docLabelTask) {
@@ -1769,17 +1802,25 @@ export default function AnnotatorWorkspace({
 
     const active = docLabelAnnotations.find((annotation) => annotation.label === labelName);
     await runMutation(async () => {
+      if (annotationApi) {
+        const created = await annotationApi.setDocumentLabel(activeWorkbench.document.id, labelName);
+        setWorkbench((current) => current && current.document.id === created.document_id ? {
+          ...current,
+          annotations: [created, ...current.annotations.filter((item) => item.annotation_type !== "doc_label")],
+        } : current);
+        return;
+      }
       if (active) {
-        await deleteAnnotation(active.id);
+        await deleteAnnotationRecord(active.id);
         removeWorkbenchAnnotations([active.id]);
         return;
       }
 
       const previous = docLabelAnnotations.map((annotation) => annotation.id);
       for (const annotationId of previous) {
-        await deleteAnnotation(annotationId);
+        await deleteAnnotationRecord(annotationId);
       }
-      const created = await createAnnotation({
+      const created = await createAnnotationRecord({
         project_id: activeWorkbench.project.id,
         document_id: activeWorkbench.document.id,
         annotation_type: docLabelTask.annotation_type,
@@ -1816,7 +1857,7 @@ export default function AnnotatorWorkspace({
     const existing = sentenceAnnotation(range);
     await runMutation(async () => {
       if (existing) {
-        await deleteAnnotation(existing.id);
+        await deleteAnnotationRecord(existing.id);
       }
       if (labelName === null) {
         if (existing) {
@@ -1826,7 +1867,7 @@ export default function AnnotatorWorkspace({
         return;
       }
 
-      const created = await createAnnotation({
+      const created = await createAnnotationRecord({
         project_id: activeWorkbench.project.id,
         document_id: activeWorkbench.document.id,
         annotation_type: sentenceTask.annotation_type,
@@ -1886,7 +1927,7 @@ export default function AnnotatorWorkspace({
     const finishedAssignmentId = selectedSubmissionAssignment?.id ?? null;
     const finishedDocumentId = activeWorkbench.document.id;
     await runMutation(async () => {
-      await createSubmission(selectedProjectId, activeWorkbench.document.id, {
+      await submitAnnotationRecord(selectedProjectId, activeWorkbench.document.id, {
         annotator_id: selectedAnnotatorId,
         assignment_id: finishedAssignmentId,
       });
@@ -1917,7 +1958,7 @@ export default function AnnotatorWorkspace({
     setBusy(true);
     setError(null);
     try {
-      await reopenPersonalTaskAssignment(
+      await reopenAnnotationRecord(
         selectedProjectId,
         selectedSubmissionAssignment.id,
       );
@@ -1938,13 +1979,16 @@ export default function AnnotatorWorkspace({
   }
 
   function selectDocument(documentId: number, nextTab: AnnotatorTab = activeTab): void {
+    if (busy || saveStatus === "saving") return;
     setRecentlyFinished(null);
+    setSubmissionAssignmentId(null);
     setSelectedDocumentId(documentId);
     setActiveTab(nextTab);
     setWorkspacePane("document");
     updateSearch(
       {
         document: documentId,
+        assignment: null,
         view: nextTab,
         pane: "document",
       },
@@ -2370,7 +2414,10 @@ export default function AnnotatorWorkspace({
     <div
       className="aw"
       data-density="balanced"
+      data-view={activeTab}
+      data-embedded={Boolean(annotationApi)}
     >
+      {!annotationApi || activeTab === "annotate" ? (
       <div className="aw-tabs-row">
         {allowAssignmentlessSubmit ? (
           <nav className="aw-tabs" aria-label="Personal work navigation">
@@ -2378,7 +2425,7 @@ export default function AnnotatorWorkspace({
               <button
                 className="aw-tab"
                 type="button"
-                onClick={() => changeView("progress")}
+                onClick={() => onBackToMyWork ? onBackToMyWork() : changeView("progress")}
               >
                 Back to My Work
                 <span className="aw-tab-badge">{documentBadge}</span>
@@ -2414,6 +2461,10 @@ export default function AnnotatorWorkspace({
         )}
 
         <div className="aw-context">
+          {annotationApi ? <>
+            <span className="aw-project-context">{selectedProject?.name}</span>
+            <span>Paper {Math.max(0, visibleDocuments.findIndex((document) => document.id === selectedDocumentId)) + 1} of {visibleDocuments.length}</span>
+          </> : <>
           <select
             aria-label="Project"
             className="aw-project-select"
@@ -2459,6 +2510,8 @@ export default function AnnotatorWorkspace({
               </span>
             </>
           )}
+          </>}
+          {annotationApi && selectedDocument ? <span className="aw-pmid">PMID {externalId(selectedDocument)}</span> : null}
           <span
             className={cx("aw-save-pill", saveStatus)}
             role="status"
@@ -2470,7 +2523,7 @@ export default function AnnotatorWorkspace({
               ? "Saving…"
               : saveStatus === "error"
                 ? "Save failed"
-                : "Saved"}
+                : annotationApi ? "Changes saved" : "Saved"}
           </span>
         </div>
 
@@ -2479,10 +2532,10 @@ export default function AnnotatorWorkspace({
             <>
               {!isPersonalReview ? (
                 <>
-                  <button type="button" onClick={() => moveDocument(-1)} disabled={busy || visibleDocuments.length <= 1}>
+                  <button type="button" onClick={() => moveDocument(-1)} disabled={busy || saveStatus === "saving" || visibleDocuments.length <= 1 || selectedDocumentId === visibleDocuments[0]?.id}>
                     Prev
                   </button>
-                  <button type="button" onClick={() => moveDocument(1)} disabled={busy || visibleDocuments.length <= 1}>
+                  <button type="button" onClick={() => moveDocument(1)} disabled={busy || saveStatus === "saving" || visibleDocuments.length <= 1 || selectedDocumentId === visibleDocuments[visibleDocuments.length - 1]?.id}>
                     Next
                   </button>
                 </>
@@ -2521,9 +2574,9 @@ export default function AnnotatorWorkspace({
               ) : null}
               {isPersonalReview ? (
                 <>
-                  <button type="button" onClick={() => changeView("progress")}>
+                  {!annotationApi ? <button type="button" onClick={() => changeView("progress")}>
                     Back to My Work
-                  </button>
+                  </button> : null}
                   {selectedSubmissionAssignment?.status === "submitted" ? (
                     <button
                       type="button"
@@ -2578,8 +2631,9 @@ export default function AnnotatorWorkspace({
           ) : null}
         </div>
       </div>
+      ) : null}
 
-      <main id="main-content" className="aw-main" tabIndex={-1}>
+      <WorkspaceMain id={annotationApi ? undefined : "main-content"} className="aw-main" tabIndex={-1}>
       {activeTab === "progress" ? (
           <div
             className="aw-progress"
@@ -2594,27 +2648,29 @@ export default function AnnotatorWorkspace({
               <div className={cx("aw-progress-head", allowAssignmentlessSubmit && "personal")}>
                 <div>
                   <h1>{allowAssignmentlessSubmit ? "My Work" : "My Progress"}</h1>
+                  {overviewControls ?? (
                   <p>
                     {allowAssignmentlessSubmit
                       ? personalNextDetail
                       : `${selectedProject?.name ?? "Project"} - ${completedDocumentCount} of ${progressTotal} documents done`}
                   </p>
+                  )}
                 </div>
                 <div className="aw-progress-head-actions">
                   {allowAssignmentlessSubmit ? (
-                    selectedProject ? (
+                    selectedProject && (!annotationApi || canManageTasks) ? (
                       <a
                         className="aw-secondary-action"
-                        href={`/projects/${selectedProject.id}/overview`}
+                        href={`/projects/${selectedProject.id}/${annotationApi ? "tasks" : "overview"}`}
                         onClick={(event) => {
                           if (!shouldHandleSpaClick(event)) {
                             return;
                           }
                           event.preventDefault();
-                          onOpenProjectTab?.("overview");
+                          onOpenProjectTab?.(annotationApi ? "tasks" : "overview");
                         }}
                       >
-                        Project setup
+                        {annotationApi ? "Manage tasks" : "Project setup"}
                       </a>
                     ) : null
                   ) : null}
@@ -2634,12 +2690,19 @@ export default function AnnotatorWorkspace({
                         : selectedDocumentId === null || !selectedAnnotatorId
                     }
                   >
-                    {allowAssignmentlessSubmit ? personalNextButton : "Resume annotating"}
+                    {annotationApi && personalHomeState === "ready"
+                      ? completedDocumentCount > 0 || progressCounts.partial > 0 ? "Continue annotating" : "Start annotating"
+                      : allowAssignmentlessSubmit ? personalNextButton : "Resume annotating"}
                   </button>
                 </div>
               </div>
 
-              <div className="aw-stat-grid">
+              {annotationApi ? <div className="paper-progress-summary" aria-label="Paper completion">
+                <span><strong>{completedDocumentCount} / {progressTotal}</strong> papers complete</span>
+                <span><strong>{progressCounts.partial}</strong> in progress</span>
+                <span><strong>{progressCounts.todo}</strong> to do</span>
+                <small>A paper is complete when all its assigned tasks are submitted.</small>
+              </div> : <div className="aw-stat-grid">
                 <article className="aw-stat-card">
                   <span>{allowAssignmentlessSubmit ? "Documents" : "Documents done"}</span>
                   <strong>
@@ -2652,11 +2715,11 @@ export default function AnnotatorWorkspace({
                   </em>
                 </article>
                 <article className="aw-stat-card">
-                  <span>{allowAssignmentlessSubmit ? "Tasks" : "Annotations on document"}</span>
+                  <span>{allowAssignmentlessSubmit ? annotationApi ? "Ready to annotate" : "Tasks" : "Annotations on document"}</span>
                   {allowAssignmentlessSubmit ? (
                     <>
                       <strong>{enabledProjectTaskCount}</strong>
-                      <em>enabled tasks</em>
+                      <em>{annotationApi ? "tasks shown in this editor" : "enabled tasks"}</em>
                     </>
                   ) : (
                     <>
@@ -2683,7 +2746,9 @@ export default function AnnotatorWorkspace({
                     </>
                   )}
                 </article>
-              </div>
+              </div>}
+
+              {taskInventory}
 
               {roundContexts.length ? (
                 <ActiveRoundQueue
@@ -2692,17 +2757,17 @@ export default function AnnotatorWorkspace({
                 />
               ) : null}
 
-              <div className="aw-progress-grid">
+              <div className={cx("aw-progress-grid", annotationApi && "paper-progress-grid")}>
                 <section className="aw-panel aw-batch-panel">
                   <h2>
                     {allowAssignmentlessSubmit ? "Document queue" : "Your batch"}{" "}
                     <span>{visibleDocuments.length} documents</span>
                   </h2>
-                  <p>
+                  {!annotationApi ? <p>
                     {allowAssignmentlessSubmit
                       ? selectedProject?.name ?? "No project selected"
                       : "Pick up where you left off, or jump to any document."}
-                  </p>
+                  </p> : null}
                 <div
                   className="aw-meter"
                   role="progressbar"
@@ -2755,6 +2820,7 @@ export default function AnnotatorWorkspace({
                             className={cx("aw-progress-doc", selected && "selected")}
                             key={documentItem.id}
                             type="button"
+                            disabled={busy || saveStatus === "saving"}
                             onClick={() =>
                               selectDocument(
                                 documentItem.id,
@@ -2763,11 +2829,19 @@ export default function AnnotatorWorkspace({
                             }
                           >
                             <span className="aw-doc-check">
-                              {selected ? "OK" : String(index + 1).padStart(2, "0")}
+                              {String(index + 1).padStart(2, "0")}
                             </span>
                             <span className="aw-doc-info">
                               <strong>{documentTitle(documentItem)}</strong>
                               <small>{externalId(documentItem)}</small>
+                              {annotationApi ? <span className="paper-document-tasks">{tasks.map((task) => {
+                                const assignment = docAssignments.find((item) => item.task_id === task.id);
+                                if (!assignment) return null;
+                                const submitted = DONE_STATUSES.has(assignment.status);
+                                return <span key={task.id} data-status={submitted ? "submitted" : assignment.status === "in_progress" ? "draft" : "todo"}>
+                                  {task.display_name}: {submitted ? "Submitted" : assignment.status === "in_progress" ? "Draft" : "To do"}
+                                </span>;
+                              })}</span> : null}
                             </span>
                             <span className="aw-mini-status">
                               {allowAssignmentlessSubmit
@@ -2784,7 +2858,7 @@ export default function AnnotatorWorkspace({
                   </div>
                 </section>
 
-                <section className="aw-panel aw-feed">
+                {!annotationApi ? <section className="aw-panel aw-feed">
                   <h2>{allowAssignmentlessSubmit ? "Recent annotations" : "Recent activity"}</h2>
                   <p>
                     {allowAssignmentlessSubmit
@@ -2821,7 +2895,7 @@ export default function AnnotatorWorkspace({
                       No recent annotation activity is available.
                     </p>
                   ) : null}
-                </section>
+                </section> : null}
               </div>
           </div>
         </div>
@@ -2894,6 +2968,7 @@ export default function AnnotatorWorkspace({
                     className={cx("aw-queue-row", selectedDocumentId === documentItem.id && "active")}
                     key={documentItem.id}
                     type="button"
+                    disabled={busy || saveStatus === "saving"}
                     aria-current={selectedDocumentId === documentItem.id ? "true" : undefined}
                     aria-label={`${documentTitle(documentItem)} · ${personalDocumentStatusLabel(status)}`}
                     onClick={() => selectDocument(documentItem.id, "annotate")}
@@ -2905,9 +2980,9 @@ export default function AnnotatorWorkspace({
                 );
               })}
             </div>
-            <button className="aw-queue-manage" type="button" onClick={() => changeView("progress")}>
+            {!annotationApi ? <button className="aw-queue-manage" type="button" onClick={() => changeView("progress")}>
               {allowAssignmentlessSubmit ? "View My Work queue" : "Manage queue in My Progress"}
-            </button>
+            </button> : null}
           </aside>
           ) : null}
 
@@ -2928,7 +3003,7 @@ export default function AnnotatorWorkspace({
             }}
           >
             <h2 className="aw-pane-heading">Tools</h2>
-            <section className="aw-label-group aw-tool-switch" aria-label="Annotation tool">
+            {!annotationApi ? <section className="aw-label-group aw-tool-switch" aria-label="Annotation tool">
               <h3>Annotation tool</h3>
               <button
                 className={cx("aw-label-row", annotationTool === "legacy" && "active")}
@@ -2949,7 +3024,7 @@ export default function AnnotatorWorkspace({
                 <span>Evidence blocks</span>
                 {annotationTool === "evidence" ? <b>ON</b> : null}
               </button>
-            </section>
+            </section> : null}
             {tasks.length === 0 ? <p className="aw-empty">No enabled annotation tasks.</p> : null}
             {tasks.map((task) => {
               const labels = displayLabelsForTask(task);
@@ -3090,7 +3165,7 @@ export default function AnnotatorWorkspace({
             id="aw-pane-document"
             className={cx(
               "aw-center",
-              !legacyAnnotationEditable && selectedDocument && "has-read-state",
+              (!legacyAnnotationEditable || isPersonalReview) && selectedDocument && "has-read-state",
               isPersonalReview && "review-mode",
             )}
             role="tabpanel"
@@ -3115,7 +3190,7 @@ export default function AnnotatorWorkspace({
               />
             ) : (
               <>
-            {!legacyAnnotationEditable && selectedDocument ? (
+            {(!legacyAnnotationEditable || isPersonalReview) && selectedDocument ? (
               <header className="aw-read-state" role="status">
                 <strong>
                   {allowAssignmentlessSubmit
@@ -3293,7 +3368,7 @@ export default function AnnotatorWorkspace({
                 Sentences: <strong>{sentenceLabelAnnotations.length}/{sentenceRanges.length}</strong>
               </span>
               <span className="right">
-                {isPersonalReview ? (
+                {isPersonalReview && !annotationEditable ? (
                   "Saved snapshot · review only"
                 ) : (
                   <>
@@ -3730,7 +3805,7 @@ export default function AnnotatorWorkspace({
           </div>
         </div>
       )}
-      </main>
+      </WorkspaceMain>
 
       {submissionDialogOpen &&
       selectedDocument &&

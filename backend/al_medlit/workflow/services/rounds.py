@@ -13,6 +13,7 @@ from al_medlit.core.exceptions import (
     NotFoundError,
     ValidationError,
 )
+from al_medlit.corpus.models import Document
 from al_medlit.workflow import models, schemas
 from al_medlit.workspace.models import WorkspaceMember
 
@@ -24,6 +25,7 @@ from .common import (
     _project,
     _require_actor_role,
     _scoped,
+    _validate_task_input,
     _validate_task_output,
 )
 from .workspace_training import (
@@ -80,6 +82,104 @@ def _lock_and_validate_active_round_annotators(
     inactive_or_missing = sorted(set(annotator_user_ids) - active_annotator_ids)
     if inactive_or_missing:
         raise ValidationError("All round annotators must be active users")
+
+
+def _uses_document_entities(task: models.TaskVersion) -> bool:
+    return task.annotation_ui.get("preset") == "document_entities"
+
+
+def _document_entities_text(task: models.TaskVersion, item: models.DatasetItem) -> str:
+    if task.task_kind != "span_extraction":
+        raise ValidationError("Paper entity annotation requires a span-extraction task version")
+    if (
+        task.annotation_ui.get("offset_unit") != "utf16_code_unit"
+        or task.annotation_ui.get("end_offset") != "exclusive"
+    ):
+        raise ValidationError(
+            "Paper entity annotation must specify UTF-16 offsets with exclusive ends; "
+            "create a compatible task version"
+        )
+    allowed_labels = task.label_rules.get("values", [])
+    if not isinstance(allowed_labels, list) or any(
+        not isinstance(label, str) or not label.strip() for label in allowed_labels
+    ):
+        raise ValidationError("Paper entity task labels must be a list of nonempty names")
+    text = item.payload.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise ValidationError(
+            f"Source item {item.stable_key!r} has no paper text; choose a text source dataset"
+        )
+    _validate_task_input(task, item.payload, label=f"Source item {item.stable_key!r}")
+    return text
+
+
+def _validate_document_entity_source(
+    db: Session,
+    task: models.TaskVersion,
+    dataset: models.DatasetVersion,
+    selection_set: models.SelectionSetVersion | None,
+) -> None:
+    query = db.query(models.DatasetItem).filter(
+        models.DatasetItem.project_id == task.project_id,
+        models.DatasetItem.dataset_version_id == dataset.id,
+    )
+    if selection_set is not None:
+        selected_ids = {item["dataset_item_id"] for item in selection_set.items}
+        query = query.filter(models.DatasetItem.id.in_(selected_ids))
+    items = query.all()
+    if selection_set is not None and {item.id for item in items} != selected_ids:
+        raise ValidationError("Selected papers must belong to the pinned source dataset")
+    document_ids: set[int] = set()
+    for item in items:
+        _document_entities_text(task, item)
+        document_id = item.payload.get("document_id")
+        if document_id is not None:
+            if type(document_id) is not int or document_id <= 0:
+                raise ValidationError("Paper source document IDs must be positive integers")
+            document_ids.add(document_id)
+    if document_ids:
+        allowed_ids = {
+            document_id
+            for (document_id,) in db.query(Document.id)
+            .filter(Document.project_id == task.project_id, Document.id.in_(document_ids))
+            .all()
+        }
+        if allowed_ids != document_ids:
+            raise ValidationError("All referenced paper documents must belong to this project")
+
+
+def _validate_document_entity_output(
+    task: models.TaskVersion, item: models.DatasetItem, output: object,
+) -> None:
+    text = _document_entities_text(task, item)
+    entities = output.get("entities") if isinstance(output, dict) else None
+    if not isinstance(entities, list):
+        raise ValidationError("Paper entity annotations must contain an entities array")
+
+    # Browser selections use UTF-16 code units. Pin that convention in the task
+    # instead of borrowing the legacy corpus's Unicode code-point offsets.
+    # Only complete Unicode characters are valid selection boundaries.
+    boundaries = {0}
+    cursor = 0
+    for character in text:
+        cursor += 2 if ord(character) > 0xFFFF else 1
+        boundaries.add(cursor)
+    allowed_labels = task.label_rules.get("values", [])
+    for index, entity in enumerate(entities, start=1):
+        if not isinstance(entity, dict):
+            raise ValidationError(f"Entity {index} must contain start, end, and label")
+        start, end, label = entity.get("start"), entity.get("end"), entity.get("label")
+        if type(start) is not int or type(end) is not int or start >= end:
+            raise ValidationError(f"Entity {index} must have integer offsets with start < end")
+        if start not in boundaries or end not in boundaries:
+            raise ValidationError(
+                f"Entity {index} offsets must stay within the pinned paper text "
+                "and cannot split a Unicode character"
+            )
+        if not isinstance(label, str) or not label.strip():
+            raise ValidationError(f"Entity {index} must have a nonempty label")
+        if (allowed_labels or task.label_rules.get("closed_set")) and label not in allowed_labels:
+            raise ValidationError(f"Entity {index} label {label!r} is not allowed by this task")
 
 
 
@@ -192,6 +292,9 @@ def create_annotation_round(
             raise ValidationError("Feedback set must belong to the annotation round's exact cycle")
     elif data.assistance_policy != "blind":
         raise ValidationError("Assisted annotation rounds require a pinned feedback set version")
+
+    if _uses_document_entities(task):
+        _validate_document_entity_source(db, task, dataset, selection_set)
 
     sequence = _next_sequence(
         db,
@@ -699,6 +802,13 @@ def create_annotation_decision(
         data.output,
         label="Annotation decision",
     )
+    if _uses_document_entities(task_version):
+        source_item = _scoped(
+            db, models.DatasetItem, item.dataset_item_id, data.project_id, "Source item"
+        )
+        if source_item.dataset_version_id != annotation_round.dataset_version_id:
+            raise ValidationError("The paper must belong to the round's pinned source dataset")
+        _validate_document_entity_output(task_version, source_item, data.output)
     if (
         not annotation_round.open_to_all_annotators
         and actor.id not in annotation_round.annotator_user_ids
@@ -776,6 +886,8 @@ def create_round_submission(
         )
         for decision_id in data.decision_ids
     ]
+    if len({decision.round_item_id for decision in decisions}) != len(decisions):
+        raise ValidationError("A submission must contain only one current decision per item")
     for decision in decisions:
         item = _scoped(db, models.RoundItem, decision.round_item_id, data.project_id, "Round item")
         if (

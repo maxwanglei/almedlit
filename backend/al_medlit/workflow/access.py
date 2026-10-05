@@ -28,7 +28,7 @@ PROJECT_MODULES = (
 )
 
 _WORKSPACE_REQUIREMENTS: dict[str, tuple[str, ...]] = {
-    "data": ("annotation", "training", "active_learning", "co_learning", "lineage"),
+    "data": ("annotation", "training", "inference", "active_learning", "co_learning", "lineage"),
     "annotate": ("annotation",),
     "learning": ("active_learning", "co_learning"),
     "train": ("training",),

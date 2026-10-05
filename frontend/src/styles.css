@@ -1365,6 +1365,24 @@
   white-space: nowrap;
 }
 
+.platform-prediction-pagination {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  white-space: normal;
+  margin-top: 12px;
+}
+
+.platform-prediction-pagination > * {
+  max-width: 100%;
+}
+
+.platform-prediction-review-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 12px 0;
+}
+
 .platform-cycle-summary,
 .platform-cycle-meta,
 .platform-storage-summary,
@@ -5409,6 +5427,119 @@ select:disabled {
 }
 
 /* Annotator workspace */
+.paper-round-workspace {
+  min-width: 0;
+}
+
+/* Bound the embedded editor so a real corpus scrolls inside its queue and paper
+   panes instead of expanding the page to the height of every imported paper. */
+.paper-round-workspace > .aw[data-view="annotate"] {
+  height: max(560px, calc(100dvh - var(--chrome-topbar-height)));
+  flex: none;
+}
+
+.aw[data-embedded="true"][data-view="progress"] {
+  display: block;
+}
+
+.aw[data-embedded="true"] .aw-progress {
+  padding: 28px 32px 48px;
+  overflow: visible;
+}
+
+.aw[data-embedded="true"] .aw-progress-wrap {
+  max-width: 1240px;
+  display: block;
+}
+
+.paper-overview-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.paper-overview-controls label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.paper-overview-controls select {
+  min-width: 0;
+  max-width: 360px;
+  min-height: 40px;
+  padding: 8px 32px 8px 12px;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.paper-progress-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 24px;
+  margin-bottom: 20px;
+  color: var(--ink-2);
+  font-size: 14px;
+}
+
+.paper-progress-summary strong { color: var(--ink); }
+.paper-progress-summary small { flex-basis: 100%; color: var(--muted); font-size: 13px; }
+
+.aw .paper-task-inventory { padding: 16px 20px; margin-bottom: 20px; }
+.paper-task-inventory > header { margin-bottom: 12px; }
+.paper-task-inventory > header h2 { justify-content: flex-start; gap: 8px; }
+.paper-task-inventory > header h2 span { padding: 1px 7px; border-radius: 5px; background: var(--bg); }
+.paper-task-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 24px; }
+.paper-task-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
+.paper-task-summary { min-width: 0; }
+.paper-task-summary h3 { margin: 0 0 4px; font-size: 14px; overflow-wrap: anywhere; }
+.paper-task-status { color: var(--muted); font-size: 13px; }
+.paper-task-status[data-status="ready"] { color: var(--done); }
+.paper-task-summary p { margin: 4px 0 0; font-size: 13px; }
+.paper-task-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.paper-task-action { display: inline-flex; align-items: center; min-height: 40px; max-width: 180px; padding: 6px 10px; color: var(--ink); background: var(--paper); border: 1px solid var(--line); border-radius: 7px; font-size: 13px; text-decoration: none; }
+.paper-task-action:hover { background: var(--bg); }
+.paper-task-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.aw .paper-progress-grid { grid-template-columns: minmax(0, 1fr); }
+.paper-document-tasks { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 5px; color: var(--muted); font-size: 12px; }
+.paper-document-tasks [data-status="submitted"] { color: var(--done); }
+.paper-document-tasks [data-status="draft"] { color: var(--partial); }
+.aw[data-embedded="true"] .aw-context .aw-project-context { margin-right: auto; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aw[data-embedded="true"] .aw-queue-row { min-height: 44px; }
+.aw[data-embedded="true"] .aw-label-row { min-height: 40px; padding: 6px; gap: 6px; }
+.aw[data-embedded="true"] .aw-label-row > span { white-space: normal; overflow-wrap: anywhere; }
+.aw[data-embedded="true"] .aw-sentence { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+.aw[data-embedded="true"] .aw-sentence-meta { padding-top: 0; }
+.aw[data-embedded="true"] .aw-reading { --pad-x: 28px; }
+.paper-empty-work { max-width: 1240px; margin: 0 auto; padding: 28px 32px; }
+.paper-empty-work .paper-task-inventory { margin-top: 20px; }
+
+@media (min-width: 1121px) {
+  .aw[data-embedded="true"] .aw-annotate {
+    grid-template-columns: minmax(140px, 164px) minmax(176px, 200px) minmax(320px, 1fr) minmax(248px, 280px);
+  }
+}
+
+@media (max-width: 700px) {
+  .aw[data-embedded="true"] .aw-progress { padding: 20px 16px 32px; }
+  .aw[data-embedded="true"] .aw-progress-head { align-items: stretch; }
+  .paper-task-list { grid-template-columns: minmax(0, 1fr); }
+  .paper-task-row + .paper-task-row { padding-top: 12px; border-top: 1px solid var(--line); }
+  .paper-task-action { min-height: 44px; max-width: 140px; }
+  .paper-overview-controls label { width: 100%; }
+  .paper-overview-controls select { width: 100%; flex: 1; }
+  .paper-progress-summary { gap: 8px 16px; }
+  .aw[data-embedded="true"] .aw-context .aw-project-context { max-width: 100%; flex-basis: 100%; }
+  .paper-empty-work { padding: 20px 16px; }
+}
+
 .aw {
   --bg: var(--color-background-body, #f5f5f5);
   --paper: var(--color-background-card, #ffffff);

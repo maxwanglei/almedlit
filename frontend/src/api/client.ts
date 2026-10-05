@@ -171,6 +171,11 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+export async function requestBlob(path: string): Promise<Blob> {
+  const response = await requestResponse(path);
+  return response.blob();
+}
+
 export type AssignmentScope = "mine" | "all";
 
 export function listProjects(workspaceId?: number | null): Promise<Project[]> {

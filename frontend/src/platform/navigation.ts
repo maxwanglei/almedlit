@@ -6,6 +6,7 @@ import type { ProjectModule } from "./types";
 export type ProjectPlatformTab =
   | "overview"
   | "data"
+  | "inference"
   | "tasks"
   | "rounds"
   | "quality"
@@ -61,6 +62,10 @@ export const PROJECT_ROUTE_REGISTRY = [
     requiredCapability: null,
     backendModule: "data",
     releaseState: "released",
+  },
+  {
+    id: "inference", label: "Inference", title: "Inference", level: "project",
+    requiredRoles: PROJECT_ROLES, requiredCapability: "inference", backendModule: "models", releaseState: "released",
   },
   {
     id: "tasks",
@@ -202,6 +207,7 @@ export function projectSupportsSection(
   project: Project,
   tab: ProjectPlatformTab,
 ): boolean {
+  if (tab === "inference") return configuredProjectModules(project).has("data") && configuredProjectModules(project).has("models");
   const module = projectRouteDefinition(tab).backendModule;
   return module === null || configuredProjectModules(project).has(module);
 }

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -12,7 +13,7 @@ import { useState } from "react";
 import { BrowserRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import AnnotatorWorkspace from "@/pages/AnnotatorWorkspace";
+import AnnotatorWorkspace, { type AnnotationMutationAdapter } from "@/pages/AnnotatorWorkspace";
 import type {
   AnnotationWorkbench,
   AnnotationWorkbenchTask,
@@ -176,6 +177,45 @@ function Harness({
       />
     </BrowserRouter>
   );
+}
+
+const classificationTask: AnnotationWorkbenchTask = {
+  ...entityTask,
+  id: 2,
+  annotation_type: "doc_label",
+  display_name: "Paper relevance",
+  labels: [{ name: "Clinical", color: "#4d6e5b", description: null }],
+  annotation_type_spec: { ...entityTask.annotation_type_spec, name: "doc_label", requires_span: false, selection_mode: "document" },
+};
+const navigationDocuments = [documentItem, ...[2, 3].map((id) => ({
+  ...documentItem, id, title: `Paper ${id}`, external_id: `PMID-${id}`, text: `Text for paper ${id}`,
+}))];
+const navigationTasks = [classificationTask, entityTask];
+const navigationProject = { ...project, tasks: navigationTasks };
+const navigationAssignments = navigationDocuments.flatMap((document) => navigationTasks.map((task, index) => ({
+  ...assignment(document.id * 10 + index, document.id === 1 ? "submitted" : "assigned"),
+  task_id: task.id,
+  document_id: document.id,
+})));
+const navigationApi: AnnotationMutationAdapter = {
+  ...mocks,
+  setDocumentLabel: vi.fn(),
+};
+
+function NavigationHarness({ canonical = true, defaultView = "annotate" }: { canonical?: boolean; defaultView?: "progress" | "annotate" }): React.ReactElement {
+  const [documentId, setDocumentId] = useState<number | null>(1);
+  const document = navigationDocuments.find((candidate) => candidate.id === documentId)!;
+  return <BrowserRouter><AnnotatorWorkspace
+    projects={[navigationProject]} selectedProject={navigationProject} selectedProjectId={1}
+    setSelectedProjectId={vi.fn()} documents={navigationDocuments} assignments={navigationAssignments}
+    annotatorId="max" projectProgress={null} selectedDocumentId={documentId} setSelectedDocumentId={setDocumentId}
+    workbench={{ ...workbench, project: navigationProject, document, tasks: navigationTasks,
+      annotation_type_specs: navigationTasks.map((task) => task.annotation_type_spec),
+      assignments: navigationAssignments.filter((item) => item.document_id === documentId) }}
+    setWorkbench={() => undefined} busy={false} setBusy={vi.fn()} setError={vi.fn()}
+    refreshProjectData={async () => undefined} refreshWorkbench={async () => undefined}
+    allowAssignmentlessSubmit annotationApi={canonical ? navigationApi : undefined} defaultView={defaultView}
+  /></BrowserRouter>;
 }
 
 beforeEach(() => {
@@ -397,5 +437,70 @@ describe("AnnotatorWorkspace workspace language", () => {
     expect(
       screen.queryByRole("button", { name: "Edit this paper task" }),
     ).toBeNull();
+  });
+});
+
+describe("paper navigation", () => {
+  it("initializes a bare round URL before advancing, reloading, and going Back", async () => {
+    window.history.replaceState(null, "", "/my-work/rounds/1");
+    const mounted = render(<NavigationHarness />);
+    await waitFor(() => expect(new URLSearchParams(window.location.search).get("document")).toBe("1"));
+    expect(new URLSearchParams(window.location.search).get("assignment")).toBe("10");
+    expect((screen.getByRole("combobox", { name: "Task" }) as HTMLSelectElement).value).toBe("10");
+    fireEvent.click(screen.getByRole("button", { name: "Next document" }));
+    await waitFor(() => expect(new URLSearchParams(window.location.search).get("document")).toBe("2"));
+    mounted.unmount();
+    render(<NavigationHarness />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Paper 2 · To do" }).getAttribute("aria-current")).toBe("true"));
+    expect((screen.getByRole("combobox", { name: "Task" }) as HTMLSelectElement).value).toBe("20");
+    act(() => window.history.back());
+    await waitFor(() => expect(new URLSearchParams(window.location.search).get("document")).toBe("1"));
+    await waitFor(() => expect((screen.getByRole("combobox", { name: "Task" }) as HTMLSelectElement).value).toBe("10"));
+  });
+
+  it("initializes an empty-query My Work page and continues to the next unfinished paper", async () => {
+    window.history.replaceState(null, "", "/my-work");
+    render(<NavigationHarness defaultView="progress" />);
+    expect(screen.getByRole("heading", { name: "My Work" })).toBeTruthy();
+    await waitFor(() => expect(new URLSearchParams(window.location.search).get("document")).toBe("1"));
+    expect(new URLSearchParams(window.location.search).get("assignment")).toBe("10");
+    fireEvent.click(screen.getByRole("button", { name: "Continue annotating" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Paper 2 · To do" }).getAttribute("aria-current")).toBe("true"));
+    expect(new URLSearchParams(window.location.search).get("document")).toBe("2");
+    expect(new URLSearchParams(window.location.search).get("assignment")).toBe("20");
+  });
+
+  it.each([true, false])("moves from a submitted paper through Next document and queue, restoring browser history (canonical=%s)", async (canonical) => {
+    window.history.replaceState(null, "", "/my-work/rounds/1?project=1&document=1&assignment=10&view=annotate");
+    render(<NavigationHarness canonical={canonical} />);
+    fireEvent.click(screen.getByRole("button", { name: "Next document" }));
+    await waitFor(() => expect(new URLSearchParams(window.location.search).get("document")).toBe("2"));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Paper 2 · To do" }).getAttribute("aria-current")).toBe("true"));
+    expect((screen.getByRole("combobox", { name: "Task" }) as HTMLSelectElement).value).toBe("20");
+    expect(new URLSearchParams(window.location.search).get("assignment")).toBe("20");
+
+    fireEvent.click(screen.getByRole("button", { name: "Paper 3 · To do" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Paper 3 · To do" }).getAttribute("aria-current")).toBe("true"));
+    expect(new URLSearchParams(window.location.search).get("document")).toBe("3");
+    expect((screen.getByRole("combobox", { name: "Task" }) as HTMLSelectElement).value).toBe("30");
+
+    act(() => window.history.back());
+    await waitFor(() => expect(new URLSearchParams(window.location.search).get("document")).toBe("2"));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Paper 2 · To do" }).getAttribute("aria-current")).toBe("true"));
+    act(() => window.history.forward());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Paper 3 · To do" }).getAttribute("aria-current")).toBe("true"));
+    expect(mocks.createSubmission).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { requested: 10, resolved: 20 },
+    { requested: 21, resolved: 21 },
+  ])("opens a deep-linked paper with assignment $requested resolved to $resolved", async ({ requested, resolved }) => {
+    window.history.replaceState(null, "", `/my-work/rounds/1?project=1&document=2&assignment=${requested}&view=annotate`);
+    render(<NavigationHarness />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Paper 2 · To do" }).getAttribute("aria-current")).toBe("true"));
+    expect(new URLSearchParams(window.location.search).get("document")).toBe("2");
+    expect((screen.getByRole("combobox", { name: "Task" }) as HTMLSelectElement).value).toBe(String(resolved));
+    expect(new URLSearchParams(window.location.search).get("assignment")).toBe(String(resolved));
   });
 });

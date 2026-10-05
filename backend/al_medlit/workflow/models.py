@@ -1,5 +1,6 @@
 """Persistent models for the canonical learning workflow."""
 
+import secrets
 from datetime import datetime
 
 from sqlalchemy import (
@@ -82,6 +83,7 @@ class Dataset(Base, IntPrimaryKeyMixin, TimestampMixin):
     name: Mapped[str] = mapped_column(String(255))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_type: Mapped[str] = mapped_column(String(40), index=True)
+    purposes: Mapped[list] = mapped_column(JSONType, default=list)
     created_by_user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id"), nullable=True, index=True
     )
@@ -211,6 +213,22 @@ class SplitMap(Base, IntPrimaryKeyMixin, TimestampMixin):
     )
 
 
+class TrainingDataset(Base, IntPrimaryKeyMixin, TimestampMixin):
+    """A named series of immutable prepared training versions."""
+
+    __tablename__ = "training_datasets"
+    __table_args__ = (
+        UniqueConstraint("project_id", "name", name="uq_training_datasets_project_name"),
+    )
+
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    task_version_id: Mapped[int] = mapped_column(ForeignKey("task_versions.id"), index=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True, index=True
+    )
+
+
 class TrainingDatasetVersion(Base, IntPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "training_dataset_versions"
     __table_args__ = (
@@ -219,10 +237,29 @@ class TrainingDatasetVersion(Base, IntPrimaryKeyMixin, TimestampMixin):
             "content_hash",
             name="uq_training_dataset_versions_project_hash",
         ),
+        UniqueConstraint(
+            "training_dataset_id", "version_number", name="uq_training_versions_series_number"
+        ),
+        UniqueConstraint(
+            "project_id", "idempotency_key", name="uq_training_versions_preparation_key"
+        ),
+        CheckConstraint("version_number > 0", name="ck_training_versions_positive_number"),
     )
 
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), index=True)
     name: Mapped[str] = mapped_column(String(255))
+    # Nullable for compatibility with clients that create historical workflow
+    # rows directly. Public preparation and legacy creation APIs always set it.
+    training_dataset_id: Mapped[int | None] = mapped_column(
+        ForeignKey("training_datasets.id"), nullable=True, index=True
+    )
+    version_number: Mapped[int] = mapped_column(Integer, default=1)
+    parent_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("training_dataset_versions.id"), nullable=True, index=True
+    )
+    preparation_manifest: Mapped[dict] = mapped_column(JSONType, default=dict)
+    idempotency_key: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    request_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     dataset_version_id: Mapped[int] = mapped_column(
         ForeignKey("dataset_versions.id"), index=True
     )
@@ -300,7 +337,7 @@ class SelectionRun(Base, IntPrimaryKeyMixin, TimestampMixin):
     strategy: Mapped[str] = mapped_column(String(60), index=True)
     parameters: Mapped[dict] = mapped_column(JSONType, default=dict)
     eligibility_filter: Mapped[dict] = mapped_column(JSONType, default=dict)
-    seed: Mapped[int] = mapped_column(Integer, default=42)
+    seed: Mapped[int] = mapped_column(Integer, default=lambda: secrets.randbits(31))
     status: Mapped[str] = mapped_column(String(30), default="planned", index=True)
     created_by_user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id"), nullable=True, index=True

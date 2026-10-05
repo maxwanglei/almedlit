@@ -5,6 +5,7 @@ from sqlalchemy import event
 
 from al_medlit.auth.models import User
 from al_medlit.core.exceptions import ValidationError
+from al_medlit.core.storage import StoredObject
 from al_medlit.corpus import service as corpus_service
 from al_medlit.corpus.models import DocumentSentence
 from al_medlit.corpus.schemas import DocumentCreate
@@ -39,10 +40,21 @@ class InferenceScope:
     target_version: EvidenceTargetVersion
     sentences: list[DocumentSentence]
     run: InferenceRun
-    window: InferenceWindow
+    window: InferenceWindow | None
 
 
-def _inference_scope(db) -> InferenceScope:
+def _inference_scope(
+    db,
+    *,
+    checkpoint_manifest: dict | None = None,
+    checkpoint_object: StoredObject | None = None,
+    window_config: dict | None = None,
+    decoder_config: dict | None = None,
+    run_status: str = "succeeded",
+    with_window: bool = True,
+) -> InferenceScope:
+    manifest = {"synthetic_mode": True} if checkpoint_manifest is None else checkpoint_manifest
+    model_type = manifest.get("model_type", "evidence_block_sentence_tagger")
     user = User(
         username="candidate-query-reviewer",
         password_hash="unused",
@@ -125,6 +137,11 @@ def _inference_scope(db) -> InferenceScope:
             ("model_checkpoint", "m"),
         )
     ]
+    if checkpoint_object is not None:
+        artifacts[2].storage_key = checkpoint_object.key
+        artifacts[2].content_hash = checkpoint_object.checksum_sha256
+        artifacts[2].content_type = checkpoint_object.content_type
+        artifacts[2].size_bytes = checkpoint_object.size_bytes
     db.add_all(artifacts)
     db.flush()
     snapshot = CorpusSnapshot(
@@ -169,7 +186,7 @@ def _inference_scope(db) -> InferenceScope:
         annotation_set_id=annotation_set.id,
         compute_profile_id=profile.id,
         name="Candidate query experiment",
-        model_type="evidence_block_sentence_tagger",
+        model_type=model_type,
         mode="conditioned",
         target_version_ids=[target_version.id],
         config={},
@@ -190,11 +207,11 @@ def _inference_scope(db) -> InferenceScope:
         project_id=project.id,
         training_job_id=job.id,
         artifact_id=artifacts[2].id,
-        model_type="evidence_block_sentence_tagger",
+        model_type=model_type,
         training_mode="conditioned",
         trained_target_version_ids=[target_version.id],
         max_context_tokens=512,
-        manifest={"synthetic_mode": True},
+        manifest=manifest,
         readiness="ready",
     )
     db.add(checkpoint)
@@ -206,26 +223,28 @@ def _inference_scope(db) -> InferenceScope:
         compute_profile_id=profile.id,
         name="Candidate query run",
         target_version_ids=[target_version.id],
-        window_config={},
-        decoder_config={},
-        status="succeeded",
+        window_config=window_config or {},
+        decoder_config=decoder_config or {},
+        status=run_status,
         idempotency_key="candidate-query-run",
         created_by_user_id=user.id,
     )
     db.add(run)
     db.flush()
-    window = InferenceWindow(
-        run_id=run.id,
-        document_id=document.id,
-        structure_version_id=structure.id,
-        target_version_id=target_version.id,
-        stable_key="candidate-query-window",
-        start_sentence_ordinal=0,
-        end_sentence_ordinal=3,
-        token_count=12,
-        status="pending",
-    )
-    db.add(window)
+    window = None
+    if with_window:
+        window = InferenceWindow(
+            run_id=run.id,
+            document_id=document.id,
+            structure_version_id=structure.id,
+            target_version_id=target_version.id,
+            stable_key="candidate-query-window",
+            start_sentence_ordinal=0,
+            end_sentence_ordinal=3,
+            token_count=12,
+            status="pending",
+        )
+        db.add(window)
     db.commit()
     return InferenceScope(
         user=user,

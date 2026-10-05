@@ -32,7 +32,7 @@ const MODULE_DEPENDENTS: Partial<
 };
 
 const MODULE_CAPABILITIES: Record<ReleasedProjectModule, string[]> = {
-  data: ["annotation", "training", "lineage"],
+  data: ["annotation", "training", "inference", "lineage"],
   annotate: ["annotation"],
   train: ["training"],
   models: ["training", "inference", "lineage"],
@@ -257,7 +257,7 @@ export default function SettingsScreen({
         <dl className="platform-policy-grid">
           <div>
             <dt>Annotation schema</dt>
-            <dd>{project.tasks.length} task definitions · {validationMode}</dd>
+            <dd>{project.tasks.length + data.taskDefinitions.length} task definitions · {validationMode}</dd>
           </div>
           <div>
             <dt>Corpus</dt>

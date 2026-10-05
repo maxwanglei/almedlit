@@ -257,6 +257,7 @@ export default function TrainingScreen({
   showRecentRuns = true,
   onOpenRun,
   initialDatasetId,
+  initialTrainingDatasetVersionId,
   initialEnvironmentId,
   initialStoragePolicyId,
   initialEvaluationSplit,
@@ -271,6 +272,7 @@ export default function TrainingScreen({
   showRecentRuns?: boolean;
   onOpenRun?: (runId: number) => void;
   initialDatasetId?: number | null;
+  initialTrainingDatasetVersionId?: number | null;
   initialEnvironmentId?: number | null;
   initialStoragePolicyId?: number | null;
   initialEvaluationSplit?: string | null;
@@ -350,11 +352,11 @@ export default function TrainingScreen({
       .filter((item) => item.training_recipe_id === projectRecipe?.id)
       .sort((left, right) => right.version_number - left.version_number)[0] ?? null;
   const preferredInitialDataset = useMemo(
-    () => resolveInitialTrainingDataset(data, initialDatasetId),
-    [data, initialDatasetId],
+    () => initialTrainingDatasetVersionId ? data.trainingDatasets.find((version) => version.id === initialTrainingDatasetVersionId) : resolveInitialTrainingDataset(data, initialDatasetId),
+    [data, initialDatasetId, initialTrainingDatasetVersionId],
   );
   const requestedDatasetNeedsPreparation =
-    Boolean(initialDatasetId) && preferredInitialDataset === undefined;
+    Boolean(initialDatasetId || initialTrainingDatasetVersionId) && preferredInitialDataset === undefined;
   const requestedDatasetName = data.datasets.find(
     (item) => item.id === initialDatasetId,
   )?.name;
@@ -369,7 +371,7 @@ export default function TrainingScreen({
       const initialTrainingDatasetId =
         preferredInitialDataset !== undefined
           ? preferredInitialDataset.id
-          : initialDatasetId
+          : initialDatasetId || initialTrainingDatasetVersionId
             ? undefined
             : data.trainingDatasets[0]?.id;
       if (initialTrainingDatasetId) {
@@ -390,6 +392,7 @@ export default function TrainingScreen({
     data.taskVersions,
     data.trainingDatasets,
     initialDatasetId,
+    initialTrainingDatasetVersionId,
     preferredInitialDataset,
     requestedDatasetNeedsPreparation,
     storagePolicyId,

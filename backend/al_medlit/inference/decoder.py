@@ -5,6 +5,10 @@ from dataclasses import dataclass
 from typing import Literal
 
 LABELS = ("O", "B", "I")
+DECODER_VERSION = "evidence-block-decoder-v2"
+PROBABILITY_SUM_TOLERANCE = 1e-5
+
+ScoreKind = Literal["logits", "probabilities"]
 
 
 class DecoderError(ValueError):
@@ -14,7 +18,7 @@ class DecoderError(ValueError):
 @dataclass(frozen=True, slots=True)
 class AggregatedSentenceLogits:
     ordinal: int
-    logits: tuple[float, float, float]
+    logits: tuple[float, float, float] | None  # None when the windows held probabilities.
     probabilities: tuple[float, float, float]
     contribution_count: int
 
@@ -59,7 +63,7 @@ class DecoderResult:
     blocks: tuple[DecodedBlock, ...]
     suppressed_blocks: tuple[DecodedBlock, ...]
     sentences: tuple[DecodedSentence, ...]
-    decoder_version: str = "evidence-block-decoder-v1"
+    decoder_version: str = DECODER_VERSION
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,10 +80,15 @@ class DecoderConfig:
 def aggregate_window_logits(
     windows: Iterable[Mapping[int, Sequence[float]]],
     *,
+    score_kind: ScoreKind,
     method: Literal["mean"] = "mean",
 ) -> dict[int, AggregatedSentenceLogits]:
+    # Probability rows (softmax outputs or one-hot hard labels) are averaged as
+    # they are; softmaxing them again would cap every class at e / (e + 2).
     if method != "mean":
         raise DecoderError(f"Unsupported overlap aggregation method '{method}'")
+    if score_kind not in ("logits", "probabilities"):
+        raise DecoderError(f"Unsupported sentence score kind '{score_kind}'")
     values: dict[int, list[tuple[float, float, float]]] = defaultdict(list)
     for window in windows:
         for ordinal, logits in window.items():
@@ -88,6 +97,10 @@ def aggregate_window_logits(
             converted = tuple(float(value) for value in logits)
             if not all(math.isfinite(value) for value in converted):
                 raise DecoderError("Sentence logits must be finite")
+            if score_kind == "probabilities" and (
+                min(converted) < 0 or abs(sum(converted) - 1.0) > PROBABILITY_SUM_TOLERANCE
+            ):
+                raise DecoderError("Sentence probabilities must be non-negative and sum to one")
             values[int(ordinal)].append(converted)
     aggregated: dict[int, AggregatedSentenceLogits] = {}
     for ordinal, contributions in values.items():
@@ -97,8 +110,8 @@ def aggregate_window_logits(
         )
         aggregated[ordinal] = AggregatedSentenceLogits(
             ordinal=ordinal,
-            logits=mean,
-            probabilities=_softmax(mean),
+            logits=mean if score_kind == "logits" else None,
+            probabilities=_softmax(mean) if score_kind == "logits" else _normalize(mean),
             contribution_count=len(contributions),
         )
     return aggregated
@@ -269,6 +282,11 @@ def _softmax(logits: Sequence[float]) -> tuple[float, float, float]:
     exponents = [math.exp(value - maximum) for value in logits]
     total = sum(exponents)
     return tuple(value / total for value in exponents)
+
+
+def _normalize(probabilities: Sequence[float]) -> tuple[float, float, float]:
+    total = sum(probabilities)
+    return tuple(value / total for value in probabilities)
 
 
 def _entropy(probabilities: Sequence[float]) -> float:

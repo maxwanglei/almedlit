@@ -186,6 +186,7 @@ def upload_dataset_version(
 def materialize_project_corpus_snapshot(
     project_id: int,
     dataset_id: int,
+    payload: schemas.ProjectCorpusSnapshotCreate | None = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -201,6 +202,7 @@ def materialize_project_corpus_snapshot(
         project_id=project_id,
         dataset_id=dataset_id,
         actor=current_user,
+        document_ids=payload.document_ids if payload is not None else None,
     )
 
 

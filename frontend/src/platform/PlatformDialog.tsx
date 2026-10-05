@@ -32,6 +32,10 @@ interface PlatformDialogProps {
   data: PlatformProjectData;
   busy: boolean;
   initialDatasetId?: number | null;
+  initialDatasetVersionId?: number | null;
+  initialTaskVersionId?: number | null;
+  currentUserId?: number | null;
+  isPersonalWorkspace?: boolean;
   onClose: () => void;
   onCreateDataset: (draft: DatasetDraft) => Promise<void>;
   onCreateCycle: (draft: CycleDraft) => Promise<void>;
@@ -67,6 +71,10 @@ export default function PlatformDialog({
   data,
   busy,
   initialDatasetId,
+  initialDatasetVersionId,
+  initialTaskVersionId,
+  currentUserId,
+  isPersonalWorkspace = false,
   onClose,
   onCreateDataset,
   onCreateCycle,
@@ -79,12 +87,13 @@ export default function PlatformDialog({
   const titleId = useId();
   const Icon = ICONS[kind];
   const defaultDatasetVersion = useMemo(() => {
+    if (initialDatasetVersionId && data.datasetVersions.some((version) => version.id === initialDatasetVersionId)) return initialDatasetVersionId;
     const matching = data.datasetVersions
       .filter((version) => !initialDatasetId || version.dataset_id === initialDatasetId)
       .sort((left, right) => right.version_number - left.version_number)[0];
     return matching?.id ?? data.datasetVersions[0]?.id ?? 0;
-  }, [data.datasetVersions, initialDatasetId]);
-  const defaultTaskVersion = data.taskVersions[0]?.id ?? 0;
+  }, [data.datasetVersions, initialDatasetId, initialDatasetVersionId]);
+  const defaultTaskVersion = initialTaskVersionId && data.taskVersions.some((task) => task.id === initialTaskVersionId) ? initialTaskVersionId : data.taskVersions[0]?.id ?? 0;
   const [formError, setFormError] = useState<string | null>(null);
 
   async function submit(operation: () => Promise<void>): Promise<void> {
@@ -152,6 +161,7 @@ export default function PlatformDialog({
           busy={busy}
           defaultDatasetVersion={defaultDatasetVersion}
           defaultTaskVersion={defaultTaskVersion}
+          defaultAnnotatorId={isPersonalWorkspace ? currentUserId : null}
           onSubmit={(draft) => submit(() => onCreateRound(draft))}
         />
       ) : null}
@@ -330,7 +340,7 @@ function TaskForm({
   const [key, setKey] = useState("");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [taskKind, setTaskKind] = useState<TaskDraft["taskKind"]>("classification");
+  const [taskKind, setTaskKind] = useState<TaskDraft["taskKind"] | "paper_entities">("classification");
   const [labels, setLabels] = useState("");
   return (
     <form className="platform-dialog-form" onSubmit={(event) => {
@@ -339,7 +349,8 @@ function TaskForm({
         key,
         name,
         description,
-        taskKind,
+        taskKind: taskKind === "paper_entities" ? "span_extraction" : taskKind,
+        annotationMode: taskKind === "paper_entities" ? "paper_entities" : undefined,
         labelValues: labels.split(",").map((value) => value.trim()).filter(Boolean),
       });
     }}>
@@ -353,7 +364,8 @@ function TaskForm({
           <option value="classification">Classification</option>
           <option value="multilabel_classification">Multilabel classification</option>
           <option value="regression">Regression</option>
-          <option value="token_labeling">Token labeling / NER</option>
+          <option value="paper_entities">Named entities (NER) in papers</option>
+          <option value="token_labeling">Token labeling (tokenized data)</option>
           <option value="span_extraction">Span extraction</option>
           <option value="relation_extraction">Relation extraction</option>
           <option value="ranking">Ranking</option>
@@ -912,12 +924,14 @@ function RoundForm({
   busy,
   defaultDatasetVersion,
   defaultTaskVersion,
+  defaultAnnotatorId,
   onSubmit,
 }: {
   data: PlatformProjectData;
   busy: boolean;
   defaultDatasetVersion: number;
   defaultTaskVersion: number;
+  defaultAnnotatorId?: number | null;
   onSubmit: (draft: RoundDraft) => Promise<void>;
 }): React.ReactElement {
   const [name, setName] = useState("");
@@ -932,7 +946,7 @@ function RoundForm({
   const [splitMapId, setSplitMapId] = useState(0);
   const [selectionLimit, setSelectionLimit] = useState(25);
   const [feedbackSetVersionId, setFeedbackSetVersionId] = useState(0);
-  const [annotatorUserIds, setAnnotatorUserIds] = useState<number[]>([]);
+  const [annotatorUserIds, setAnnotatorUserIds] = useState<number[]>(defaultAnnotatorId ? [defaultAnnotatorId] : []);
   const [openToAllAnnotators, setOpenToAllAnnotators] = useState(false);
   const [reason, setReason] = useState("");
   const selectedCycle = data.cycles.find((cycle) => cycle.id === cycleId);

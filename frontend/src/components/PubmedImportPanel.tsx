@@ -7,7 +7,7 @@ import type { ImportPreviewItem, ImportResponse, ImportStatus } from "@/types/ap
 
 interface PubmedImportPanelProps {
   projectId: number;
-  onImported: () => void | Promise<void>;
+  onImported: (result: ImportResponse) => void | Promise<void>;
   onOpenWork?: () => void;
   variant?: "team" | "personal";
 }
@@ -26,8 +26,8 @@ const STATUS_LABEL: Record<ImportStatus, string> = {
 function parsePmids(raw: string): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const token of raw.split(/[\s,;]+/)) {
-    const digits = token.replace(/^PMID:?/i, "").replace(/\D/g, "");
+  for (const token of raw.replace(/\bPMID:?\s*(\d+)/gi, "$1").split(/[\s,;]+/)) {
+    const digits = /^\d+$/.test(token) ? token : "";
     if (digits && !seen.has(digits)) {
       seen.add(digits);
       out.push(digits);
@@ -56,6 +56,7 @@ function PubmedImportPanel(
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const parsedCount = useMemo(() => parsePmids(rawInput).length, [rawInput]);
+  const invalidTokens = rawInput.replace(/\bPMID:?\s*(\d+)/gi, "$1").split(/[\s,;]+/).filter((token) => token && !/^\d+$/.test(token));
   const isPersonal = variant === "personal";
   const previewCounts = useMemo(() => {
     const rows = items ?? [];
@@ -68,7 +69,7 @@ function PubmedImportPanel(
 
   useImperativeHandle(ref, () => ({
     focusInput: () => {
-      sectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      sectionRef.current?.scrollIntoView({ behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
       textareaRef.current?.focus({ preventScroll: true });
     },
   }));
@@ -82,6 +83,7 @@ function PubmedImportPanel(
     reader.onload = () => {
       const text = typeof reader.result === "string" ? reader.result : "";
       setRawInput((previous) => (previous ? `${previous}\n${text}` : text));
+      setItems(null); setSelected(new Set()); setResult(null); setError(null);
     };
     reader.readAsText(file);
     if (fileInputRef.current) {
@@ -101,13 +103,10 @@ function PubmedImportPanel(
     try {
       const response = await previewPubmedImport(projectId, pmids);
       setItems(response.items);
-      const fullTextPmids = response.items
-        .filter((item) => item.status === "full_text")
-        .map((item) => item.pmid);
       const importablePmids = response.items
         .filter((item) => isImportable(item.status))
         .map((item) => item.pmid);
-      setSelected(new Set(fullTextPmids.length > 0 ? fullTextPmids : importablePmids));
+      setSelected(new Set(importablePmids));
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.message : "Preview failed.");
       setItems(null);
@@ -174,13 +173,13 @@ function PubmedImportPanel(
     try {
       const response = await importPubmed(projectId, pmids, includeAbstractOnly);
       setResult(response);
-      if (response.created.length > 0) {
+      if (response.created.length > 0 || response.skipped.some((outcome) => typeof outcome.document_id === "number")) {
         setItems(null);
         setSelected(new Set());
         setRawInput("");
       }
       try {
-        await onImported();
+        await onImported(response);
       } catch (refreshError) {
         setError(
           refreshError instanceof Error
@@ -197,7 +196,9 @@ function PubmedImportPanel(
 
   const selectableCount = items?.filter((item) => isImportable(item.status)).length ?? 0;
   const createdCount = result?.created.length ?? 0;
-  const skippedCount = result?.skipped.length ?? 0;
+  const reusedCount = result?.skipped.filter((outcome) => typeof outcome.document_id === "number").length ?? 0;
+  const unavailable = result?.skipped.filter((outcome) => typeof outcome.document_id !== "number") ?? [];
+  const readyCount = createdCount + reusedCount;
   const selectedDocumentLabel =
     selected.size === 1
       ? "Import 1 selected document"
@@ -216,15 +217,19 @@ function PubmedImportPanel(
           : "Paste PMIDs (separated by spaces, commas, or new lines) or upload a .txt/.csv file. We fetch full text from PMC when available and fall back to the PubMed abstract."}
       </p>
 
+      <label htmlFor={`pubmed-pmids-${projectId}`}>PMIDs</label>
       <textarea
+        id={`pubmed-pmids-${projectId}`}
         ref={textareaRef}
         className="import-textarea"
         aria-label="PMIDs"
         placeholder="e.g., 31452104, 29622564, 33301246…"
         value={rawInput}
-        onChange={(event) => setRawInput(event.target.value)}
+        disabled={previewing || importing}
+        onChange={(event) => { setRawInput(event.target.value); setItems(null); setSelected(new Set()); setResult(null); setError(null); }}
         rows={3}
       />
+      {invalidTokens.length ? <p role="alert" className="import-error">Enter numeric PMIDs only, separated by spaces, commas, or new lines. Remove invalid entries before previewing.</p> : null}
 
       <div className="import-actions">
         <label className="import-file-button">
@@ -233,6 +238,7 @@ function PubmedImportPanel(
             ref={fileInputRef}
             className="visually-hidden import-file-input"
             type="file"
+            disabled={previewing || importing}
             accept=".txt,.csv,text/plain,text/csv"
             onChange={handleFile}
           />
@@ -244,7 +250,7 @@ function PubmedImportPanel(
           className="import-preview-button"
           type="button"
           onClick={() => void handlePreview()}
-          disabled={previewing || parsedCount === 0}
+          disabled={previewing || parsedCount === 0 || invalidTokens.length > 0}
         >
           {previewing ? "Checking documents…" : "Preview documents"}
         </button>
@@ -342,35 +348,39 @@ function PubmedImportPanel(
       ) : null}
 
       {result ? (
-        <div className={createdCount > 0 ? "import-result success" : "import-result warning"}>
+        <div role="status" className={readyCount > 0 ? "import-result success" : "import-result warning"}>
           <p>
             {createdCount > 0 ? (
               <>
                 Imported <strong>{createdCount}</strong> document(s).
               </>
-            ) : (
+            ) : reusedCount === 0 ? (
               "No documents imported."
-            )}
-            {skippedCount > 0 ? ` Skipped ${skippedCount}.` : ""}
+            ) : null}
+            {reusedCount > 0 ? ` Reused ${reusedCount} document(s) already in this project.` : ""}
+            {unavailable.length > 0 ? ` ${unavailable.length} document(s) could not be imported.` : ""}
           </p>
-          {createdCount === 0 && skippedCount > 0 ? (
+          {readyCount === 0 && unavailable.length > 0 ? (
             <p className="import-result-detail">
               Nothing was created. Review the skipped PMIDs below, adjust the selection, and try again.
             </p>
           ) : null}
-          {createdCount > 0 && isPersonal && onOpenWork ? (
+          {readyCount > 0 && isPersonal && onOpenWork ? (
             <button className="import-next-button" type="button" onClick={onOpenWork}>
               Open My Work
             </button>
           ) : null}
-          {skippedCount > 0 ? (
+          {unavailable.length > 0 ? (
+            <details>
+            <summary>View {unavailable.length} unavailable PMID(s)</summary>
             <ul className="import-skipped">
-              {result.skipped.map((outcome) => (
+              {unavailable.map((outcome) => (
                 <li key={outcome.pmid}>
                   PMID {outcome.pmid}: {outcome.reason ?? "skipped"}
                 </li>
               ))}
             </ul>
+            </details>
           ) : null}
         </div>
       ) : null}

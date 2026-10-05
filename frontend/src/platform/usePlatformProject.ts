@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import type { WorkspaceRole } from "@/types/api";
+
 import {
   createCycle,
   createDatasetWithVersion,
@@ -33,6 +35,7 @@ export function usePlatformProject(
   workspaceId: number | null,
   enabled: boolean,
   scope: PlatformLoadScope,
+  effectiveRoles?: readonly WorkspaceRole[],
 ): {
   data: PlatformProjectData;
   loading: boolean;
@@ -49,15 +52,24 @@ export function usePlatformProject(
   launch: (draft: TrainingLaunchDraft) => Promise<void>;
   setModules: (selected: ProjectModule[]) => Promise<ProjectModules>;
 } {
-  const [data, setData] = useState(EMPTY_PLATFORM_PROJECT_DATA);
+  const [loadedData, setLoadedData] = useState<{
+    contextKey: string;
+    data: PlatformProjectData;
+  } | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const loadRequestIdRef = useRef(0);
   const mutationRequestIdRef = useRef(0);
-  const contextKey = `${enabled}:${workspaceId ?? "none"}:${projectId ?? "none"}:${scope}`;
+  const rolesKey = effectiveRoles?.join(",") ?? "";
+  const contextKey = `${enabled}:${workspaceId ?? "none"}:${projectId ?? "none"}:${scope}:${rolesKey}`;
   const contextKeyRef = useRef(contextKey);
   contextKeyRef.current = contextKey;
+  const effectiveRolesRef = useRef(effectiveRoles);
+  effectiveRolesRef.current = effectiveRoles;
+  const data = loadedData?.contextKey === contextKey
+    ? loadedData.data
+    : EMPTY_PLATFORM_PROJECT_DATA;
 
   const reload = useCallback(async (): Promise<void> => {
     if (contextKeyRef.current !== contextKey) return;
@@ -67,7 +79,7 @@ export function usePlatformProject(
       contextKey === contextKeyRef.current;
     if (!enabled || projectId === null || workspaceId === null) {
       if (isCurrentRequest()) {
-        setData(EMPTY_PLATFORM_PROJECT_DATA);
+        setLoadedData(null);
         setLoading(false);
         setError(null);
       }
@@ -80,9 +92,10 @@ export function usePlatformProject(
         projectId,
         scope,
         workspaceId,
+        effectiveRolesRef.current,
       );
       if (isCurrentRequest()) {
-        setData(projectData);
+        setLoadedData({ contextKey, data: projectData });
       }
     } catch (caught) {
       if (isCurrentRequest()) {
@@ -96,6 +109,7 @@ export function usePlatformProject(
   }, [contextKey, enabled, projectId, scope, workspaceId]);
 
   useEffect(() => {
+    setLoadedData(null);
     void reload();
     return () => {
       loadRequestIdRef.current += 1;

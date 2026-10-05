@@ -517,6 +517,92 @@ def test_versions_are_immutable_and_protected_items_cannot_be_selected(
     )
 
 
+def test_submitted_snapshot_preserves_open_round_and_ignores_later_drafts(
+    db, workflow_scope, workflow_data
+):
+    project_id = workflow_scope.project.id
+    actor = workflow_scope.annotator
+    annotation_round = service.create_annotation_round(db, schemas.AnnotationRoundCreate(
+        project_id=project_id, name="Ongoing annotation",
+        dataset_version_id=workflow_data.dataset_version.id,
+        task_version_id=workflow_data.task_version.id,
+        assistance_policy="blind", reannotation_mode="full_dataset",
+        annotator_user_ids=[actor.id],
+    ), workflow_scope.manager)
+    service.transition_annotation_round(db, project_id, annotation_round.id, "open")
+    item = service.list_round_items(db, project_id, annotation_round.id)[0]
+    initial = service.create_annotation_decision(db, schemas.AnnotationDecisionCreate(
+        project_id=project_id, round_item_id=item.id, output={"label": "positive"},
+    ), actor)
+    first_submission = service.create_round_submission(db, schemas.RoundSubmissionCreate(
+        project_id=project_id, annotation_round_id=annotation_round.id,
+        decision_ids=[initial.id],
+    ), actor)
+    correction = service.create_annotation_decision(db, schemas.AnnotationDecisionCreate(
+        project_id=project_id, round_item_id=item.id, output={"label": "negative"},
+        supersedes_decision_id=initial.id,
+    ), actor)
+    draft = schemas.RoundLabelSetCreate(
+        project_id=project_id, name="Completed annotations", source_kind="human",
+        submission_ids=[first_submission.id], publication_mode="submitted_snapshot",
+    )
+    first = service.create_round_label_set(db, annotation_round.id, draft, workflow_scope.manager)
+    assert list(first.labels.values()) == [{"label": "positive"}]
+    assert first.label_count == 1
+    assert first.source_decision_ids == [initial.id]
+    assert annotation_round.status == "open"
+    assert service.create_round_label_set(
+        db, annotation_round.id, draft, workflow_scope.manager
+    ).id == first.id
+    with pytest.raises(ConflictError, match="closed"):
+        service.create_round_label_set(db, annotation_round.id,
+            draft.model_copy(update={"publication_mode": "closed_round"}), workflow_scope.manager)
+    second_submission = service.create_round_submission(db, schemas.RoundSubmissionCreate(
+        project_id=project_id, annotation_round_id=annotation_round.id,
+        decision_ids=[correction.id],
+    ), actor)
+    second = service.create_round_label_set(db, annotation_round.id,
+        draft.model_copy(update={"submission_ids": [first_submission.id, second_submission.id]}),
+        workflow_scope.manager)
+    assert second.version_number == first.version_number + 1
+    assert list(second.labels.values()) == [{"label": "negative"}]
+    assert second.source_submission_ids == [second_submission.id]
+    assert second.source_decision_ids == [correction.id]
+    assert list(first.labels.values()) == [{"label": "positive"}]
+    assert annotation_round.status == "open"
+
+
+def test_submitted_snapshot_rejects_cross_annotator_disagreement(
+    db, workflow_scope, workflow_data
+):
+    project_id = workflow_scope.project.id
+    actors = [workflow_scope.annotator, workflow_scope.manager]
+    annotation_round = service.create_annotation_round(db, schemas.AnnotationRoundCreate(
+        project_id=project_id, name="Disagreement snapshot",
+        dataset_version_id=workflow_data.dataset_version.id,
+        task_version_id=workflow_data.task_version.id,
+        assistance_policy="blind", reannotation_mode="full_dataset",
+        annotator_user_ids=[actor.id for actor in actors],
+    ), workflow_scope.manager)
+    service.transition_annotation_round(db, project_id, annotation_round.id, "open")
+    item = service.list_round_items(db, project_id, annotation_round.id)[0]
+    submissions = []
+    for actor, label in zip(actors, ["positive", "negative"], strict=True):
+        decision = service.create_annotation_decision(db, schemas.AnnotationDecisionCreate(
+            project_id=project_id, round_item_id=item.id, output={"label": label},
+        ), actor)
+        submissions.append(service.create_round_submission(db, schemas.RoundSubmissionCreate(
+            project_id=project_id, annotation_round_id=annotation_round.id,
+            decision_ids=[decision.id],
+        ), actor))
+    with pytest.raises(ConflictError, match="disagree"):
+        service.create_round_label_set(db, annotation_round.id, schemas.RoundLabelSetCreate(
+            project_id=project_id, name="Conflicting labels", source_kind="human",
+            submission_ids=[item.id for item in submissions],
+            publication_mode="submitted_snapshot",
+        ), workflow_scope.manager)
+
+
 def test_annotation_round_rejects_inactive_explicit_annotator(
     db,
     workflow_scope,

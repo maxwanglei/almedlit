@@ -1,5 +1,6 @@
 """API contracts for the canonical learning workflow."""
 
+import secrets
 from datetime import datetime
 from typing import Any, Literal
 
@@ -96,10 +97,29 @@ class DatasetCreate(InputModel):
     name: str = Field(min_length=1, max_length=255)
     description: str | None = None
     source_type: Literal["upload", "public_registry", "project_corpus", "generated", "other"]
+    purposes: list[Literal["annotation", "inference", "training_source"]] = Field(
+        default_factory=list
+    )
+
+    @field_validator("purposes")
+    @classmethod
+    def unique_purposes(cls, value: list[str]) -> list[str]:
+        return list(dict.fromkeys(value))
 
 
 class DatasetRead(DatasetCreate, ReadModel):
     created_by_user_id: int | None = None
+
+
+class ProjectCorpusSnapshotCreate(InputModel):
+    document_ids: list[int] | None = Field(default=None, min_length=1)
+
+    @field_validator("document_ids")
+    @classmethod
+    def valid_document_ids(cls, value: list[int] | None) -> list[int] | None:
+        if value is not None and any(item <= 0 for item in value):
+            raise ValueError("Document IDs must be positive")
+        return sorted(set(value)) if value is not None else None
 
 
 class DatasetItemCreate(InputModel):
@@ -186,6 +206,7 @@ class LabelSetVersionCreate(InputModel):
 
 
 class LabelSetVersionRead(LabelSetVersionCreate, ReadModel):
+    source_kind: Literal["imported", "human", "adjudicated", "derived", "composed"]
     version_number: int
     label_count: int
     content_hash: str
@@ -212,6 +233,7 @@ class RoundLabelSetCreate(InputModel):
     submission_ids: list[int] = Field(min_length=1)
     parent_version_id: int | None = None
     composition_policy: Literal["replace", "inherit"] = "replace"
+    publication_mode: Literal["closed_round", "submitted_snapshot"] = "closed_round"
 
 
 class SplitMapCreate(InputModel):
@@ -245,6 +267,10 @@ class TrainingDatasetVersionCreate(InputModel):
 class TrainingDatasetVersionRead(TrainingDatasetVersionCreate, ReadModel):
     content_hash: str
     created_by_user_id: int | None
+    training_dataset_id: int | None = None
+    version_number: int = 1
+    parent_version_id: int | None = None
+    preparation_manifest: dict = Field(default_factory=dict)
 
 
 class TrainingDatasetComposeCreate(InputModel):
@@ -415,7 +441,7 @@ class SelectionRunCreate(InputModel):
     ]
     parameters: dict = Field(default_factory=dict)
     eligibility_filter: dict = Field(default_factory=dict)
-    seed: int = 42
+    seed: int = Field(default_factory=lambda: secrets.randbits(31))
 
 
 class SelectionRunRead(SelectionRunCreate, ReadModel):

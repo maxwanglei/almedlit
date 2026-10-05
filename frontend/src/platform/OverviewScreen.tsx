@@ -10,17 +10,16 @@ import {
 } from "lucide-react";
 
 import type { CapabilityKey } from "@/auth/capabilities";
-import type { Document, ProjectProgress, TaskAssignment } from "@/types/api";
+import type { Document, ProjectProgress, ProjectTask, TaskAssignment } from "@/types/api";
 
 import {
-  PlatformEmpty,
   PlatformPageHeader,
   PlatformRouteLink,
   PlatformSection,
   PlatformStats,
   PlatformStatus,
 } from "./components";
-import type { PlatformProjectData } from "./types";
+import type { PlatformProjectData, TaskKind } from "./types";
 
 interface OverviewScreenProps {
   data: PlatformProjectData;
@@ -28,8 +27,35 @@ interface OverviewScreenProps {
   assignments: TaskAssignment[];
   progress: ProjectProgress | null;
   onOpenData: () => void;
-  onOpenTraining: () => void;
-  onOpenModels: () => void;
+  onOpenTraining?: () => void;
+  onOpenModels?: () => void;
+  onImport?: () => void;
+  onOpenInference?: () => void;
+  onCreateTraining?: () => void;
+  currentUserId?: number | null;
+  onContinueAnnotation?: (roundId: number) => void;
+  onSetupAnnotation?: () => void;
+  onSetupTask?: (taskVersionId: number) => void;
+  onTrainModel?: (trainingDatasetVersionId: number) => void;
+  projectTasks?: ProjectTask[];
+  onOpenDocumentTask?: (task: ProjectTask) => void;
+}
+
+function WorkflowCard({ title, readiness, description, action }: {
+  title: string; readiness: string; description: string;
+  action?: { href: string; label: string; onNavigate: () => void };
+}): React.ReactElement {
+  return <article className="platform-roadmap-card" aria-label={`${title} readiness`}>
+    <header><div><h3>{title}</h3></div></header>
+    <p><strong>{readiness}</strong></p><p>{description}</p>
+    {action ? <footer><PlatformRouteLink href={action.href} onNavigate={action.onNavigate}>{action.label} →</PlatformRouteLink></footer> : null}
+  </article>;
+}
+
+function taskKindLabel(kind: TaskKind, preset?: unknown): string {
+  if (kind === "token_labeling") return "Token labeling (tokenized data)";
+  if (kind === "span_extraction" && preset === "document_entities") return "Named entities (NER)";
+  return kind.replace(/_/g, " ").replace(/^./, (letter) => letter.toUpperCase());
 }
 
 interface RoadmapCapability {
@@ -51,7 +77,7 @@ const ROADMAP_CAPABILITIES = [
     title: "Inference",
     status: "foundation",
     description:
-      "Versioned batch runs and assignment-scoped prediction review exist; the dedicated manager workflow is staged.",
+      "Versioned batch predictions, exports, and selected prediction review are available for saved TF-IDF models.",
     milestones: [
       "Batch prediction from immutable checkpoints",
       "Candidate windows and append-only human review",
@@ -228,6 +254,16 @@ export default function OverviewScreen({
   onOpenData,
   onOpenTraining,
   onOpenModels,
+  onImport,
+  onOpenInference,
+  onCreateTraining,
+  currentUserId = null,
+  onContinueAnnotation,
+  onSetupAnnotation,
+  onSetupTask,
+  onTrainModel,
+  projectTasks = [],
+  onOpenDocumentTask,
 }: OverviewScreenProps): React.ReactElement {
   const latestModels = data.modelVersions.length;
   const labeled = data.labelSets.reduce((total, item) => total + item.label_count, 0);
@@ -235,16 +271,74 @@ export default function OverviewScreen({
   const workspaceCapabilities = new Set(
     data.projectModules.workspace_capabilities,
   );
+  const latestSources = new Map<number, (typeof data.datasetVersions)[number]>();
+  for (const version of data.datasetVersions) {
+    if (version.provenance?.ingestion === "training_preparation_v1") continue;
+    if ((latestSources.get(version.dataset_id)?.version_number ?? 0) < version.version_number) latestSources.set(version.dataset_id, version);
+  }
+  const sourceCount = [...latestSources.values()].filter((version) => version.item_count > 0).length;
+  const projectId = data.projectModules.project_id;
+  const openRounds = onContinueAnnotation && currentUserId !== null ? [...data.rounds]
+    .filter((round) => round.status === "open" && (round.open_to_all_annotators || round.annotator_user_ids.includes(currentUserId)))
+    .sort((left, right) => right.sequence - left.sequence || right.id - left.id) : [];
+  const enabledDocumentTasks = projectTasks.filter((task) => task.enabled);
+  const latestTasks = new Map<number, (typeof data.taskVersions)[number]>();
+  for (const version of data.taskVersions) {
+    if ((latestTasks.get(version.task_definition_id)?.version_number ?? 0) < version.version_number) latestTasks.set(version.task_definition_id, version);
+  }
+  const tasksNeedingSetup = onSetupTask ? data.taskDefinitions.filter((task) => latestTasks.has(task.id) && !openRounds.some((round) => data.taskVersions.some((version) => version.id === round.task_version_id && version.task_definition_id === task.id))) : [];
+  const annotationChoiceCount = openRounds.length + tasksNeedingSetup.length + (onOpenDocumentTask && documents.length ? enabledDocumentTasks.length : 0);
+  const openRound = annotationChoiceCount === 1 ? openRounds[0] : undefined;
+  const onlySetupTask = annotationChoiceCount === 1 ? tasksNeedingSetup[0] : undefined;
+  const onlyDocumentTask = annotationChoiceCount === 1 && !openRound && !onlySetupTask ? enabledDocumentTasks[0] : undefined;
+  const roundTaskName = (taskVersionId: number): string | undefined => {
+    const version = data.taskVersions.find((item) => item.id === taskVersionId);
+    return data.taskDefinitions.find((task) => task.id === version?.task_definition_id)?.name;
+  };
+  const taskCount = data.taskDefinitions.length + projectTasks.length;
+  const preparedVersion = [...data.trainingDatasets].sort((left, right) => right.id - left.id)[0];
+  const compatibleModelCount = data.modelVersions.filter((model) => model.recipe_key === "tfidf_logistic_regression" && model.framework === "scikit-learn" && model.checkpoint_package_id &&
+    data.taskVersions.some((task) => task.id === model.task_version_id && task.task_kind === "classification")).length;
+  const annotationAction = annotationChoiceCount > 1 ? {
+    href: "#project-annotation-tasks", label: "Choose annotation task", onNavigate: () => {
+      const choices = window.document.getElementById("project-annotation-tasks");
+      choices?.scrollIntoView?.({ block: "start" });
+      choices?.focus({ preventScroll: true });
+    },
+  } : openRound && onContinueAnnotation ? {
+    href: `/my-work/rounds/${openRound.id}`, label: roundTaskName(openRound.task_version_id) ? `Continue ${roundTaskName(openRound.task_version_id)}` : "Continue annotation", onNavigate: () => onContinueAnnotation(openRound.id),
+  } : onlyDocumentTask && onOpenDocumentTask ? {
+    href: `/my-work?project=${projectId}&view=annotate&task=${onlyDocumentTask.id}`, label: `Open ${onlyDocumentTask.display_name}`, onNavigate: () => onOpenDocumentTask(onlyDocumentTask),
+  } : onlySetupTask && onSetupTask ? {
+    href: `/projects/${projectId}/data?tab=source&taskVersionId=${latestTasks.get(onlySetupTask.id)!.id}`, label: `Set up ${onlySetupTask.name}`, onNavigate: () => onSetupTask(latestTasks.get(onlySetupTask.id)!.id),
+  } : sourceCount && onSetupAnnotation ? {
+    href: `/projects/${projectId}/data?tab=source`, label: "Set up annotation", onNavigate: onSetupAnnotation,
+  } : onSetupAnnotation && onImport ? {
+    href: `/projects/${projectId}/data?tab=source&flow=import`, label: "Import PMIDs", onNavigate: onImport,
+  } : undefined;
+  const trainingAction = preparedVersion && onTrainModel ? {
+    href: `/training/new?projectId=${projectId}&trainingDatasetVersionId=${preparedVersion.id}`, label: "Train model", onNavigate: () => onTrainModel(preparedVersion.id),
+  } : onCreateTraining ? {
+    href: `/training/data?projectId=${projectId}&flow=prepare`, label: "Create training dataset", onNavigate: onCreateTraining,
+  } : onOpenTraining ? { href: `/training?projectId=${projectId}`, label: "Open training", onNavigate: onOpenTraining } : undefined;
   const overviewStats = [
+    effectiveModules.has("annotate") ? {
+      label: "Annotation tasks", value: taskCount,
+      detail: projectTasks.length ? `${data.taskDefinitions.length} round tasks · ${projectTasks.length} document tasks` : `${data.taskVersions.length} saved ${data.taskVersions.length === 1 ? "task version" : "task versions"}`,
+    } : null,
     effectiveModules.has("data")
       ? {
           label: "Source records",
           value:
-            data.datasetVersions.reduce((total, item) => total + item.item_count, 0) ||
+            [...latestSources.values()].reduce((total, item) => total + item.item_count, 0) ||
             documents.length,
-          detail: `${data.datasets.length || (documents.length ? 1 : 0)} datasets`,
+          detail: `${latestSources.size} source datasets`,
         }
       : null,
+    effectiveModules.has("train") ? {
+      label: "Training datasets", value: new Set(data.trainingDatasets.map((version) => version.training_dataset_id ?? `legacy:${version.id}`)).size,
+      detail: `${data.trainingDatasets.length} saved versions`,
+    } : null,
     effectiveModules.has("annotate")
       ? {
           label: "Labels",
@@ -278,74 +372,60 @@ export default function OverviewScreen({
       />
       {overviewStats.length ? <PlatformStats items={overviewStats} /> : null}
 
-      {effectiveModules.has("data") ? (
-        <PlatformSection
-          title="Data readiness"
-          description="Training uses immutable source, label, and split versions."
-        >
-          {data.datasetVersions.length || documents.length ? (
-            <div className="platform-readiness-list">
-              <div>
-                <span className="platform-readiness-mark complete" aria-hidden="true" />
-                <div>
-                  <strong>Source data available</strong>
-                  <p>{data.datasetVersions.length || 1} versioned source snapshots</p>
-                </div>
-              </div>
-              <div>
-                <span
-                  className={`platform-readiness-mark ${data.labelSets.length ? "complete" : ""}`}
-                  aria-hidden="true"
-                />
-                <div>
-                  <strong>Label layer</strong>
-                  <p>
-                    {data.labelSets.length
-                      ? `${data.labelSets.length} label versions retained`
-                      : "Optional for unlabeled or annotation-first work"}
-                  </p>
-                </div>
-              </div>
-              <div>
-                <span
-                  className={`platform-readiness-mark ${data.splitMaps.length ? "complete" : ""}`}
-                  aria-hidden="true"
-                />
-                <div>
-                  <strong>Protected split policy</strong>
-                  <p>
-                    {data.splitMaps.length
-                      ? "Stable train, validation, test, and pool assignments"
-                      : "Create before comparative training"}
-                  </p>
-                </div>
-              </div>
-              <PlatformRouteLink
-                href={`/projects/${data.projectModules.project_id}/data`}
-                className="platform-text-action"
-                onNavigate={onOpenData}
-              >
-                Review data
-              </PlatformRouteLink>
+      <PlatformSection title="Choose your next step" description="Source datasets can be used for annotation and predictions. Training datasets combine source records with labels and evaluation splits.">
+        <div className="platform-roadmap-grid">
+          {effectiveModules.has("annotate") ? <WorkflowCard title="Annotate"
+            readiness={annotationChoiceCount > 1 ? `${annotationChoiceCount} annotation choices available` : openRound ? `${openRound.name} is open for you` : onlyDocumentTask ? `${onlyDocumentTask.display_name} is ready` : sourceCount ? `${sourceCount} source ${sourceCount === 1 ? "dataset" : "datasets"} ready` : "No source dataset yet"}
+            description={annotationChoiceCount > 1 ? "Choose a task below. Each annotation round keeps its own source, task, and decisions." : openRound ? "Continue your assigned round using its saved source and task." : onlyDocumentTask ? "Open this task in the document editor." : annotationAction ? "Choose a source and task to start labeling papers." : onContinueAnnotation ? "No annotation work is assigned to you. A project manager can set up a round." : "Annotation work is not available for your role in this workspace."}
+            action={annotationAction} /> : null}
+          {effectiveModules.has("train") ? <WorkflowCard title="Train"
+            readiness={preparedVersion ? `${preparedVersion.name} · v${preparedVersion.version_number ?? 1} ready` : "No training dataset yet"}
+            description={trainingAction ? "Use submitted annotations, external labeled data, or both to train a model." : "Your role does not have access to training."}
+            action={trainingAction} /> : null}
+          {effectiveModules.has("data") && effectiveModules.has("models") && workspaceCapabilities.has("inference") ? <WorkflowCard title="Run predictions"
+            readiness={`${sourceCount} source ${sourceCount === 1 ? "dataset" : "datasets"} · ${compatibleModelCount} compatible TF-IDF ${compatibleModelCount === 1 ? "model" : "models"}`}
+            description={!onOpenInference ? "Your role does not have access to predictions." : !sourceCount ? "Import a source dataset, then choose a saved model for predictions." : !compatibleModelCount ? "A saved TF-IDF classification model with a checkpoint is needed." : "Apply a saved model, export predictions, or review selected results."}
+            action={onOpenInference ? { href: `/projects/${projectId}/inference`, label: sourceCount && compatibleModelCount ? "Run predictions" : "Set up predictions", onNavigate: onOpenInference } : undefined} /> : null}
+        </div>
+        {effectiveModules.has("data") ? <p><PlatformRouteLink href={`/projects/${projectId}/data?tab=source`} onNavigate={onOpenData}>View source datasets and imports</PlatformRouteLink></p> : null}
+      </PlatformSection>
+
+      {effectiveModules.has("annotate") && taskCount > 0 ? (
+        <div id="project-annotation-tasks" tabIndex={-1}>
+          <PlatformSection title="Annotation tasks" description={projectTasks.length ? "Choose the task you want to work on. Round tasks use a saved dataset version; document tasks open the project papers in the document editor." : "Choose a task and its annotation round. Adding a task does not change the task in an existing round."}>
+            <div className="platform-table-scroll platform-table-scroll--summary" role="region" aria-label="Project annotation tasks" tabIndex={0}>
+              <table className="platform-table platform-table--summary">
+                <thead><tr><th scope="col">Task</th><th scope="col">Annotation work</th><th scope="col">Actions</th></tr></thead>
+                <tbody>
+                  {data.taskDefinitions.map((task) => {
+                    const latestVersion = latestTasks.get(task.id);
+                    const versions = new Set(data.taskVersions.filter((version) => version.task_definition_id === task.id).map((version) => version.id));
+                    const assignedRounds = openRounds.filter((round) => versions.has(round.task_version_id));
+                    return <tr key={`round-task:${task.id}`}>
+                      <td data-label="Task" data-priority="identity"><strong>{task.name}</strong><span>{latestVersion ? `${taskKindLabel(latestVersion.task_kind, latestVersion.annotation_ui?.preset)} · v${latestVersion.version_number}` : "Task setup incomplete"}</span></td>
+                      <td data-label="Annotation work">{assignedRounds.length ? `${assignedRounds.length} open ${assignedRounds.length === 1 ? "round" : "rounds"} for you` : data.rounds.some((round) => versions.has(round.task_version_id)) ? "No open round assigned to you" : "No annotation round yet"}</td>
+                      <td data-label="Actions" data-priority="action">{assignedRounds.length ? assignedRounds.map((round) => <p key={round.id}><PlatformRouteLink href={`/my-work/rounds/${round.id}`} onNavigate={() => onContinueAnnotation?.(round.id)}>Continue {task.name} — {round.name}</PlatformRouteLink></p>) : latestVersion && onSetupTask ? <PlatformRouteLink href={`/projects/${projectId}/data?tab=source&taskVersionId=${latestVersion.id}`} onNavigate={() => onSetupTask(latestVersion.id)}>Set up {task.name}</PlatformRouteLink> : null}</td>
+                    </tr>;
+                  })}
+                  {projectTasks.map((task) => <tr key={`document-task:${task.id}`}>
+                    <td data-label="Task" data-priority="identity"><strong>{task.display_name}</strong><span>{task.annotation_type === "entity" ? "Named entity recognition" : task.annotation_type.replace(/_/g, " ")}</span></td>
+                    <td data-label="Annotation work">{!task.enabled ? "Disabled" : documents.length ? `${documents.length} project papers · document editor` : "Import papers to start"}</td>
+                    <td data-label="Actions" data-priority="action">{task.enabled && documents.length && onOpenDocumentTask ? <PlatformRouteLink href={`/my-work?project=${projectId}&view=annotate&task=${task.id}`} onNavigate={() => onOpenDocumentTask(task)}>Open {task.display_name}</PlatformRouteLink> : null}</td>
+                  </tr>)}
+                </tbody>
+              </table>
             </div>
-          ) : (
-            <PlatformEmpty
-              title="No dataset yet"
-              detail="Import a public dataset, upload structured files, or snapshot the project corpus."
-              actionLabel="Add data"
-              onAction={onOpenData}
-            />
-          )}
-        </PlatformSection>
+          </PlatformSection>
+        </div>
       ) : null}
 
-      {effectiveModules.has("train") || effectiveModules.has("models") ? (
+      {(effectiveModules.has("train") && onOpenTraining) || (effectiveModules.has("models") && onOpenModels) ? (
         <PlatformSection
           title="Model development"
           description="Training and model registry work open in dedicated workspaces while retaining this project as context."
         >
           <div className="platform-module-links">
-            {effectiveModules.has("train") ? (
+            {effectiveModules.has("train") && onOpenTraining ? (
               <PlatformRouteLink
                 href={`/training?projectId=${data.projectModules.project_id}`}
                 onNavigate={onOpenTraining}
@@ -361,7 +441,7 @@ export default function OverviewScreen({
                 <ArrowRight size={17} aria-hidden="true" />
               </PlatformRouteLink>
             ) : null}
-            {effectiveModules.has("models") ? (
+            {effectiveModules.has("models") && onOpenModels ? (
               <PlatformRouteLink
                 href={`/models?projectId=${data.projectModules.project_id}`}
                 onNavigate={onOpenModels}

@@ -27,3 +27,12 @@ model package and `ModelVersion`. Custom plugin contracts remain extensible, but
 execution currently fails closed unless the recipe key is registered in the
 trusted recipe catalog, which supplies required model-family and artifact-format
 metadata.
+
+In the default eager deployment, the API retries queued orphaned-object
+deletions every fifteen minutes while it is running. Worker-backed deployments
+run the same cleanup through Celery beat. Failed attempts remain in the database
+with retry backoff, so a temporary storage outage does not discard the backlog.
+
+SSH/Slurm login hosts also need the util-linux `flock` command. Submission uses
+it to serialize the job-ID check and `sbatch` call. Keep `.submission.lock` in
+the shared job directory; its lock is released when the submission shell exits.

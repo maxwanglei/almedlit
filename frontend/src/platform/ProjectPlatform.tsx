@@ -19,6 +19,8 @@ import type {
 import ActivityScreen from "./ActivityScreen";
 import AnnotateScreen from "./AnnotateScreen";
 import DataScreen from "./DataScreen";
+import SourceDatasetSetup from "./SourceDatasetSetup";
+import InferenceScreen from "./InferenceScreen";
 import {
   parseProjectPlatformRoute,
   PROJECT_ROUTE_REGISTRY,
@@ -43,6 +45,7 @@ export type PlatformDialogKind =
 
 interface ProjectPlatformProps {
   pathname: string;
+  search?: string;
   project: Project;
   projects: Project[];
   documents: Document[];
@@ -62,11 +65,13 @@ interface ProjectPlatformProps {
   onUpdateProject: (payload: ProjectUpdate) => Promise<void>;
   onUpdateModules: (selected: ProjectModule[]) => Promise<void>;
   onRefresh: () => Promise<void>;
+  onDocumentsImported?: () => Promise<unknown>;
   dialogContent?: ReactNode;
 }
 
 export default function ProjectPlatform({
   pathname,
+  search = "",
   project,
   projects,
   documents,
@@ -86,18 +91,34 @@ export default function ProjectPlatform({
   onUpdateProject,
   onUpdateModules,
   onRefresh,
+  onDocumentsImported,
   dialogContent,
 }: ProjectPlatformProps): React.ReactElement {
   const route = parseProjectPlatformRoute(pathname);
+  const params = new URLSearchParams(search);
+  const sourceTab = params.get("tab") === "training" ? "training" : "source";
+  const queryId = (key: string): number | null => { const value = Number(params.get(key)); return Number.isSafeInteger(value) && value > 0 ? value : null; };
   const requestedTab = route?.tab ?? "overview";
   const effectiveModules = new Set(data.projectModules.effective);
   const moduleConfigReady = data.projectModules.project_id === project.id;
   const visibleTabs = PROJECT_ROUTE_REGISTRY.filter(
     (item) =>
       canAccessProjectSection(access, item.id) &&
+      (item.id !== "inference" || effectiveModules.has("data")) &&
       (item.backendModule === null || effectiveModules.has(item.backendModule)),
   );
   const canManageAnnotation = canAccessProjectSection(access, "tasks");
+  const canInfer = canPerform(access, "inference:run") && effectiveModules.has("data") && effectiveModules.has("models");
+  const canManageSources = canPerform(access, "projects:create");
+  const openImport = (dataset?: Dataset): void => onNavigate(`/projects/${project.id}/data?tab=source&flow=import${dataset ? `&datasetId=${dataset.id}` : ""}`);
+  const setupTask = (taskVersionId: number): void => {
+    const collections = data.datasets.filter((dataset) => dataset.source_type === "project_corpus");
+    const versions = data.datasetVersions.filter((version) => collections.some((dataset) => dataset.id === version.dataset_id));
+    const latest = collections.length === 1 ? [...versions].sort((a, b) => b.version_number - a.version_number)[0] : null;
+    onNavigate(latest
+      ? `/projects/${project.id}/data?tab=source&flow=import&datasetId=${latest.dataset_id}&datasetVersionId=${latest.id}&taskVersionId=${taskVersionId}`
+      : `/projects/${project.id}/data?tab=source&taskVersionId=${taskVersionId}`);
+  };
   const canScore =
     canPerform(access, "learning:score") &&
     effectiveModules.has("learning") &&
@@ -134,20 +155,35 @@ export default function ProjectPlatform({
   switch (tab) {
     case "data":
       content = (
-        <DataScreen
+        params.get("flow") === "import" ? <SourceDatasetSetup key={project.id} projectId={project.id} projectName={project.name} data={data} currentUserId={currentUserId}
+          datasetId={queryId("datasetId")} datasetVersionId={queryId("datasetVersionId")} initialTaskVersionId={queryId("taskVersionId")} canAnnotate={canManageAnnotation && effectiveModules.has("annotate")} canInfer={canInfer}
+          onRefresh={onRefresh} onImported={onDocumentsImported} onNavigate={onNavigate} /> : <>
+          {queryId("taskVersionId") ? <p role="status">Choose a source collection below for the selected annotation task.</p> : null}
+          <DataScreen
           data={data}
           legacyDocumentCount={documents.length}
           onCreate={() => onDialogChange("dataset")}
+          activeTab={sourceTab}
+          onTabChange={(next) => onNavigate(`/projects/${project.id}/data?tab=${next}`)}
+          onImport={canManageSources ? openImport : undefined}
+          onAnnotate={canManageAnnotation ? (dataset, version) => onNavigate(`/projects/${project.id}/data?tab=source&flow=import&datasetId=${dataset.id}&datasetVersionId=${version.id}${queryId("taskVersionId") ? `&taskVersionId=${queryId("taskVersionId")}` : ""}`) : undefined}
+          onPredict={canInfer ? (version) => onNavigate(`/projects/${project.id}/inference?datasetVersionId=${version.id}`) : undefined}
+          onCreateTraining={effectiveModules.has("train") ? () => onNavigate(`/training/data?projectId=${project.id}&flow=prepare`) : undefined}
+          onTrain={(version) => onNavigate(`/training/new?projectId=${project.id}&trainingDatasetVersionId=${version.id}`)}
+          onNewTrainingVersion={(version) => onNavigate(`/training/data?projectId=${project.id}&flow=prepare&trainingDatasetId=${version.training_dataset_id}&trainingDatasetVersionId=${version.id}`)}
           onPrepareTraining={
             effectiveModules.has("train")
               ? (dataset: Dataset) =>
                   onNavigate(
-                    `/training/new?projectId=${project.id}&datasetId=${dataset.id}`,
+                    `/training/data?projectId=${project.id}&flow=prepare&datasetId=${dataset.id}`,
                   )
               : undefined
           }
-        />
+        /></>
       );
+      break;
+    case "inference":
+      content = <InferenceScreen projectId={project.id} data={data} currentUserId={currentUserId} canReview={canManageAnnotation && effectiveModules.has("annotate")} onOpenRound={onOpenRound} onRefresh={onRefresh} onImport={canManageSources ? () => openImport() : () => onDialogChange("dataset")} onOpenModels={() => onNavigate(`/models?projectId=${project.id}`)} />;
       break;
     case "tasks":
       content = (
@@ -156,6 +192,7 @@ export default function ProjectPlatform({
           data={data}
           onCreateRound={() => onDialogChange("round")}
           onCreateTask={() => onDialogChange("task")}
+          onSetupTask={canManageAnnotation ? setupTask : undefined}
           onOpenRound={onOpenRound}
           currentUserId={currentUserId}
           canManage={canManageAnnotation}
@@ -213,16 +250,25 @@ export default function ProjectPlatform({
       content = (
         <OverviewScreen
           data={data}
+          projectTasks={project.tasks}
+          onSetupTask={canManageAnnotation ? setupTask : undefined}
           documents={documents}
           assignments={assignments}
           progress={progress}
-          onOpenData={() => navigateTab("data")}
-          onOpenTraining={() =>
+          currentUserId={currentUserId}
+          onOpenData={() => onNavigate(`/projects/${project.id}/data?tab=source`)}
+          onImport={canManageSources && effectiveModules.has("data") ? () => openImport() : undefined}
+          onContinueAnnotation={canPerform(access, "annotation:work") && effectiveModules.has("annotate") ? onOpenRound : undefined}
+          onSetupAnnotation={canManageAnnotation && effectiveModules.has("data") && effectiveModules.has("annotate") ? () => onNavigate(`/projects/${project.id}/data?tab=source`) : undefined}
+          onOpenInference={canInfer ? () => navigateTab("inference") : undefined}
+          onCreateTraining={canPerform(access, "training:launch") && effectiveModules.has("train") ? () => onNavigate(`/training/data?projectId=${project.id}&flow=prepare`) : undefined}
+          onTrainModel={canPerform(access, "training:launch") && effectiveModules.has("train") ? (versionId) => onNavigate(`/training/new?projectId=${project.id}&trainingDatasetVersionId=${versionId}`) : undefined}
+          onOpenTraining={canPerform(access, "training:read") ? () =>
             onNavigate(`/training?projectId=${project.id}`)
-          }
-          onOpenModels={() =>
+          : undefined}
+          onOpenModels={canPerform(access, "models:read") ? () =>
             onNavigate(`/models?projectId=${project.id}`)
-          }
+          : undefined}
         />
       );
   }
@@ -303,12 +349,12 @@ export default function ProjectPlatform({
               container="section"
             />
           ) : null}
-          {loading ? (
+          {loading && !moduleConfigReady ? (
             <div className="platform-loading" role="status" aria-live="polite">
               <span aria-hidden="true" />
               Loading project resources…
             </div>
-          ) : content}
+          ) : <div key={project.id} aria-busy={loading}>{content}</div>}
         </main>
       </div>
 

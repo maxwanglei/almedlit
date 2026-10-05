@@ -3,9 +3,10 @@ import {
   listWorkspaceMembers,
   request,
 } from "@/api/client";
-import type { Project } from "@/types/api";
+import type { Project, WorkspaceRole } from "@/types/api";
 
 import type { TrainingLaunchDraft } from "./TrainingScreen";
+import { createPaperEntityTaskVersionPayload } from "./paperTaskContracts";
 import type {
   AnnotationRound,
   AnnotationDecision,
@@ -62,6 +63,7 @@ export type PlatformLoadScope =
   | "quality"
   | "activity"
   | "settings"
+  | "inference"
   | "train"
   | "models";
 
@@ -98,6 +100,7 @@ type PlatformCollection =
 function collectionPlan(
   scope: PlatformLoadScope,
   effectiveModules: ProjectModule[],
+  effectiveRoles: readonly WorkspaceRole[],
 ): Set<PlatformCollection> {
   const plan = new Set<PlatformCollection>();
   const enabled = new Set(effectiveModules);
@@ -109,9 +112,9 @@ function collectionPlan(
     if (enabled.has("data")) {
       add("datasets", "datasetVersions", "labelSets", "splitMaps");
     }
-    if (enabled.has("annotate")) add("rounds");
-    if (enabled.has("models")) add("models", "modelVersions");
-    if (enabled.has("train")) add("trainingRuns");
+    if (enabled.has("annotate")) add("rounds", "tasks", "taskVersions");
+    if (enabled.has("models")) add("models", "modelVersions", "tasks", "taskVersions");
+    if (enabled.has("train")) add("trainingRuns", "trainingDatasets");
     return plan;
   }
 
@@ -124,6 +127,13 @@ function collectionPlan(
       "labelSets",
       "splitMaps",
     );
+    if (enabled.has("annotate")) add("rounds", "members");
+    if (enabled.has("train")) add("trainingDatasets");
+    return plan;
+  }
+
+  if (scope === "inference" && enabled.has("data") && enabled.has("models")) {
+    add("datasets", "datasetVersions", "tasks", "taskVersions", "models", "modelVersions");
     return plan;
   }
 
@@ -139,10 +149,14 @@ function collectionPlan(
       "datasets",
       "datasetVersions",
       "rounds",
-      "guidelines",
-      "guidelineRevisions",
       "members",
     );
+    if (
+      (effectiveRoles.includes("manager") || effectiveRoles.includes("admin")) &&
+      (enabled.has("guidelines") || enabled.has("activity"))
+    ) {
+      add("guidelines", "guidelineRevisions");
+    }
     if (enabled.has("learning")) {
       add("cycles", "splitMaps", "feedbackRuns", "feedbackSets");
     }
@@ -295,11 +309,25 @@ export function createStoragePolicy(
   });
 }
 
+async function loadOptionalCollection<T>(loader: () => Promise<T[]>): Promise<T[]> {
+  try {
+    return await loader();
+  } catch {
+    return [];
+  }
+}
+
 async function loadChildCollections<T>(
   parents: Array<{ id: number }>,
   path: (id: number) => string,
+  { optional = false }: { optional?: boolean } = {},
 ): Promise<T[]> {
-  const collections = await Promise.all(parents.map((parent) => request<T[]>(path(parent.id))));
+  const collections = await Promise.all(
+    parents.map((parent) => {
+      const loader = () => request<T[]>(path(parent.id));
+      return optional ? loadOptionalCollection(loader) : loader();
+    }),
+  );
   return collections.flat();
 }
 
@@ -307,12 +335,13 @@ export async function loadPlatformProject(
   projectId: number,
   scope: PlatformLoadScope,
   workspaceId?: number,
+  effectiveRoles: readonly WorkspaceRole[] = [],
 ): Promise<PlatformProjectData> {
   const query = projectQuery(projectId);
   const projectModules = await request<ProjectModules>(
     `/projects/${projectId}/modules`,
   );
-  const plan = collectionPlan(scope, projectModules.effective);
+  const plan = collectionPlan(scope, projectModules.effective, effectiveRoles);
   const loadWhen = <T>(
     collection: PlatformCollection,
     loader: () => Promise<T[]>,
@@ -356,8 +385,11 @@ export async function loadPlatformProject(
     loadWhen("models", () =>
       request<RegisteredModel[]>(`/models?${query}`),
     ),
+    // Guidelines are optional round metadata; failures must not discard core resources.
     loadWhen("guidelines", () =>
-      request<Guideline[]>(`/workflow-guidelines?${query}`),
+      loadOptionalCollection(() =>
+        request<Guideline[]>(`/workflow-guidelines?${query}`),
+      ),
     ),
     loadWhen("guidelineProposals", () =>
       request<GuidelineProposal[]>(`/workflow-guidelines/proposals?${query}`),
@@ -414,6 +446,7 @@ export async function loadPlatformProject(
       loadChildCollections<GuidelineRevision>(
         plan.has("guidelineRevisions") ? guidelines : [],
         (id) => `/workflow-guidelines/revisions?${query}&guideline_id=${id}`,
+        { optional: true },
       ),
       loadChildCollections<TrainingRecipeVersion>(
         plan.has("recipeVersions") ? projectRecipes : [],
@@ -884,6 +917,8 @@ export interface DatasetDraft {
   groupKeyField: string;
   registryDatasetId: string;
   registryConfigName: string;
+  documentIds?: number[];
+  purposes?: Dataset["purposes"];
 }
 
 export async function createDatasetWithVersion(
@@ -895,11 +930,12 @@ export async function createDatasetWithVersion(
     name: draft.name.trim(),
     description: draft.description.trim() || null,
     source_type: draft.sourceType,
+    purposes: draft.purposes ?? [],
   });
   if (draft.sourceType === "project_corpus") {
     return post<DatasetVersion>(
       `/projects/${projectId}/datasets/${dataset.id}/versions/project-corpus`,
-      {},
+      draft.documentIds ? { document_ids: draft.documentIds } : {},
     );
   }
   if (draft.sourceType === "upload") {
@@ -965,18 +1001,25 @@ export interface TaskDraft {
   description: string;
   taskKind: TaskKind;
   labelValues: string[];
+  annotationMode?: "paper_entities";
 }
 
 export async function createTaskWithVersion(
   projectId: number,
   draft: TaskDraft,
+  onDefinitionCreated?: (task: TaskDefinition) => void,
+  existingDefinitionId?: number | null,
 ): Promise<TaskVersion> {
-  const task = await post<TaskDefinition>("/tasks", {
+  const task = existingDefinitionId ? { id: existingDefinitionId } : await post<TaskDefinition>("/tasks", {
     project_id: projectId,
     key: draft.key.trim(),
     name: draft.name.trim(),
     description: draft.description.trim() || null,
   });
+  if (!existingDefinitionId) onDefinitionCreated?.(task as TaskDefinition);
+  if (draft.annotationMode === "paper_entities") {
+    return post<TaskVersion>("/tasks/versions", createPaperEntityTaskVersionPayload(projectId, task.id, draft.labelValues));
+  }
   const payload = defaultTaskVersionPayload(projectId, task.id, draft.taskKind);
   payload.label_rules = {
     values: draft.labelValues,
@@ -1126,6 +1169,7 @@ export interface RoundDraft {
 export async function createRound(
   projectId: number,
   draft: RoundDraft,
+  onCreated?: (round: AnnotationRound) => void,
 ): Promise<AnnotationRound> {
   let selectionSetVersionId: number | null = null;
   if (draft.reannotationMode === "targeted_subset") {
@@ -1144,7 +1188,6 @@ export async function createRound(
       strategy: draft.selectionStrategy,
       parameters: { limit: draft.selectionLimit },
       eligibility_filter: {},
-      seed: 42,
     });
     const selectionSet = await post<{ id: number }>(
       `/projects/${projectId}/selection-runs/${selectionRun.id}/materialize`,
@@ -1167,6 +1210,7 @@ export async function createRound(
     open_to_all_annotators: draft.openToAllAnnotators,
     reason: draft.reason.trim() || null,
   });
+  onCreated?.(annotationRound);
   return post<AnnotationRound>(
     `/rounds/${annotationRound.id}/transition?${projectQuery(projectId)}`,
     { status: "open" },

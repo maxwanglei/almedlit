@@ -50,6 +50,7 @@ export interface Dataset extends VersionedResource {
   name: string;
   description: string | null;
   source_type: "upload" | "public_registry" | "project_corpus" | "generated" | "other";
+  purposes?: Array<"annotation" | "inference" | "training_source">;
 }
 
 export interface DatasetVersion extends VersionedResource {
@@ -112,6 +113,10 @@ export interface TrainingDatasetVersion extends VersionedResource {
   composition: Record<string, unknown>[];
   preprocessing: Record<string, unknown>;
   content_hash: string;
+  training_dataset_id?: number;
+  version_number?: number;
+  parent_version_id?: number | null;
+  preparation_manifest?: Record<string, unknown>;
 }
 
 export type LearningFeedbackProducer =

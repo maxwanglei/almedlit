@@ -198,6 +198,16 @@ vi.mock("@/platform/RoundWorkbench", () => ({
     </main>
   ),
 }));
+vi.mock("@/platform/PaperRoundWorkspace", () => ({
+  default: ({ context, contexts, taskInventory, overviewControls }: { context: { round: { id: number } }; contexts: Array<{ round: { id: number } }>; taskInventory?: React.ReactNode; overviewControls?: React.ReactNode }) => (
+    <section aria-label="Mock paper annotation workspace" data-round-id={context.round.id} data-round-contexts={contexts.map((item) => item.round.id).join(",")}>{overviewControls}{taskInventory}</section>
+  ),
+}));
+vi.mock("@/platform/MyWorkTaskInventory", () => ({
+  default: ({ project, canReadAllTasks }: { project: { id: number; workflow_task_count?: number }; canReadAllTasks: boolean }) => (
+    <section aria-label="Mock saved annotation tasks" data-project-id={project.id} data-task-count={project.workflow_task_count} data-read-all={String(canReadAllTasks)} />
+  ),
+}));
 vi.mock("@/platform/TrainingWorkspace", () => ({
   default: ({
     view,
@@ -582,6 +592,7 @@ describe("App workspace selection", () => {
     });
 
     render(<App />);
+    await waitFor(() => expect(window.location.pathname).toBe("/my-work"));
     fireEvent.click(await screen.findByRole("link", { name: "Projects" }));
     await waitFor(() => expect(window.location.pathname).toBe("/projects"));
     fireEvent.change(screen.getByLabelText("Workspace"), {
@@ -623,6 +634,15 @@ describe("App workspace selection", () => {
         "aria-current",
       ),
     ).toBe("page");
+  });
+
+  it("preserves the paper and annotation view when My Work loads from a saved URL", async () => {
+    window.history.replaceState(null, "", "/my-work?project=81&document=42&assignment=1001&view=annotate#paper");
+    render(<App />);
+    await screen.findByLabelText("Mock annotator workspace");
+    expect(window.location.pathname).toBe("/my-work");
+    expect(window.location.search).toBe("?project=81&document=42&assignment=1001&view=annotate");
+    expect(window.location.hash).toBe("#paper");
   });
 
   it("redirects an unauthorized team route to the role default", async () => {
@@ -1006,19 +1026,19 @@ describe("App workspace selection", () => {
 
     act(() => window.history.back());
     await waitFor(() => expect(window.location.pathname).toBe("/projects/81/data"));
-    expect(
-      (await screen.findByLabelText("Mock project platform")).getAttribute(
+    await waitFor(() => expect(
+      screen.getByLabelText("Mock project platform").getAttribute(
         "data-project-id",
       ),
-    ).toBe("81");
+    ).toBe("81"));
 
     act(() => window.history.forward());
     await waitFor(() => expect(window.location.pathname).toBe("/projects/82/data"));
-    expect(
-      (await screen.findByLabelText("Mock project platform")).getAttribute(
+    await waitFor(() => expect(
+      screen.getByLabelText("Mock project platform").getAttribute(
         "data-project-id",
       ),
-    ).toBe("82");
+    ).toBe("82"));
   });
 
   it("shows system Administration only to a deployment superuser", async () => {
@@ -1074,6 +1094,49 @@ describe("App workspace selection", () => {
     expect(window.location.pathname).toBe("/my-work/rounds/71");
   });
 
+  it.each(["/my-work?project=1", "/my-work/rounds/1?view=annotate"])(
+    "composes paper work with task inventory only on the overview at %s",
+    async (path) => {
+      window.history.replaceState(null, "", path);
+      const project = { id: 1, name: "Tucatinib screening project", description: null,
+        annotation_schema: { labels: {} }, annotation_validation_mode: "relaxed", tasks: [],
+        workflow_task_count: 2, workflow_round_count: 1, settings: { modules: ["data", "annotate", "models", "train", "activity"] }, workspace_id: 10 };
+      const context = {
+        project: { id: 1, name: project.name },
+        round: { id: 1, project_id: 1, name: "Tucatinib screening project papers annotation", sequence: 1, dataset_version_id: 1,
+          task_version_id: 1, assistance_policy: "blind", feedback_available: false, status: "open", opened_at: null, closed_at: null },
+        task: { id: 1, key: "paper_classification_1", name: "Paper relevance" },
+        task_version: { id: 1, project_id: 1, task_definition_id: 1, version_number: 1, task_kind: "classification",
+          input_schema: { type: "object", required: ["text"], properties: { text: { type: "string", minLength: 1 } } },
+          output_schema: { type: "string", enum: ["in vitro", "clinical", "not relevance"] },
+          label_rules: { values: ["in vitro", "clinical", "not relevance"], closed_set: true }, annotation_ui: { preset: "classification" },
+          metrics: ["macro_f1", "precision", "recall", "accuracy"], trainer_compatibility: ["tfidf_logistic_regression", "transformer_sequence_classification"], content_hash: "live-task-contract" },
+        cycle: null, guideline: null,
+      };
+      Object.assign(mocks.projectState, { projects: [project], selectedProjectId: 1 });
+      mocks.projectState.loadProjects.mockResolvedValue(1);
+      mocks.getRoundWorkContext.mockResolvedValue(context);
+      mocks.listWorkspaceRoundWorkContexts.mockResolvedValue([context]);
+
+      render(<App />);
+
+      const editor = await screen.findByLabelText("Mock paper annotation workspace");
+      expect(editor.getAttribute("data-round-id")).toBe("1");
+      expect(screen.queryByLabelText("Mock round workbench")).toBeNull();
+      expect(screen.queryByLabelText("Mock annotator workspace")).toBeNull();
+      if (path.startsWith("/my-work?")) {
+        const inventory = screen.getByLabelText("Mock saved annotation tasks");
+        expect(inventory.getAttribute("data-task-count")).toBe("2");
+        expect(inventory.getAttribute("data-read-all")).toBe("true");
+        expect(editor.contains(inventory)).toBe(true);
+        expect(screen.getAllByRole("combobox", { name: "Project" })).toHaveLength(1);
+      } else {
+        expect(screen.queryByLabelText("Mock saved annotation tasks")).toBeNull();
+        expect(screen.queryByRole("combobox", { name: "Project" })).toBeNull();
+      }
+    },
+  );
+
   it("loads My Work rounds from the assignment-scoped workspace endpoint", async () => {
     window.history.replaceState(null, "", "/my-work");
     const context = await mocks.getRoundWorkContext(71);
@@ -1085,11 +1148,11 @@ describe("App workspace selection", () => {
     await waitFor(() =>
       expect(mocks.listWorkspaceRoundWorkContexts).toHaveBeenCalledWith(10),
     );
-    expect(
+    await waitFor(() => expect(
       screen
         .getByLabelText("Mock annotator workspace")
         .getAttribute("data-round-contexts"),
-    ).toBe("71");
+    ).toBe("71"));
     expect(mocks.getRoundWorkContext).not.toHaveBeenCalled();
     expect(
       mocks.usePlatformProject.mock.calls.some(

@@ -1481,9 +1481,30 @@ export async function installPlatformApiMock(
         releaseGateEnabled &&
         releaseDatasetVersion &&
         releaseTaskVersion &&
-        url.pathname === "/api/datasets/training-versions/compose" &&
-        Number(payload.project_id) === 2
+        (url.pathname === "/api/projects/2/training-datasets/preview" ||
+          url.pathname === "/api/projects/2/training-datasets/prepare" ||
+          (url.pathname === "/api/datasets/training-versions/compose" &&
+            Number(payload.project_id) === 2))
       ) {
+        const preview = {
+          ready: true,
+          issues: [],
+          source_counts: [{ dataset_version_id: 222, total_count: 50_000, labeled_count: 50_000, excluded_unlabeled_count: 0 }],
+          input_count: 50_000,
+          labeled_count: 50_000,
+          excluded_unlabeled_count: 0,
+          duplicate_count: 0,
+          item_count: 50_000,
+          group_count: 50_000,
+          split_counts: { train: 40_000, validation: 5_000, test: 5_000, pool: 0 },
+          manifest_hash: releaseGateHash,
+          resolved_sources: payload.sources,
+        };
+        if (url.pathname.endsWith("/preview")) {
+          capture();
+          await json(route, preview);
+          return;
+        }
         releaseLabelSet = {
           id: 231,
           project_id: 2,
@@ -1515,6 +1536,9 @@ export async function installPlatformApiMock(
         releaseTrainingDataset = {
           id: 251,
           project_id: 2,
+          training_dataset_id: 250,
+          version_number: 1,
+          parent_version_id: null,
           name: String(payload.name ?? "IMDb sentiment training set"),
           dataset_version_id: 222,
           task_version_id: 212,
@@ -1527,6 +1551,7 @@ export async function installPlatformApiMock(
             input_field: String(payload.input_field ?? "text"),
             target_field: String(payload.label_field ?? "label"),
           },
+          preparation_manifest: { sources: payload.sources ?? [], preview },
           content_hash: releaseGateHash,
           created_at: timestamp,
         };
@@ -1534,7 +1559,9 @@ export async function installPlatformApiMock(
         await json(
           route,
           {
+            training_dataset: { id: 250, project_id: 2, name: releaseTrainingDataset.name, task_version_id: 212 },
             training_dataset_version: releaseTrainingDataset,
+            preview,
             label_set_version_id: 231,
             split_map_id: 241,
             split_counts: {

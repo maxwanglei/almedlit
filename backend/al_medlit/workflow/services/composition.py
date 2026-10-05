@@ -11,6 +11,7 @@ from al_medlit.core.exceptions import (
     ValidationError,
 )
 from al_medlit.core.storage import ObjectStorage
+from al_medlit.project.models import Project
 from al_medlit.workflow import models, schemas
 
 from .common import (
@@ -21,6 +22,7 @@ from .common import (
     _validate_task_input,
     _validate_task_output,
 )
+from .holdouts import source_split_constraints, validate_source_split_assignments
 from .labels import (
     _compose_label_sets,
     create_imported_label_set_from_field,
@@ -72,6 +74,7 @@ def _deterministic_group_split(
     seed: int,
     train_percent: float,
     validation_percent: float,
+    split_constraints: dict[str, set[str]] | None = None,
 ) -> tuple[dict[str, str], dict[str, int], int]:
     groups = sorted(
         {item.group_key or item.stable_key for item in items},
@@ -82,7 +85,7 @@ def _deterministic_group_split(
     )
     if len(groups) < 3:
         raise ValidationError(
-            "At least three independent groups are required for train, "
+            "At least three independent fully labeled groups are required for train, "
             "validation, and protected test splits"
         )
     requested_train = round(len(groups) * train_percent / 100)
@@ -92,16 +95,38 @@ def _deterministic_group_split(
         max(requested_validation, 1),
         len(groups) - train_count - 1,
     )
-    split_by_group = {
-        group: (
-            "train"
-            if index < train_count
-            else "validation"
-            if index < train_count + validation_count
-            else "test"
+    allowed_by_group = {group: {"train", "validation", "test"} for group in groups}
+    for item in items:
+        allowed_by_group[item.group_key or item.stable_key].intersection_update(
+            (split_constraints or {}).get(item.stable_key, {"train", "validation", "test"})
         )
-        for index, group in enumerate(groups)
-    }
+    fixed_test = {group for group, allowed in allowed_by_group.items() if allowed == {"test"}}
+    if any(not allowed for allowed in allowed_by_group.values()):
+        raise ValidationError("Dataset groups have conflicting protected split requirements")
+    if fixed_test:
+        # Established test membership stays frozen across training series.
+        test_groups = fixed_test
+    else:
+        eligible_test = [group for group in groups if "test" in allowed_by_group[group]]
+        if not eligible_test:
+            raise ValidationError(
+                "Selected groups cannot provide a protected test split; "
+                "include the established held-out examples"
+            )
+        test_count = min(len(groups) - train_count - validation_count, len(eligible_test))
+        test_groups = set(eligible_test[-test_count:])
+    remaining = [group for group in groups if group not in test_groups]
+    if len(remaining) < 2:
+        raise ValidationError(
+            "At least two independent fully labeled groups outside protected test "
+            "membership are required for train and validation"
+        )
+    train_count = min(max(requested_train, 1), len(remaining) - 1)
+    split_by_group = {group: "test" for group in test_groups}
+    split_by_group.update({
+        group: "train" if index < train_count else "validation"
+        for index, group in enumerate(remaining)
+    })
     assignments = {
         item.stable_key: split_by_group[item.group_key or item.stable_key] for item in items
     }
@@ -119,6 +144,10 @@ def compose_training_dataset_version(
     *,
     storage: ObjectStorage,
 ) -> dict:
+    # Preparation acquires the project before source label snapshots. Keep the
+    # legacy composer in the same order when both APIs run for different users.
+    _project(db, data.project_id)
+    db.query(Project).filter(Project.id == data.project_id).with_for_update().one()
     dataset_version = _scoped(
         db,
         models.DatasetVersion,
@@ -167,6 +196,7 @@ def compose_training_dataset_version(
                 label=f"Label for dataset item {item.stable_key!r}",
             )
         label_set = None
+        labeled_items = items
     else:
         assert data.label_set_version_id is not None
         label_set = _scoped(
@@ -185,12 +215,36 @@ def compose_training_dataset_version(
             )
         if not label_set.labels:
             raise ValidationError("The selected label set is empty")
+        labeled_items = [item for item in items if item.stable_key in label_set.labels]
+        labeled_groups = {item.group_key or item.stable_key for item in labeled_items}
+        incomplete_groups = sorted({
+            item.group_key or item.stable_key
+            for item in items
+            if item.stable_key not in label_set.labels
+            and (item.group_key or item.stable_key) in labeled_groups
+        })
+        if incomplete_groups:
+            raise ValidationError(
+                "Training composition requires fully labeled groups; "
+                "unlabeled items share selected groups: "
+                + ", ".join(incomplete_groups[:5])
+            )
 
     assignments, split_counts, group_count = _deterministic_group_split(
-        items,
+        labeled_items,
         seed=data.seed,
         train_percent=data.train_percent,
         validation_percent=data.validation_percent,
+        split_constraints=source_split_constraints(
+            db, dataset_version, items, data.task_version_id
+        ),
+    )
+    # Keep complete source governance while leaving unlabeled groups for future rounds.
+    assignments.update({
+        item.stable_key: "pool" for item in items if item.stable_key not in assignments
+    })
+    validate_source_split_assignments(
+        db, dataset_version, items, assignments, data.task_version_id
     )
     split_name = _resource_name(data.name, " split")
     if (
@@ -237,6 +291,7 @@ def compose_training_dataset_version(
             ),
             actor,
             commit=False,
+            task_version_id=data.task_version_id,
         )
         training_dataset = create_training_dataset_version(
             db,

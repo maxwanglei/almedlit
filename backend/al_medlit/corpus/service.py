@@ -42,6 +42,7 @@ def create_document(
     data: DocumentCreate,
     *,
     structure_source_metadata: dict | None = None,
+    commit: bool = True,
 ) -> Document:
     payload = data.model_dump()
     project = db.get(Project, payload["project_id"])
@@ -57,7 +58,10 @@ def create_document(
         source_metadata=structure_source_metadata,
     )
     doc.active_structure_version = structure_version
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     db.refresh(doc)
     return doc
 

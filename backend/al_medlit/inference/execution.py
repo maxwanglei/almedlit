@@ -21,7 +21,9 @@ from al_medlit.corpus.models import Document, DocumentSentence
 from al_medlit.evidence.models import EvidenceTargetVersion
 from al_medlit.inference import service
 from al_medlit.inference.decoder import (
+    DECODER_VERSION,
     DecoderConfig,
+    ScoreKind,
     SentenceDecodingInput,
     aggregate_window_logits,
     decode_evidence_blocks,
@@ -56,6 +58,23 @@ def _synthetic_logits(ordinal: int) -> tuple[float, float, float]:
     if ordinal == 1:
         return (0.0, 0.0, 6.0)
     return (6.0, 0.0, 0.0)
+
+
+def _window_score_kind(checkpoint_manifest: dict) -> ScoreKind:
+    # Mirrors the producer dispatch here and in runner.run_inference_job. Both
+    # branch on this immutable manifest, so untagged remote results resolve too.
+    if checkpoint_manifest.get("synthetic_mode"):
+        return "logits"
+    from al_medlit.training.model_types.evidence_conventional.model import (
+        CONVENTIONAL_MODEL_TYPES,
+    )
+
+    model_type = str(checkpoint_manifest.get("model_type", "evidence_block_sentence_tagger"))
+    if model_type in CONVENTIONAL_MODEL_TYPES | NEURAL_MODEL_TYPES | PEFT_MODEL_TYPES:
+        # Hard-label producers emit one-hot rows and neural producers emit
+        # softmax output; only the transformer tagger emits raw logits.
+        return "probabilities"
+    return "logits"
 
 
 def _extract_checkpoint(
@@ -136,6 +155,7 @@ def execute_local_inference(
 
     conventional = model_type in CONVENTIONAL_MODEL_TYPES
     neural = model_type in NEURAL_MODEL_TYPES
+    score_kind = _window_score_kind(run.checkpoint.manifest)
 
     runtime_root = (
         Path(work_root)
@@ -480,7 +500,7 @@ def execute_local_inference(
                         for index, sentence in enumerate(selected_sentences)
                     }
                 )
-        aggregated = aggregate_window_logits(window_logits, method="mean")
+        aggregated = aggregate_window_logits(window_logits, score_kind=score_kind, method="mean")
         result = decode_evidence_blocks(
             [
                 SentenceDecodingInput(
@@ -534,6 +554,8 @@ def execute_local_inference(
                 "checkpoint_id": run.checkpoint_id,
                 "checkpoint_checksum_sha256": run.checkpoint.artifact.content_hash,
                 "decoder_config": run.decoder_config,
+                "decoder_version": DECODER_VERSION,
+                "score_kind": score_kind,
                 "scopes": diagnostics_scopes,
             },
             actor_user_id=run.created_by_user_id,
@@ -568,7 +590,8 @@ def execute_local_inference(
         "window_count": len(windows),
         "candidate_count": candidate_count,
         "checkpoint_checksum_sha256": run.checkpoint.artifact.content_hash,
-        "decoder_version": "evidence-block-decoder-v1",
+        "decoder_version": DECODER_VERSION,
+        "score_kind": score_kind,
     }
     db.commit()
     db.refresh(run)
@@ -906,6 +929,7 @@ def finalize_remote_inference(
         != run.checkpoint.artifact.content_hash
     ):
         raise ConflictError("Remote logits do not match the selected checkpoint")
+    score_kind = _window_score_kind(run.checkpoint.manifest)
 
     rows_by_scope = defaultdict(list)
     for row in inference_result["windows"]:
@@ -946,7 +970,7 @@ def finalize_remote_inference(
             window_logits.append(
                 {int(ordinal): values for ordinal, values in row["logits"].items()}
             )
-        aggregated = aggregate_window_logits(window_logits, method="mean")
+        aggregated = aggregate_window_logits(window_logits, score_kind=score_kind, method="mean")
         sentences = (
             db.query(DocumentSentence)
             .filter(DocumentSentence.structure_version_id == structure_version_id)
@@ -1026,6 +1050,8 @@ def finalize_remote_inference(
         ),
         "inference_log_artifact_id": log_artifact.id,
         "checkpoint_checksum_sha256": run.checkpoint.artifact.content_hash,
+        "decoder_version": DECODER_VERSION,
+        "score_kind": score_kind,
     }
     db.commit()
     db.refresh(run)

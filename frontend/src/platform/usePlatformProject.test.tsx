@@ -3,6 +3,9 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { WorkspaceRole } from "@/types/api";
+
+import type { RoundDraft } from "./api";
 import { EMPTY_PLATFORM_PROJECT_DATA } from "./types";
 import { usePlatformProject } from "./usePlatformProject";
 
@@ -35,7 +38,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("./api", () => mocks);
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   mocks.loadPlatformProject.mockImplementation(
     async (projectId: number, scope: string) => ({
       ...EMPTY_PLATFORM_PROJECT_DATA,
@@ -60,7 +63,7 @@ describe("usePlatformProject load scope", () => {
     );
 
     await waitFor(() =>
-      expect(mocks.loadPlatformProject).toHaveBeenCalledWith(7, "data", 5),
+      expect(mocks.loadPlatformProject).toHaveBeenCalledWith(7, "data", 5, undefined),
     );
     await waitFor(() =>
       expect(result.current.data.projectModules.effective).toEqual(["data"]),
@@ -69,14 +72,14 @@ describe("usePlatformProject load scope", () => {
     rerender({ scope: "train" });
 
     await waitFor(() =>
-      expect(mocks.loadPlatformProject).toHaveBeenLastCalledWith(7, "train", 5),
+      expect(mocks.loadPlatformProject).toHaveBeenLastCalledWith(7, "train", 5, undefined),
     );
     await waitFor(() =>
       expect(result.current.data.projectModules.effective).toEqual(["train"]),
     );
 
     await act(() => result.current.reload());
-    expect(mocks.loadPlatformProject).toHaveBeenLastCalledWith(7, "train", 5);
+    expect(mocks.loadPlatformProject).toHaveBeenLastCalledWith(7, "train", 5, undefined);
   });
 
   it("does not load section data while disabled", async () => {
@@ -111,11 +114,11 @@ describe("usePlatformProject load scope", () => {
     );
 
     await waitFor(() =>
-      expect(mocks.loadPlatformProject).toHaveBeenCalledWith(7, "data", 5),
+      expect(mocks.loadPlatformProject).toHaveBeenCalledWith(7, "data", 5, undefined),
     );
     rerender({ projectId: 8 });
     await waitFor(() =>
-      expect(mocks.loadPlatformProject).toHaveBeenCalledWith(8, "data", 5),
+      expect(mocks.loadPlatformProject).toHaveBeenCalledWith(8, "data", 5, undefined),
     );
 
     await act(async () => {
@@ -131,6 +134,112 @@ describe("usePlatformProject load scope", () => {
     });
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.data.projectModules.project_id).toBe(8);
+    expect(result.current.error).toBeNull();
+  });
+
+  it("clears the previous section's data while navigation loads and after failure", async () => {
+    const roundsLoad = deferred<typeof EMPTY_PLATFORM_PROJECT_DATA>();
+    const previousData = {
+      ...EMPTY_PLATFORM_PROJECT_DATA,
+      projectModules: {
+        ...EMPTY_PLATFORM_PROJECT_DATA.projectModules,
+        project_id: 7,
+      },
+    };
+    mocks.loadPlatformProject
+      .mockResolvedValueOnce(previousData)
+      .mockReturnValueOnce(roundsLoad.promise);
+    const { result, rerender } = renderHook(
+      ({ scope }: { scope: "data" | "rounds" }) =>
+        usePlatformProject(7, 5, true, scope),
+      { initialProps: { scope: "data" as "data" | "rounds" } },
+    );
+    await waitFor(() => expect(result.current.data).toBe(previousData));
+
+    rerender({ scope: "rounds" });
+
+    expect(result.current.loading).toBe(true);
+    expect(result.current.data).toBe(EMPTY_PLATFORM_PROJECT_DATA);
+
+    await act(async () => {
+      roundsLoad.reject(new Error("Project data could not be loaded"));
+    });
+
+    expect(result.current.loading).toBe(false);
+    expect(result.current.error).toBe("Project data could not be loaded");
+    expect(result.current.data).toBe(EMPTY_PLATFORM_PROJECT_DATA);
+  });
+
+  it("reloads with changed roles and ignores a response from the previous access context", async () => {
+    const managerRoles: readonly WorkspaceRole[] = ["annotator", "trainer", "manager"];
+    const trainerRoles: readonly WorkspaceRole[] = ["annotator", "trainer"];
+    const managerLoad = deferred<typeof EMPTY_PLATFORM_PROJECT_DATA>();
+    const trainerLoad = deferred<typeof EMPTY_PLATFORM_PROJECT_DATA>();
+    mocks.loadPlatformProject
+      .mockReturnValueOnce(managerLoad.promise)
+      .mockReturnValueOnce(trainerLoad.promise);
+    const { result, rerender } = renderHook(
+      ({ roles }: { roles: readonly WorkspaceRole[] }) =>
+        usePlatformProject(7, 5, true, "rounds", roles),
+      { initialProps: { roles: managerRoles } },
+    );
+    expect(mocks.loadPlatformProject).toHaveBeenLastCalledWith(7, "rounds", 5, managerRoles);
+
+    rerender({ roles: trainerRoles });
+    expect(mocks.loadPlatformProject).toHaveBeenLastCalledWith(7, "rounds", 5, trainerRoles);
+
+    await act(async () => {
+      managerLoad.resolve({
+        ...EMPTY_PLATFORM_PROJECT_DATA,
+        projectModules: {
+          ...EMPTY_PLATFORM_PROJECT_DATA.projectModules,
+          project_id: 7,
+        },
+      });
+    });
+    expect(result.current.data).toBe(EMPTY_PLATFORM_PROJECT_DATA);
+    expect(result.current.loading).toBe(true);
+
+    await act(async () => {
+      trainerLoad.resolve(EMPTY_PLATFORM_PROJECT_DATA);
+    });
+    expect(result.current.loading).toBe(false);
+    expect(result.current.error).toBeNull();
+
+    rerender({ roles: [...trainerRoles] });
+    expect(mocks.loadPlatformProject).toHaveBeenCalledTimes(2);
+  });
+
+  it("retains the active roles when reloading after a mutation", async () => {
+    const roles: readonly WorkspaceRole[] = ["annotator", "trainer", "manager"];
+    mocks.createRound.mockResolvedValueOnce({ id: 21 });
+    const { result } = renderHook(() =>
+      usePlatformProject(7, 5, true, "rounds", roles),
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const draft: RoundDraft = {
+      name: "Round 2",
+      datasetVersionId: 2,
+      taskVersionId: 3,
+      cycleId: null,
+      splitMapId: null,
+      guidelineRevisionId: null,
+      feedbackSetVersionId: null,
+      assistancePolicy: "reveal_after_first_pass",
+      reannotationMode: "targeted_subset",
+      selectionStrategy: "all",
+      selectionLimit: 0,
+      annotatorUserIds: [],
+      openToAllAnnotators: true,
+      reason: "Follow-up review",
+    };
+
+    await act(() => result.current.addRound(draft));
+
+    expect(mocks.createRound).toHaveBeenCalledWith(7, draft);
+    expect(mocks.loadPlatformProject).toHaveBeenCalledTimes(2);
+    expect(mocks.loadPlatformProject).toHaveBeenLastCalledWith(7, "rounds", 5, roles);
+    expect(result.current.busy).toBe(false);
     expect(result.current.error).toBeNull();
   });
 });

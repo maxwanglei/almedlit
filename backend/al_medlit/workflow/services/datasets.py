@@ -153,6 +153,7 @@ def create_project_corpus_dataset_version(
     project_id: int,
     dataset_id: int,
     actor: User,
+    document_ids: list[int] | None = None,
 ) -> models.DatasetVersion:
     dataset = _scoped(db, models.Dataset, dataset_id, project_id, "Dataset")
     if dataset.source_type != "project_corpus":
@@ -160,9 +161,14 @@ def create_project_corpus_dataset_version(
 
     # Serialize snapshots per dataset so an unchanged corpus is materialized once.
     db.query(models.Dataset).filter(models.Dataset.id == dataset.id).with_for_update().one()
-    documents = (
-        db.query(Document).filter(Document.project_id == project_id).order_by(Document.id).all()
-    )
+    query = db.query(Document).filter(Document.project_id == project_id)
+    if document_ids is not None:
+        if not document_ids or any(item <= 0 for item in document_ids):
+            raise ValidationError("Select at least one valid project document")
+        query = query.filter(Document.id.in_(set(document_ids)))
+    documents = query.order_by(Document.id).all()
+    if document_ids is not None and {item.id for item in documents} != set(document_ids):
+        raise ValidationError("All selected documents must belong to this project")
     if not documents:
         raise ValidationError("The project corpus has no documents to snapshot")
 
