@@ -500,9 +500,8 @@ class SSHSlurmComputeBackend:
         queue = self.runner.run(
             self.ssh_argv(("squeue", "--noheader", "--jobs", job_id, "--format", "%T"))
         )
-        if queue.returncode != 0:
-            raise ComputeBackendError(queue.stderr or "squeue failed")
-        active_state = queue.stdout.strip().splitlines()
+        # Purged jobs can make squeue fail; their terminal state lives in sacct.
+        active_state = queue.stdout.strip().splitlines() if queue.returncode == 0 else []
         if active_state:
             raw = normalize_slurm_state(active_state[0])
             return JobState(status=_ACTIVE_STATES.get(raw, "unknown"), raw_state=raw)

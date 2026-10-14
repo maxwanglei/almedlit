@@ -12,6 +12,7 @@ from al_medlit.core.exceptions import (
     ValidationError,
 )
 from al_medlit.model_artifacts import quota as artifact_quota
+from al_medlit.project.models import Project
 from al_medlit.workflow import models, schemas
 
 from .common import (
@@ -221,6 +222,9 @@ def create_training_run(
         },
         created_by_user_id=actor.id,
     )
+    # The insert's registered-model foreign key also takes a model row lock.
+    # Publication holds quota before that model, so launches must do the same.
+    artifact_quota.lock_workspace_artifact_quota(db, workspace_id=project.workspace_id)
     db.add(training_run)
     db.flush()
     reservation = artifact_quota.reserve_artifact_bytes(
@@ -256,6 +260,39 @@ def list_training_runs(db: Session, project_id: int) -> list[models.TrainingRun]
 
 def get_training_run(db: Session, project_id: int, training_run_id: int) -> models.TrainingRun:
     return _scoped(db, models.TrainingRun, training_run_id, project_id, "Training run")
+
+
+def lock_training_run_for_mutation(
+    db: Session,
+    training_run_id: int,
+    *,
+    project_id: int | None = None,
+) -> models.TrainingRun:
+    """Lock quota before the run, matching artifact publication's lock order."""
+
+    workspace_query = (
+        db.query(Project.workspace_id)
+        .join(models.TrainingRun, models.TrainingRun.project_id == Project.id)
+        .filter(models.TrainingRun.id == training_run_id)
+    )
+    if project_id is not None:
+        workspace_query = workspace_query.filter(models.TrainingRun.project_id == project_id)
+    workspace_id = workspace_query.scalar()
+    if workspace_id is None:
+        raise NotFoundError("Training run not found")
+    artifact_quota.lock_workspace_artifact_quota(db, workspace_id=workspace_id)
+    # A caller may have loaded the run before waiting for publication to commit.
+    # Refresh its status and heartbeat under the lock before making a decision.
+    run = (
+        db.query(models.TrainingRun)
+        .filter(models.TrainingRun.id == training_run_id)
+        .populate_existing()
+        .with_for_update()
+        .one_or_none()
+    )
+    if run is None:
+        raise NotFoundError("Training run not found")
+    return run
 
 
 def list_training_run_evaluations(

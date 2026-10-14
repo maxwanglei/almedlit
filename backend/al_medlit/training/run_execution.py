@@ -136,14 +136,7 @@ def _claim_training_run(
     db: Session,
     training_run_id: int,
 ) -> tuple[workflow_models.TrainingRun, bool]:
-    run = (
-        db.query(workflow_models.TrainingRun)
-        .filter(workflow_models.TrainingRun.id == training_run_id)
-        .with_for_update()
-        .one_or_none()
-    )
-    if run is None:
-        raise NotFoundError("Training run not found")
+    run = workflow_service.lock_training_run_for_mutation(db, training_run_id)
     if run.status in _TERMINAL_STATUSES or run.status == "running":
         db.rollback()
         return db.get(workflow_models.TrainingRun, training_run_id), False
@@ -180,14 +173,7 @@ def heartbeat_training_run(
 ) -> bool:
     """Renew one running worker lease and record its durable heartbeat."""
 
-    run = (
-        db.query(workflow_models.TrainingRun)
-        .filter(workflow_models.TrainingRun.id == training_run_id)
-        .with_for_update()
-        .one_or_none()
-    )
-    if run is None:
-        raise NotFoundError("Training run not found")
+    run = workflow_service.lock_training_run_for_mutation(db, training_run_id)
     if run.status != "running":
         db.rollback()
         return False
@@ -249,12 +235,7 @@ def reconcile_stale_training_runs(
         heartbeat_at = _worker_heartbeat_at(candidate)
         if heartbeat_at is not None and heartbeat_at > cutoff:
             continue
-        run = (
-            db.query(workflow_models.TrainingRun)
-            .filter(workflow_models.TrainingRun.id == candidate.id)
-            .with_for_update()
-            .one()
-        )
+        run = workflow_service.lock_training_run_for_mutation(db, candidate.id)
         heartbeat_at = _worker_heartbeat_at(run)
         if run.status != "running" or (
             heartbeat_at is not None and heartbeat_at > cutoff
@@ -1578,6 +1559,9 @@ def _ensure_model_version(
     pinned: _PinnedRun,
     payload: workflow_schemas.ModelVersionCreate,
 ) -> workflow_models.ModelVersion:
+    # Candidate publication may have committed before an unsupported protected
+    # evaluation. Reacquire quota before locking the model on every branch.
+    artifact_quota.lock_workspace_artifact_quota(db, workspace_id=pinned.workspace_id)
     db.query(workflow_models.RegisteredModel).filter(
         workflow_models.RegisteredModel.id == pinned.registered_model.id
     ).with_for_update().one()
@@ -1619,12 +1603,7 @@ def _finish_training_run(
     runtime_snapshot: dict,
     evaluation: workflow_models.ModelEvaluation | None,
 ) -> workflow_models.TrainingRun:
-    run = (
-        db.query(workflow_models.TrainingRun)
-        .filter(workflow_models.TrainingRun.id == pinned.run.id)
-        .with_for_update()
-        .one()
-    )
+    run = workflow_service.lock_training_run_for_mutation(db, pinned.run.id)
     if run.status == "succeeded":
         db.rollback()
         return db.get(workflow_models.TrainingRun, run.id)

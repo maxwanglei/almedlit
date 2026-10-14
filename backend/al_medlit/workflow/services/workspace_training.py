@@ -26,7 +26,7 @@ from .models import (
     _model_version_lineage_payloads,
 )
 from .training_runs import (
-    get_training_run,
+    lock_training_run_for_mutation,
 )
 
 MAX_DATASET_UPLOAD_BYTES = 25 * 1024 * 1024
@@ -695,7 +695,7 @@ def transition_training_run(
     training_run_id: int,
     data: schemas.TrainingRunTransition,
 ) -> models.TrainingRun:
-    run = get_training_run(db, project_id, training_run_id)
+    run = lock_training_run_for_mutation(db, training_run_id, project_id=project_id)
     allowed = {
         "queued": {"running", "cancelled", "failed"},
         "running": {"succeeded", "failed", "cancelled"},

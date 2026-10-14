@@ -342,7 +342,7 @@ class _HuggingFaceSftTrainer:
         output_dir = (
             destination / "model"
             if parameterization == Parameterization.FULL.value
-            else destination / "adapter"
+            else destination
         )
         model.save_pretrained(output_dir, safe_serialization=True)
         tokenizer.save_pretrained(destination / "tokenizer")

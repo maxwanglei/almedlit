@@ -13,7 +13,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from al_medlit.training.compute.base import CommandResult, JobBundle
+from al_medlit.training.compute.base import CommandResult, ComputeBackendError, JobBundle
 from al_medlit.training.compute.config import validate_compute_config
 from al_medlit.training.compute.local import LocalComputeBackend
 from al_medlit.training.compute.local_worker import run as run_local_worker
@@ -243,6 +243,81 @@ def test_slurm_submit_poll_terminal_and_cancel_commands(tmp_path, monkeypatch):
     assert state.exit_code == 0
     assert any("sbatch" in command[-1] for command in runner.commands)
     assert any("sacct" in command[-1] for command in runner.commands)
+
+
+@pytest.mark.parametrize(
+    "queue_result",
+    [
+        pytest.param(_result(stdout=" \n"), id="empty-queue"),
+        pytest.param(
+            _result(returncode=1, stderr="slurm_load_jobs error: Invalid job id specified"),
+            id="purged-job",
+        ),
+        pytest.param(
+            _result(returncode=1, stdout="RUNNING\n", stderr="squeue failed"),
+            id="failed-queue-with-partial-output",
+        ),
+    ],
+)
+def test_slurm_poll_falls_back_to_accounting(tmp_path, queue_result):
+    runner = FakeRunner([queue_result, _result(stdout="COMPLETED|0:0\n")])
+    backend = SSHSlurmComputeBackend(_slurm_config(tmp_path), runner)
+
+    state = backend.poll("12345")
+
+    assert state.status == "succeeded"
+    assert state.raw_state == "COMPLETED"
+    assert state.exit_code == 0
+    assert [shlex.split(command[-1]) for command in runner.commands] == [
+        ["squeue", "--noheader", "--jobs", "12345", "--format", "%T"],
+        [
+            "sacct",
+            "--noheader",
+            "--parsable2",
+            "--jobs",
+            "12345",
+            "--format",
+            "State,ExitCode",
+        ],
+    ]
+
+
+@pytest.mark.parametrize("queue_returncode", [0, 1])
+def test_slurm_poll_reports_accounting_failure_after_queue_fallback(tmp_path, queue_returncode):
+    runner = FakeRunner(
+        [
+            _result(returncode=queue_returncode, stderr="squeue unavailable"),
+            _result(returncode=1, stderr="sacct unavailable"),
+        ]
+    )
+    backend = SSHSlurmComputeBackend(_slurm_config(tmp_path), runner)
+
+    with pytest.raises(ComputeBackendError, match="sacct unavailable"):
+        backend.poll("12345")
+
+    assert len(runner.commands) == 2
+
+
+@pytest.mark.parametrize("raw_state, status", [("PENDING", "submitted"), ("RUNNING", "running")])
+def test_slurm_poll_keeps_active_queue_state_without_accounting(tmp_path, raw_state, status):
+    runner = FakeRunner([_result(stdout=f"{raw_state}\n")])
+    backend = SSHSlurmComputeBackend(_slurm_config(tmp_path), runner)
+
+    state = backend.poll("12345")
+
+    assert state.status == status
+    assert state.raw_state == raw_state
+    assert len(runner.commands) == 1
+
+
+def test_slurm_poll_returns_unknown_while_accounting_is_empty(tmp_path):
+    runner = FakeRunner([_result(returncode=1, stderr="Invalid job id specified"), _result()])
+    backend = SSHSlurmComputeBackend(_slurm_config(tmp_path), runner)
+
+    state = backend.poll("12345")
+
+    assert state.status == "unknown"
+    assert len(runner.commands) == 2
 
 
 def test_concurrent_slurm_submissions_share_one_job_and_sentinel(tmp_path, monkeypatch):
