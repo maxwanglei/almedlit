@@ -37,6 +37,13 @@ server {
     index index.html;
 
     location /api/ {
+        # Packages allow 64 GiB of files; leave room for multipart metadata.
+        client_max_body_size 65g;
+
+        # Model imports, inference, and bundle builds can run synchronously.
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+
         proxy_pass ${API_PROXY_TARGET};
         proxy_http_version 1.1;
         proxy_set_header Host $proxy_host;

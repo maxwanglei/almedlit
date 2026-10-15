@@ -736,6 +736,154 @@ describe("TrainingScreen base-model selection", () => {
     expect(onLaunch).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { loaded: true, taskId: 12 },
+    { loaded: true, taskId: 13 },
+    { loaded: false, taskId: 12 },
+    { loaded: false, taskId: 13 },
+  ])(
+    "launches the requested older training version (loaded: $loaded, task: $taskId)",
+    async ({ loaded, taskId }) => {
+      const user = userEvent.setup();
+      const onLaunch = vi.fn().mockResolvedValue(undefined);
+      const data = trainingData([classicalRecipe], []);
+      data.environments[0].environment_class = "classical-cpu";
+      data.environments[0].name = "Verified classical CPU";
+      data.taskVersions.push({
+        ...data.taskVersions[0],
+        id: 13,
+        version_number: 4,
+      });
+      const olderVersion = {
+        ...data.trainingDatasets[0],
+        training_dataset_id: 5,
+        version_number: 1,
+        task_version_id: taskId,
+      };
+      data.trainingDatasets = [
+        { ...olderVersion, id: 52, version_number: 2 },
+        olderVersion,
+      ];
+      const { rerender } = render(
+        <TrainingScreen
+          data={loaded ? data : EMPTY_PLATFORM_PROJECT_DATA}
+          busy={false}
+          initialTrainingDatasetVersionId={olderVersion.id}
+          onLaunch={onLaunch}
+        />,
+      );
+      if (!loaded) {
+        rerender(
+          <TrainingScreen
+            data={data}
+            busy={false}
+            initialTrainingDatasetVersionId={olderVersion.id}
+            onLaunch={onLaunch}
+          />,
+        );
+      }
+
+      expect(
+        (
+          screen.getByRole("combobox", {
+            name: "Training dataset",
+          }) as HTMLSelectElement
+        ).value,
+      ).toBe("51");
+      expect(
+        (
+          screen.getByRole("combobox", {
+            name: "Task version",
+          }) as HTMLSelectElement
+        ).value,
+      ).toBe(String(taskId));
+      await user.click(screen.getByRole("button", { name: "Continue" }));
+      await user.type(
+        screen.getByRole("textbox", { name: "Model name" }),
+        "Older dataset baseline",
+      );
+      await user.click(screen.getByRole("button", { name: "Review & Launch" }));
+      await user.click(screen.getByRole("button", { name: "Launch training" }));
+
+      await waitFor(() =>
+        expect(onLaunch).toHaveBeenCalledWith(
+          expect.objectContaining({
+            trainingDatasetVersionId: 51,
+            taskVersionId: taskId,
+          }),
+        ),
+      );
+    },
+  );
+
+  it("preserves manual dataset changes and falls back when the task changes", async () => {
+    const user = userEvent.setup();
+    const data = trainingData([classicalRecipe], []);
+    data.taskVersions.push({
+      ...data.taskVersions[0],
+      id: 13,
+      version_number: 4,
+    });
+    data.trainingDatasets = [
+      { ...data.trainingDatasets[0], id: 52 },
+      data.trainingDatasets[0],
+      { ...data.trainingDatasets[0], id: 61, task_version_id: 13 },
+    ];
+    const onLaunch = vi.fn();
+    const { rerender } = render(
+      <TrainingScreen
+        data={data}
+        busy={false}
+        initialTrainingDatasetVersionId={51}
+        onLaunch={onLaunch}
+      />,
+    );
+    const datasetSelect = screen.getByRole("combobox", {
+      name: "Training dataset",
+    }) as HTMLSelectElement;
+    expect(datasetSelect.value).toBe("51");
+
+    await user.selectOptions(datasetSelect, "52");
+    rerender(
+      <TrainingScreen
+        data={{ ...data, trainingDatasets: [...data.trainingDatasets] }}
+        busy={false}
+        initialTrainingDatasetVersionId={51}
+        onLaunch={onLaunch}
+      />,
+    );
+    expect(datasetSelect.value).toBe("52");
+
+    const taskSelect = screen.getByRole("combobox", { name: "Task version" });
+    await user.selectOptions(taskSelect, "13");
+    expect(datasetSelect.value).toBe("61");
+    await user.selectOptions(taskSelect, "12");
+    expect(datasetSelect.value).toBe("52");
+  });
+
+  it("never substitutes another version when the requested training version is unavailable", () => {
+    render(
+      <TrainingScreen
+        data={trainingData([classicalRecipe], [])}
+        busy={false}
+        initialTrainingDatasetVersionId={999}
+        onLaunch={vi.fn()}
+      />,
+    );
+
+    expect(
+      (
+        screen.getByRole("combobox", {
+          name: "Training dataset",
+        }) as HTMLSelectElement
+      ).value,
+    ).toBe("0");
+    expect(
+      (screen.getByRole("button", { name: "Continue" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+  });
+
   it("binds a source dataset deep link to its composed training dataset", async () => {
     const data = trainingData([classicalRecipe], []);
     data.taskVersions.push({

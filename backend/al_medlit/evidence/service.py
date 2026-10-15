@@ -533,6 +533,7 @@ def _validate_block_policy(
     db: Session,
     *,
     project_id: int,
+    guideline_version_id: int | None,
     payload: EvidenceBlockPayloadV1,
     start: DocumentSentence,
     end: DocumentSentence,
@@ -563,6 +564,7 @@ def _validate_block_policy(
                 Annotation.project_id == project_id,
                 Annotation.document_id == start.structure_version.document_id,
                 Annotation.status == status,
+                Annotation.guideline_version_id == guideline_version_id,
                 EvidenceBlockAnnotation.structure_version_id
                 == payload.structure_version_id,
                 EvidenceBlockAnnotation.target_version_id
@@ -592,6 +594,7 @@ def _validate_block_policy(
                 Annotation.project_id == project_id,
                 Annotation.document_id == start.structure_version.document_id,
                 Annotation.status == status,
+                Annotation.guideline_version_id == guideline_version_id,
                 EvidenceBlockAnnotation.structure_version_id
                 == payload.structure_version_id,
                 EvidenceBlockAnnotation.target_version_id == payload.target_version_id,
@@ -642,6 +645,7 @@ def _create_block_internal(
     _validate_block_policy(
         db,
         project_id=values["project_id"],
+        guideline_version_id=values.get("guideline_version_id"),
         payload=payload,
         start=start,
         end=end,
@@ -841,6 +845,7 @@ def update_evidence_block(
     _validate_block_policy(
         db,
         project_id=annotation.project_id,
+        guideline_version_id=annotation.guideline_version_id,
         payload=payload,
         start=start,
         end=end,

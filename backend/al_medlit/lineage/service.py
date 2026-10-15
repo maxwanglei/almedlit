@@ -241,29 +241,35 @@ def _derive_frozen_annotation_contents(
     project_id: int,
     snapshot_documents: dict[int, CorpusSnapshotDocument],
     requested_targets: set[int],
+    requested_guidelines: set[int],
 ) -> tuple[list[AnnotationSetItemCreate], list[AnnotationSetReviewRegionCreate]]:
     reviewed_by_scope: dict[tuple[int, int, int], list[tuple[int, int]]] = {}
     regions: list[AnnotationSetReviewRegionCreate] = []
 
     for snapshot_document in snapshot_documents.values():
         for target_version_id in sorted(requested_targets):
-            assignments = (
-                db.query(TaskAssignment)
-                .filter(
-                    TaskAssignment.project_id == project_id,
-                    TaskAssignment.document_id == snapshot_document.document_id,
-                    TaskAssignment.structure_version_id
-                    == snapshot_document.structure_version_id,
-                    TaskAssignment.target_version_id == target_version_id,
-                    TaskAssignment.status.in_(_FROZEN_ASSIGNMENT_STATUSES),
-                )
-                .all()
+            assignment_query = db.query(TaskAssignment).filter(
+                TaskAssignment.project_id == project_id,
+                TaskAssignment.document_id == snapshot_document.document_id,
+                TaskAssignment.structure_version_id
+                == snapshot_document.structure_version_id,
+                TaskAssignment.target_version_id == target_version_id,
+                TaskAssignment.status.in_(_FROZEN_ASSIGNMENT_STATUSES),
             )
+            if requested_guidelines:
+                assignment_query = assignment_query.filter(
+                    TaskAssignment.guideline_version_id.in_(requested_guidelines)
+                )
+            assignments = assignment_query.all()
             reviewer_ids = sorted({assignment.assignee_user_id for assignment in assignments})
             if not reviewer_ids:
                 continue
-            reviewer_intervals: list[list[tuple[int, int]]] = []
-            for reviewer_id in reviewer_ids:
+            reviewer_intervals: dict[int, list[tuple[int, int]]] = {
+                reviewer_id: [] for reviewer_id in reviewer_ids
+            }
+            # Combine only finalized guideline rounds for each reviewer before
+            # intersecting reviewers, including reviewers with no scoped coverage.
+            for assignment in assignments:
                 rows = (
                     db.query(EvidenceReviewCoverage)
                     .filter(
@@ -273,18 +279,17 @@ def _derive_frozen_annotation_contents(
                         EvidenceReviewCoverage.structure_version_id
                         == snapshot_document.structure_version_id,
                         EvidenceReviewCoverage.target_version_id == target_version_id,
-                        EvidenceReviewCoverage.reviewer_user_id == reviewer_id,
+                        EvidenceReviewCoverage.reviewer_user_id == assignment.assignee_user_id,
+                        EvidenceReviewCoverage.guideline_version_id
+                        == assignment.guideline_version_id,
                     )
-                    .order_by(EvidenceReviewCoverage.start_sentence_ordinal)
                     .all()
                 )
-                reviewer_intervals.append(
-                    [
-                        (row.start_sentence_ordinal, row.end_sentence_ordinal)
-                        for row in rows
-                    ]
+                reviewer_intervals[assignment.assignee_user_id].extend(
+                    (row.start_sentence_ordinal, row.end_sentence_ordinal)
+                    for row in rows
                 )
-            effective = _intersect_interval_sets(reviewer_intervals)
+            effective = _intersect_interval_sets(list(reviewer_intervals.values()))
             scope = (
                 snapshot_document.document_id,
                 snapshot_document.structure_version_id,
@@ -307,7 +312,7 @@ def _derive_frozen_annotation_contents(
             )
 
     items: list[AnnotationSetItemCreate] = []
-    gold_annotations = (
+    gold_query = (
         db.query(Annotation)
         .join(EvidenceBlockAnnotation)
         .filter(
@@ -317,7 +322,13 @@ def _derive_frozen_annotation_contents(
             Annotation.document_id.in_(snapshot_documents),
             EvidenceBlockAnnotation.target_version_id.in_(requested_targets),
         )
-        .order_by(
+    )
+    if requested_guidelines:
+        gold_query = gold_query.filter(
+            Annotation.guideline_version_id.in_(requested_guidelines)
+        )
+    gold_annotations = (
+        gold_query.order_by(
             Annotation.document_id,
             EvidenceBlockAnnotation.target_version_id,
             EvidenceBlockAnnotation.start_sentence_ordinal,
@@ -386,13 +397,25 @@ def _derive_frozen_annotation_contents(
     return items, regions
 
 
+def _merge_intervals(intervals: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Canonicalize overlapping or adjacent inclusive sentence ranges."""
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(intervals):
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
 def _intersect_interval_sets(
     interval_sets: list[list[tuple[int, int]]],
 ) -> list[tuple[int, int]]:
     if not interval_sets:
         return []
-    intersection = list(interval_sets[0])
-    for candidates in interval_sets[1:]:
+    intersection = _merge_intervals(interval_sets[0])
+    for intervals in interval_sets[1:]:
+        candidates = _merge_intervals(intervals)
         next_intersection: list[tuple[int, int]] = []
         left_index = 0
         right_index = 0
@@ -427,6 +450,7 @@ def freeze_annotation_set(
         raise NotFoundError("Corpus snapshot not found in project")
     snapshot_documents = {item.document_id: item for item in snapshot.documents}
     requested_targets = set(data.target_version_ids)
+    requested_guidelines = set(data.guideline_version_ids)
     if data.items or data.reviewed_regions:
         raise ValidationError(
             "Frozen annotation items and reviewed regions are server-derived; omit them"
@@ -437,7 +461,7 @@ def freeze_annotation_set(
             raise ValidationError(
                 f"Evidence target version {target_version_id} is not in project"
             )
-    for guideline_version_id in set(data.guideline_version_ids):
+    for guideline_version_id in requested_guidelines:
         guideline = db.get(GuidelineVersion, guideline_version_id)
         if guideline is None or guideline.project_id != project_id:
             raise ValidationError(
@@ -449,6 +473,7 @@ def freeze_annotation_set(
         project_id=project_id,
         snapshot_documents=snapshot_documents,
         requested_targets=requested_targets,
+        requested_guidelines=requested_guidelines,
     )
     if not derived_regions:
         raise ValidationError(
@@ -459,9 +484,7 @@ def freeze_annotation_set(
         for item in derived_items
         if item.guideline_version_id is not None
     }
-    guideline_version_ids = sorted(
-        set(data.guideline_version_ids) | derived_guidelines
-    )
+    guideline_version_ids = sorted(requested_guidelines | derived_guidelines)
 
     manifest = {
         "schema_version": "annotation-set-v1",

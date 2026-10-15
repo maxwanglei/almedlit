@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 
+import pytest
+
 
 @dataclass(frozen=True)
 class AuthHeaders:
@@ -203,6 +205,49 @@ def test_global_auth_guard_blocks_protected_routes(client):
         ).status_code
         == 401
     )
+
+
+@pytest.mark.parametrize(
+    ("role", "expected_status"),
+    [("annotator", 403), ("trainer", 403), ("manager", 200), ("admin", 200)],
+)
+def test_create_document_requires_manager_role(client, db, role, expected_status):
+    from al_medlit.corpus.models import Document, DocumentStructureVersion
+    from al_medlit.project import service as project_service
+    from al_medlit.project.schemas import ProjectCreate
+    from al_medlit.workspace import service as workspace_service
+
+    owner = _make_user(db, "document-owner")
+    member = _make_user(db, "document-member")
+    workspace = workspace_service.create_team_workspace(db, owner, name="Documents")
+    workspace_service.add_member(db, workspace.id, member.id, role=role)
+    project = project_service.create_project(
+        db,
+        ProjectCreate(name="documents", workspace_id=workspace.id),
+    )
+    db.commit()
+    payload = {
+        "project_id": project.id,
+        "external_id": "11111",
+        "title": "Unverified article",
+        "text": "Unverified article text.",
+        "source": "pubmed",
+    }
+
+    response = client.post("/api/documents", json=payload, headers=_headers_for(member))
+
+    assert response.status_code == expected_status
+    documents = db.query(Document).filter(Document.project_id == project.id).all()
+    if expected_status == 403:
+        assert response.json()["detail"] == "Insufficient workspace role"
+        assert documents == []
+        assert db.query(DocumentStructureVersion).count() == 0
+    else:
+        assert len(documents) == 1
+        assert response.json()["id"] == documents[0].id
+        assert response.json()["external_id"] == payload["external_id"]
+        assert documents[0].text == payload["text"]
+        assert documents[0].active_structure_version_id is not None
 
 
 def test_cross_tenant_resource_access_is_forbidden_and_lists_are_scoped(client, db):

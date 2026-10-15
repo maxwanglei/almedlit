@@ -38,6 +38,7 @@ import {
 } from "@/lib/annotationWorkspacePolicy";
 import { visibleDocumentsFor } from "@/lib/annotatorIdentity";
 import { filterRelationLabels, relationConstraintsOf } from "@/lib/relationConstraints";
+import { createTextOffsetMap, type TextOffsetMap } from "@/lib/textOffsets";
 import ActiveRoundQueue from "@/platform/ActiveRoundQueue";
 import type { RoundWorkContext } from "@/platform/types";
 import type {
@@ -156,6 +157,7 @@ interface RelationArc {
   by: number;
 }
 
+/** Projected paper-round records and mutations use UTF-16 offsets. */
 export interface AnnotationMutationAdapter {
   createAnnotation: typeof createAnnotation;
   updateAnnotation: typeof updateAnnotation;
@@ -448,26 +450,36 @@ function statusForAssignments(assignments: TaskAssignment[]): QueueStatus {
   return "todo";
 }
 
-function sentenceRangesFor(documentItem: Document | null): SentenceRange[] {
+function sentenceRangesFor(
+  documentItem: Document | null,
+  textOffsets: TextOffsetMap | null,
+): SentenceRange[] {
   if (!documentItem) {
     return [];
   }
 
   const text = documentItem.text ?? "";
+  const length = textOffsets?.codePointLength ?? text.length;
   const ranges = documentItem.sentences
     .map(([start, end], index) => ({
       index,
       start,
       end,
-      text: text.slice(start, end),
     }))
-    .filter((range) => range.start >= 0 && range.end > range.start && range.end <= text.length);
+    .filter((range) => range.start >= 0 && range.end > range.start && range.end <= length)
+    .map((range) => ({
+      ...range,
+      text: text.slice(
+        textOffsets?.toUtf16(range.start) ?? range.start,
+        textOffsets?.toUtf16(range.end) ?? range.end,
+      ),
+    }));
 
   if (ranges.length > 0) {
     return ranges;
   }
 
-  return text.length > 0 ? [{ index: 0, start: 0, end: text.length, text }] : [];
+  return length > 0 ? [{ index: 0, start: 0, end: length, text }] : [];
 }
 
 function hexToRgba(hex: string, alpha: number): string {
@@ -697,8 +709,9 @@ export default function AnnotatorWorkspace({
   const spanRefs = useRef<Map<number, HTMLElement>>(new Map());
   const handleActiveEvidenceAssignmentChange = useCallback(
     (assignment: TaskAssignment | null): void => {
-      setSubmissionAssignmentId(assignment?.id ?? null);
-      updateSearch({ assignment: assignment?.id ?? null }, "replace");
+      if (assignment === null) return;
+      setSubmissionAssignmentId(assignment.id);
+      updateSearch({ assignment: assignment.id }, "replace");
     },
     [updateSearch],
   );
@@ -764,6 +777,11 @@ export default function AnnotatorWorkspace({
 
   const activeProject = activeWorkbench?.project ?? selectedProject;
   const currentDocumentText = activeWorkbench?.document.text ?? "";
+  // Legacy API data stays in code points; paper-round adapters already use UTF-16.
+  const textOffsets = useMemo(
+    () => annotationApi ? null : createTextOffsetMap(currentDocumentText),
+    [annotationApi, currentDocumentText],
+  );
   const strictLabelsOnly = activeProject?.annotation_validation_mode === "strict";
   const currentSpanLabel = activeSpanLabel || customLabel.trim();
   const selectedAnnotatorId = annotatorId.trim();
@@ -782,8 +800,8 @@ export default function AnnotatorWorkspace({
   );
 
   const sentenceRanges = useMemo(
-    () => sentenceRangesFor(activeWorkbench?.document ?? null),
-    [activeWorkbench],
+    () => sentenceRangesFor(activeWorkbench?.document ?? null, textOffsets),
+    [activeWorkbench, textOffsets],
   );
 
   const assignmentsByDocument = useMemo(() => {
@@ -1026,21 +1044,14 @@ export default function AnnotatorWorkspace({
     if (requestedDocumentId !== selectedDocumentId) return;
     const requestedAssignmentId = Number(searchParams.get("assignment"));
     const requestedAssignment = currentDocumentAssignments.find((assignment) => assignment.id === requestedAssignmentId);
-    const finishedAssignment = allowAssignmentlessSubmit && recentlyFinished?.documentId === selectedDocumentId
-      ? currentDocumentAssignments.find((assignment) => assignment.id === recentlyFinished.assignmentId)
-      : undefined;
-    const current = requestedAssignment?.id ?? submissionAssignmentId;
-    const nextAssignmentId = finishedAssignment?.id
-      ?? (annotationApi && currentDocumentAssignments.some((assignment) => assignment.id === current)
-        ? current
-        : preferredAssignmentId(currentDocumentAssignments, current));
+    const nextAssignmentId = preferredAssignmentId(
+      currentDocumentAssignments,
+      requestedAssignment?.id ?? submissionAssignmentId,
+    );
     setSubmissionAssignmentId(nextAssignmentId);
     updateSearch({ assignment: nextAssignmentId }, "replace");
   }, [
-    allowAssignmentlessSubmit,
-    annotationApi,
     currentDocumentAssignments,
-    recentlyFinished,
     searchParams,
     selectedDocumentId,
     submissionAssignmentId,
@@ -1572,12 +1583,20 @@ export default function AnnotatorWorkspace({
     return `${annotation.start_offset}-${annotation.end_offset}`;
   }
 
+  function toTextOffset(offset: number): number {
+    return textOffsets?.toUtf16(offset) ?? offset;
+  }
+
+  function sliceDocumentText(start: number, end: number): string {
+    return currentDocumentText.slice(toTextOffset(start), toTextOffset(end));
+  }
+
   function spanText(annotation: Annotation): string {
     if (annotation.text_span) {
       return annotation.text_span;
     }
     if (activeWorkbench?.document && annotationHasOffsets(annotation)) {
-      return activeWorkbench.document.text.slice(annotation.start_offset, annotation.end_offset);
+      return sliceDocumentText(annotation.start_offset, annotation.end_offset);
     }
     return annotation.label;
   }
@@ -1624,8 +1643,10 @@ export default function AnnotatorWorkspace({
       return;
     }
 
-    let start = sentence.start + Math.min(localStart, localEnd);
-    let end = sentence.start + Math.max(localStart, localEnd);
+    const sentenceStart = toTextOffset(sentence.start);
+    const sentenceEnd = toTextOffset(sentence.end);
+    let start = sentenceStart + Math.min(localStart, localEnd);
+    let end = sentenceStart + Math.max(localStart, localEnd);
     const text = activeWorkbench.document.text;
     while (start < end && /\s/.test(text[start])) {
       start += 1;
@@ -1634,14 +1655,14 @@ export default function AnnotatorWorkspace({
       end -= 1;
     }
     while (
-      start > sentence.start &&
+      start > sentenceStart &&
       isWordCharacter(text[start - 1]) &&
       isWordCharacter(text[start])
     ) {
       start -= 1;
     }
     while (
-      end < sentence.end &&
+      end < sentenceEnd &&
       isWordCharacter(text[end - 1]) &&
       isWordCharacter(text[end])
     ) {
@@ -1652,11 +1673,18 @@ export default function AnnotatorWorkspace({
       return;
     }
 
+    const startOffset = textOffsets ? textOffsets.toCodePoint(start) : start;
+    const endOffset = textOffsets ? textOffsets.toCodePoint(end) : end;
+    if (startOffset === null || endOffset === null) {
+      setPendingSelection(null);
+      return;
+    }
+
     const rect = range.getBoundingClientRect();
     setPendingSelection({
       annotationType: activeSpanTask.annotation_type,
-      start,
-      end,
+      start: startOffset,
+      end: endOffset,
       text: text.slice(start, end),
       left: rect.left + rect.width / 2,
       top: rect.top,
@@ -2123,7 +2151,7 @@ export default function AnnotatorWorkspace({
       .sort((a, b) => (a.start_offset ?? 0) - (b.start_offset ?? 0) || a.id - b.id);
 
     if (sectionSpans.length === 0) {
-      return currentDocumentText.slice(range.start, range.end);
+      return sliceDocumentText(range.start, range.end);
     }
 
     const boundaries = new Set<number>([range.start, range.end]);
@@ -2155,7 +2183,7 @@ export default function AnnotatorWorkspace({
         });
 
       if (covering.length === 0) {
-        return [<span key={`text-${start}-${end}`}>{currentDocumentText.slice(start, end)}</span>];
+        return [<span key={`text-${start}-${end}`}>{sliceDocumentText(start, end)}</span>];
       }
 
       const primary = covering[0];
@@ -2181,7 +2209,7 @@ export default function AnnotatorWorkspace({
           }
           role="button"
           tabIndex={0}
-          aria-label={`${primary.label}: ${currentDocumentText.slice(start, end)}`}
+          aria-label={`${primary.label}: ${sliceDocumentText(start, end)}`}
           onClick={(event) => handleSpanClick(primary.id, event)}
           onKeyDown={(event) => handleSpanKeyDown(primary.id, event)}
           onContextMenu={(event) => {
@@ -2201,7 +2229,7 @@ export default function AnnotatorWorkspace({
             {compactLabel(primary.label)}
             {covering.length > 1 ? ` +${covering.length - 1}` : ""}
           </span>
-          {currentDocumentText.slice(start, end)}
+          {sliceDocumentText(start, end)}
         </span>,
       ];
     });
@@ -3177,6 +3205,7 @@ export default function AnnotatorWorkspace({
                 document={activeWorkbench.document}
                 task={evidenceTask}
                 assignments={currentAnnotatorAssignments}
+                selectedAssignmentId={selectedSubmissionAssignment?.id ?? null}
                 annotations={activeWorkbench.annotations}
                 annotatorId={selectedAnnotatorId}
                 allowAssignmentlessEditing={allowAssignmentlessSubmit}

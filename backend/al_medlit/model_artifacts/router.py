@@ -431,7 +431,7 @@ def import_base_model(
     response_model=BaseModelAssetRead,
     status_code=status.HTTP_201_CREATED,
 )
-async def upload_base_model(
+def upload_base_model(
     project_id: int,
     metadata: str = Form(...),
     files: list[UploadFile] = File(...),
@@ -464,7 +464,7 @@ async def upload_base_model(
         return service.public_base_model_descriptor(asset)
     finally:
         for item in files:
-            await item.close()
+            item.file.close()
 
 
 @router.patch("/base-models/{asset_id}/readiness", response_model=BaseModelAssetRead)

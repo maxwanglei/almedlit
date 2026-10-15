@@ -8,6 +8,7 @@ live NCBI calls.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterator
 from dataclasses import dataclass
 from itertools import batched
 from xml.etree import ElementTree as ET
@@ -39,10 +40,63 @@ class JATSBody:
     structure_source: dict
 
 
+_JATS_BLOCK_TAGS = {"p", "title"}
+_TEXT_BLOCK_TAGS = _JATS_BLOCK_TAGS | {
+    "boxed-text", "break", "caption", "def", "def-item", "def-list",
+    "disp-formula", "disp-formula-group", "disp-quote", "fig", "fig-group",
+    "list", "list-item", "sec", "table", "table-wrap", "tbody", "td",
+    "tfoot", "th", "thead", "tr", "verse-group", "verse-line",
+}
+
+
+def _text_parts(element: ET.Element) -> Iterator[str | ET.Element]:
+    """Keep inline text adjacent, but separate blocks and expose nested blocks."""
+    if element.text:
+        yield element.text
+    for child in element:
+        tag = _local_tag(child)
+        if tag in _TEXT_BLOCK_TAGS:
+            yield " "
+        if tag in _JATS_BLOCK_TAGS:
+            yield child
+        else:
+            yield from _text_parts(child)
+        if tag in _TEXT_BLOCK_TAGS:
+            yield " "
+        if child.tail:
+            yield child.tail
+
+
 def _text(element: ET.Element | None) -> str:
     if element is None:
         return ""
-    return "".join(element.itertext()).strip()
+    text = "".join(
+        part if isinstance(part, str) else _text(part)
+        for part in _text_parts(element)
+    )
+    return " ".join(text.split())
+
+
+def _jats_blocks(element: ET.Element) -> Iterator[tuple[ET.Element, str]]:
+    """Emit leaf blocks and surrounding prose without repeating descendant text."""
+    if _local_tag(element) not in _JATS_BLOCK_TAGS:
+        for child in element:
+            yield from _jats_blocks(child)
+        return
+
+    parts: list[str] = []
+    for part in _text_parts(element):
+        if isinstance(part, str):
+            parts.append(part)
+            continue
+        text = " ".join("".join(parts).split())
+        if text:
+            yield element, text
+        parts.clear()
+        yield from _jats_blocks(part)
+    text = " ".join("".join(parts).split())
+    if text:
+        yield element, text
 
 
 def _parse_abstract(article: ET.Element) -> str:
@@ -149,13 +203,8 @@ def extract_jats_body(article: ET.Element) -> JATSBody | None:
     parents = {child: parent for parent in body.iter() for child in parent}
     raw_blocks: list[dict] = []
     block_texts: list[str] = []
-    for node in body.iter():
+    for node, text in _jats_blocks(body):
         tag = _local_tag(node)
-        if tag not in {"title", "p"}:
-            continue
-        text = _text(node)
-        if not text:
-            continue
         section_path = _section_path(node, body, parents)
         block_texts.append(text)
         raw_blocks.append(

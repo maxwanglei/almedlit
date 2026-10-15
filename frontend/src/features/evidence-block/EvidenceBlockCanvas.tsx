@@ -63,6 +63,7 @@ interface EvidenceBlockCanvasProps {
   document: Document;
   task: ProjectTask;
   assignments: TaskAssignment[];
+  selectedAssignmentId?: number | null;
   annotations: Annotation[];
   annotatorId: string;
   allowAssignmentlessEditing?: boolean;
@@ -326,6 +327,7 @@ export default function EvidenceBlockCanvas({
   document,
   task,
   assignments,
+  selectedAssignmentId,
   annotations,
   annotatorId,
   allowAssignmentlessEditing = false,
@@ -339,7 +341,7 @@ export default function EvidenceBlockCanvas({
 }: EvidenceBlockCanvasProps): React.ReactElement {
   const settings = useMemo(() => asSettings(task), [task]);
   const [targets, setTargets] = useState<EvidenceTarget[]>([]);
-  const [selectedTargetVersionId, setSelectedTargetVersionId] = useState<number | null>(null);
+  const [targetVersionId, setSelectedTargetVersionId] = useState<number | null>(null);
   const [structure, setStructure] = useState<DocumentStructureRead | null>(null);
   const [coverage, setCoverage] = useState<EvidenceReviewCoverage | null>(null);
   const [note, setNote] = useState("");
@@ -380,6 +382,11 @@ export default function EvidenceBlockCanvas({
       ),
     [annotatorId, assignments, document.id, task.id],
   );
+  const requestedAssignment = useMemo(
+    () => documentAssignments.find((assignment) => assignment.id === selectedAssignmentId) ?? null,
+    [documentAssignments, selectedAssignmentId],
+  );
+  const selectedTargetVersionId = requestedAssignment?.target_version_id ?? targetVersionId;
   const options = useMemo(
     () => targetOptions(targets, documentAssignments, settings),
     [documentAssignments, settings, targets],
@@ -437,6 +444,7 @@ export default function EvidenceBlockCanvas({
 
   const selectedAssignment = useMemo(
     () => {
+      if (requestedAssignment) return requestedAssignment;
       const targetAssignments = documentAssignments.filter(
         (assignment) => assignment.target_version_id === selectedTargetVersionId,
       );
@@ -447,12 +455,15 @@ export default function EvidenceBlockCanvas({
         )
       );
     },
-    [documentAssignments, selectedTargetVersionId],
+    [documentAssignments, requestedAssignment, selectedTargetVersionId],
   );
   useEffect(() => {
+    // The workspace resolves controlled selections from the URL. Reporting an
+    // earlier render here could overwrite a newer navigation before it settles.
+    if (selectedAssignmentId !== undefined) return;
     onActiveAssignmentChange?.(selectedAssignment);
     return () => onActiveAssignmentChange?.(null);
-  }, [onActiveAssignmentChange, selectedAssignment]);
+  }, [onActiveAssignmentChange, selectedAssignment, selectedAssignmentId]);
   const structureVersionId =
     selectedAssignment?.structure_version_id ?? document.active_structure_version_id;
   const assignmentEditable = selectedAssignment
@@ -1204,7 +1215,19 @@ export default function EvidenceBlockCanvas({
           <span>Evidence target</span>
           <select
             value={selectedTargetVersionId ?? ""}
-            onChange={(event) => setSelectedTargetVersionId(Number(event.target.value))}
+            onChange={(event) => {
+              const nextTargetVersionId = Number(event.target.value);
+              setSelectedTargetVersionId(nextTargetVersionId);
+              if (selectedAssignmentId !== undefined) {
+                onActiveAssignmentChange?.(
+                  preferredAssignment(documentAssignments.filter(
+                    (assignment) => assignment.target_version_id === nextTargetVersionId,
+                  )) ?? preferredAssignment(documentAssignments.filter(
+                    (assignment) => assignment.target_version_id == null,
+                  )),
+                );
+              }
+            }}
             disabled={busy || options.length === 0}
           >
             {options.length === 0 ? (

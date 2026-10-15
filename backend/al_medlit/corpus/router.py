@@ -31,7 +31,7 @@ def create_document(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    assert_project_member_if_exists(db, current_user, payload.project_id)
+    assert_project_member_if_exists(db, current_user, payload.project_id, min_role="manager")
     document = service.create_document(db, payload)
     project_service.ensure_personal_project_self_assignments(
         db,

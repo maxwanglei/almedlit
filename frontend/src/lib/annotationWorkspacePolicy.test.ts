@@ -63,12 +63,25 @@ function annotation(source: Annotation["source"], annotatorId: string | null): A
 }
 
 describe("annotation workspace assignment policy", () => {
-  it("moves a finalized selection to a newly provisioned mutable round", () => {
-    const submitted = assignment(10, "submitted");
-    const replacement = assignment(11, "assigned");
+  it.each<TaskAssignmentStatus>([
+    "assigned", "in_progress", "blocked", "submitted", "adjudication_ready",
+    "adjudicated", "completed", "withdrawn",
+  ])("preserves an explicit %s assignment when another task is open", (status) => {
+    const selected = assignment(10, status);
+    const open = assignment(11, "assigned");
 
-    expect(preferredAssignmentId([submitted, replacement], submitted.id)).toBe(replacement.id);
-    expect(preferredAssignment([submitted, replacement])).toBe(replacement);
+    expect(preferredAssignmentId([open, selected], selected.id)).toBe(selected.id);
+  });
+
+  it("prefers a mutable assignment only when the selected assignment is absent", () => {
+    const submitted = assignment(10, "submitted");
+    const open = assignment(11, "assigned");
+
+    expect(preferredAssignmentId([submitted, open], null)).toBe(open.id);
+    expect(preferredAssignmentId([submitted, open], 99)).toBe(open.id);
+    expect(preferredAssignmentId([submitted], 99)).toBe(submitted.id);
+    expect(preferredAssignmentId([], submitted.id)).toBeNull();
+    expect(preferredAssignment([submitted, open])).toBe(open);
   });
 
   it("preserves the current mutable round and keeps finalized history selectable", () => {

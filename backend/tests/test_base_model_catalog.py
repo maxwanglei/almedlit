@@ -1,8 +1,10 @@
 import hashlib
 import json
 import struct
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from io import BytesIO
+from threading import Event
 
 import pytest
 
@@ -605,6 +607,69 @@ def test_legacy_zip_migration_is_byte_preserving_and_idempotent(db, object_stora
         object_storage.get_bytes(checkpoint.artifact.storage_key)
     assert db.get(LineageArtifact, checkpoint.artifact_id) is not None
     assert checkpoint.package.retention.payload_gc_processed_at is not None
+
+
+@pytest.mark.parametrize("publication_fails", [False, True])
+def test_base_model_upload_keeps_event_loop_responsive_and_closes_files(
+    db,
+    client,
+    monkeypatch,
+    publication_fails,
+):
+    from al_medlit.model_artifacts import service as artifact_service
+
+    manager, project = _project(db, "responsive-upload")
+    db.add(
+        WorkspaceMember(
+            workspace_id=project.workspace_id,
+            user_id=manager.id,
+            role="manager",
+        )
+    )
+    db.commit()
+    data = _upload_data()
+    started = Event()
+    release = Event()
+    uploaded_sources = []
+
+    def blocked_publish(*args, **kwargs):
+        uploaded_sources.extend(kwargs["sources"])
+        started.set()
+        assert release.wait(timeout=10), "Upload was never released"
+        if publication_fails:
+            raise ValidationError("Upload validation failed")
+        return publish_uploaded_base_model(*args, **kwargs)
+
+    monkeypatch.setattr(artifact_service, "publish_uploaded_base_model", blocked_publish)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        upload = executor.submit(
+            client.post,
+            f"/api/projects/{project.id}/base-models/upload",
+            data={"metadata": data.model_dump_json()},
+            files=[
+                ("files", (descriptor.relative_path, source.getvalue(), descriptor.content_type))
+                for descriptor, source in zip(data.files, _upload_sources(), strict=True)
+            ],
+            headers={"Authorization": f"Bearer {create_access_token(manager.id)}"},
+        )
+        try:
+            assert started.wait(timeout=5), "Upload publication never started"
+            health = executor.submit(client.get, "/health", headers={"Authorization": ""})
+            assert health.result(timeout=2).status_code == 200
+            assert not upload.done()
+        finally:
+            release.set()
+        response = upload.result(timeout=10)
+
+    assert response.status_code == (422 if publication_fails else 201), response.text
+    if publication_fails:
+        assert response.json()["detail"] == "Upload validation failed"
+        assert db.query(BaseModelAsset).count() == 0
+    else:
+        assert response.json()["exact_revision"] == data.exact_revision
+    assert len(uploaded_sources) == len(data.files)
+    assert all(source.closed for source in uploaded_sources)
 
 
 def test_base_model_api_enforces_manager_mutation_and_license_visibility(

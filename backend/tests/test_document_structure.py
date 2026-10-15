@@ -13,7 +13,7 @@ from al_medlit.corpus.models import (
     ImmutableDocumentStructureError,
 )
 from al_medlit.corpus.schemas import DocumentCreate
-from al_medlit.corpus.segmentation import segment_document, segment_sentences
+from al_medlit.corpus.segmentation import segment_document, segment_sentences, text_sha256
 from al_medlit.importers.pubmed import parse_pmc_xml_documents
 from al_medlit.project.models import Project, ProjectTask, TaskAssignment
 from al_medlit.workspace import service as workspace_service
@@ -139,6 +139,64 @@ def test_jats_import_metadata_preserves_section_paths_and_locators(db):
         body.text[paragraph.start_offset : paragraph.end_offset]
         for paragraph in paragraphs
     )
+
+
+def test_jats_nested_blocks_persist_once_with_leaf_locators_and_offsets(db):
+    xml = """<pmc-articleset><article>
+      <front><article-meta><article-id pub-id-type="pmc">43</article-id></article-meta></front>
+      <body><sec><title>Results</title><p>
+        <list><list-item><p>Café <italic>β</italic> improved.</p></list-item>
+          <list-item><p>Second cohort recovered.</p></list-item></list>
+        <fig><caption><title>Imaging</title><p>Figure findings agreed.</p></caption></fig>
+        <table-wrap><caption><title>Measurements</title>
+          <p>Table findings agreed.</p></caption></table-wrap>
+      </p></sec></body>
+    </article></pmc-articleset>"""
+    body = parse_pmc_xml_documents(xml)["PMC43"]
+    project = _project(db, "structure-jats-nested")
+    expected = [
+        "Results",
+        "Café β improved.",
+        "Second cohort recovered.",
+        "Imaging",
+        "Figure findings agreed.",
+        "Measurements",
+        "Table findings agreed.",
+    ]
+
+    document = corpus_service.create_document(
+        db,
+        DocumentCreate(project_id=project.id, text=body.text, source="pmc"),
+        structure_source_metadata=body.structure_source,
+    )
+
+    assert document.text == "\n\n".join(expected)
+    structure = db.get(DocumentStructureVersion, document.active_structure_version_id)
+    assert structure.source_hash == text_sha256(document.text)
+    assert structure.text_length == len(document.text)
+    assert [
+        document.text[paragraph.start_offset : paragraph.end_offset]
+        for paragraph in structure.paragraphs
+    ] == expected
+    assert [paragraph.locator["jats_path"] for paragraph in structure.paragraphs] == [
+        "/body/sec[1]/title[1]",
+        "/body/sec[1]/p[1]/list[1]/list-item[1]/p[1]",
+        "/body/sec[1]/p[1]/list[1]/list-item[2]/p[1]",
+        "/body/sec[1]/p[1]/fig[1]/caption[1]/title[1]",
+        "/body/sec[1]/p[1]/fig[1]/caption[1]/p[1]",
+        "/body/sec[1]/p[1]/table-wrap[1]/caption[1]/title[1]",
+        "/body/sec[1]/p[1]/table-wrap[1]/caption[1]/p[1]",
+    ]
+    assert [
+        document.text[sentence.start_offset : sentence.end_offset]
+        for sentence in structure.sentences
+    ] == expected
+    for sentence in structure.sentences:
+        text = document.text[sentence.start_offset : sentence.end_offset]
+        assert sentence.text_hash == text_sha256(text)
+    for block, text in zip(body.structure_source["blocks"], expected, strict=True):
+        assert document.text[block["start_offset"] : block["end_offset"]] == text
+        assert block["text_hash"] == text_sha256(text)
 
 
 def test_backfill_is_idempotent_and_reuses_ready_inactive_version(db):

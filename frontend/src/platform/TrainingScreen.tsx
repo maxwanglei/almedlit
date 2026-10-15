@@ -278,10 +278,23 @@ export default function TrainingScreen({
   initialEvaluationSplit?: string | null;
   onOpenTrainingData?: () => void;
 }): React.ReactElement {
+  const preferredInitialDataset = useMemo(
+    () =>
+      initialTrainingDatasetVersionId
+        ? data.trainingDatasets.find(
+            (version) => version.id === initialTrainingDatasetVersionId,
+          )
+        : resolveInitialTrainingDataset(data, initialDatasetId),
+    [data, initialDatasetId, initialTrainingDatasetVersionId],
+  );
   const [step, setStep] = useState(0);
   const [modelName, setModelName] = useState("");
-  const [taskVersionId, setTaskVersionId] = useState(0);
-  const [trainingDatasetVersionId, setTrainingDatasetVersionId] = useState(0);
+  const [taskVersionId, setTaskVersionId] = useState(
+    preferredInitialDataset?.task_version_id ?? 0,
+  );
+  const [trainingDatasetVersionId, setTrainingDatasetVersionId] = useState(
+    preferredInitialDataset?.id ?? 0,
+  );
   const [recipeKey, setRecipeKey] = useState("");
   const [baseModelAssetId, setBaseModelAssetId] = useState(0);
   const [environmentId, setEnvironmentId] = useState(
@@ -351,10 +364,6 @@ export default function TrainingScreen({
     data.recipeVersions
       .filter((item) => item.training_recipe_id === projectRecipe?.id)
       .sort((left, right) => right.version_number - left.version_number)[0] ?? null;
-  const preferredInitialDataset = useMemo(
-    () => initialTrainingDatasetVersionId ? data.trainingDatasets.find((version) => version.id === initialTrainingDatasetVersionId) : resolveInitialTrainingDataset(data, initialDatasetId),
-    [data, initialDatasetId, initialTrainingDatasetVersionId],
-  );
   const requestedDatasetNeedsPreparation =
     Boolean(initialDatasetId || initialTrainingDatasetVersionId) && preferredInitialDataset === undefined;
   const requestedDatasetName = data.datasets.find(
@@ -401,9 +410,12 @@ export default function TrainingScreen({
   ]);
 
   useEffect(() => {
+    // Let the requested task and dataset initialize before choosing a fallback.
     if (
-      requestedDatasetNeedsPreparation &&
-      trainingDatasetVersionId === 0
+      !taskVersionId ||
+      (trainingDatasetVersionId === 0 &&
+        (requestedDatasetNeedsPreparation ||
+          preferredInitialDataset?.task_version_id === taskVersionId))
     ) {
       return;
     }
@@ -419,6 +431,7 @@ export default function TrainingScreen({
     }
   }, [
     data.trainingDatasets,
+    preferredInitialDataset,
     requestedDatasetNeedsPreparation,
     taskVersionId,
     trainingDatasetVersionId,

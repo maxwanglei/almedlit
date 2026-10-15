@@ -19,12 +19,12 @@ export function preferredAssignmentId(
 ): number | null {
   const current =
     assignments.find((assignment) => assignment.id === currentAssignmentId) ?? null;
-  if (current && isMutableAssignment(current)) {
+  if (current) {
     return current.id;
   }
 
   const mutable = assignments.find((assignment) => isMutableAssignment(assignment));
-  return mutable?.id ?? current?.id ?? assignments[0]?.id ?? null;
+  return mutable?.id ?? assignments[0]?.id ?? null;
 }
 
 export function preferredAssignment(

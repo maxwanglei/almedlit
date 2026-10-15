@@ -1,6 +1,7 @@
 import pytest
 
 from al_medlit.annotation.models import Annotation
+from al_medlit.annotation.types import AnnotationValidationError
 from al_medlit.auth.models import User
 from al_medlit.auth.tenancy import assert_task_assigned
 from al_medlit.core.exceptions import ForbiddenError
@@ -10,6 +11,7 @@ from al_medlit.evidence.models import (
     EvidenceTargetVersion,
     ImmutableEvidenceTargetVersionError,
 )
+from al_medlit.guideline.models import GuidelineVersion
 from al_medlit.iaa import evidence_metrics
 from al_medlit.iaa import service as iaa_service
 from al_medlit.project.models import Project, TaskAssignment
@@ -251,6 +253,95 @@ def test_adjacency_policy_still_applies_when_overlap_is_allowed(client):
     adjacent = client.post("/api/annotations", json=_block_payload(ctx, 1, 1))
     assert adjacent.status_code == 422
     assert "Adjacent evidence blocks are disabled" in adjacent.json()["detail"]
+
+
+@pytest.mark.parametrize("operation", ["create", "update"])
+@pytest.mark.parametrize(
+    "policy, sentence_index, error",
+    [
+        ("overlap", 0, "may not overlap"),
+        ("adjacency", 1, "Adjacent evidence blocks are disabled"),
+    ],
+)
+@pytest.mark.parametrize(
+    "existing_guideline, requested_guideline, expected_status",
+    [
+        ("old", "new", 200),
+        (None, "new", 200),
+        ("old", None, 200),
+        ("old", "old", 422),
+        (None, None, 422),
+    ],
+)
+def test_block_policy_is_guideline_scoped(
+    client,
+    db,
+    operation,
+    policy,
+    sentence_index,
+    error,
+    existing_guideline,
+    requested_guideline,
+    expected_status,
+):
+    ctx = _setup_evidence_project(client, "evidence-guideline-policy")
+    if policy == "adjacency":
+        updated = client.patch(
+            f"/api/projects/{ctx['project']['id']}/tasks/{ctx['task']['id']}",
+            json={"settings": {**ctx["task"]["settings"], "adjacency_allowed": False}},
+        )
+        assert updated.status_code == 200, updated.text
+
+    guideline_ids = {None: None, "old": ctx["guideline"]["id"]}
+    # The API uses the active guideline when no explicit version is supplied.
+    if existing_guideline is None:
+        db.get(GuidelineVersion, guideline_ids["old"]).status = "superseded"
+        db.commit()
+    existing = client.post(
+        "/api/annotations",
+        json=_block_payload(
+            ctx, 0, 0, guideline_version_id=guideline_ids[existing_guideline]
+        ),
+    )
+    assert existing.status_code == 200, existing.text
+    assert existing.json()["guideline_version_id"] == guideline_ids[existing_guideline]
+    activated = client.post(
+        "/api/guidelines",
+        json={
+            "project_id": ctx["project"]["id"],
+            "version_label": "evidence-v2",
+            "markdown": "Revised evidence guidance.",
+            "status": "active",
+        },
+    )
+    assert activated.status_code == 200, activated.text
+    guideline_ids["new"] = activated.json()["id"]
+    if requested_guideline is None:
+        db.get(GuidelineVersion, guideline_ids["new"]).status = "superseded"
+        db.commit()
+    guideline_id = guideline_ids[requested_guideline]
+    payload = _block_payload(
+        ctx, sentence_index, sentence_index, guideline_version_id=guideline_id
+    )
+    if operation == "create":
+        response = client.post("/api/annotations", json=payload)
+    else:
+        created = client.post(
+            "/api/annotations",
+            json=_block_payload(ctx, 2, 2, guideline_version_id=guideline_id),
+        )
+        assert created.status_code == 200, created.text
+        response = client.patch(
+            f"/api/annotations/{created.json()['id']}",
+            json={"expected_revision": 1, "evidence_block": payload["evidence_block"]},
+        )
+
+    assert response.status_code == expected_status, response.text
+    if expected_status == 422:
+        assert error in response.json()["detail"]
+    else:
+        assert response.json()["guideline_version_id"] == guideline_id
+        assert response.json()["evidence_block"]["start_sentence_ordinal"] == sentence_index
 
 
 def test_evidence_keyboard_shortcuts_are_normalized_and_must_be_unique(client):
@@ -1620,3 +1711,114 @@ def test_assignment_snapshot_and_workbench_keep_all_version_pins(client, db):
     assert workbench["guideline_versions_by_id"][str(ctx["guideline"]["id"])][
         "markdown"
     ] == ctx["guideline"]["markdown"]
+
+
+@pytest.mark.parametrize(
+    ("sentence_index", "adjacency_allowed", "expected_error"),
+    [
+        (0, True, "may not overlap"),
+        (1, False, "Adjacent evidence blocks are disabled"),
+    ],
+    ids=["overlap", "adjacency"],
+)
+def test_gold_block_policies_are_scoped_to_guideline_version(
+    client, db, sentence_index, adjacency_allowed, expected_error
+):
+    ctx = _setup_evidence_project(client, f"evidence-gold-guideline-{sentence_index}")
+    project = db.get(Project, ctx["project"]["id"])
+    project.workspace.kind = "individual"
+    db.commit()
+    task = client.get(f"/api/projects/{project.id}/tasks").json()[0]
+    updated = client.patch(
+        f"/api/projects/{project.id}/tasks/{ctx['task']['id']}",
+        json={"settings": {**task["settings"], "adjacency_allowed": adjacency_allowed}},
+    )
+    assert updated.status_code == 200, updated.text
+
+    sentences = ctx["structure"]["sentences"]
+    scope = {
+        "target_version_id": ctx["version"]["id"],
+        "structure_version_id": ctx["structure"]["structure_version"]["id"],
+    }
+    document_url = f"/api/projects/{project.id}/documents/{ctx['document']['id']}"
+    coverage_url = f"{document_url}/evidence-review-coverage/mark-reviewed"
+    adjudication_url = f"{document_url}/evidence-adjudication"
+    old_guideline_id = ctx["guideline"]["id"]
+    reviewed = client.post(
+        coverage_url,
+        json={
+            **scope,
+            "guideline_version_id": old_guideline_id,
+            "start_sentence_id": sentences[0]["id"],
+            "end_sentence_id": sentences[-1]["id"],
+        },
+    )
+    assert reviewed.status_code == 200, reviewed.text
+    old_gold = client.post(
+        adjudication_url,
+        json={
+            **scope,
+            "guideline_version_id": old_guideline_id,
+            "strategy": "custom",
+            "start_sentence_id": sentences[0]["id"],
+            "end_sentence_id": sentences[0]["id"],
+            "solo_gold": True,
+        },
+    )
+    assert old_gold.status_code == 201, old_gold.text
+
+    new_guideline = client.post(
+        "/api/guidelines",
+        json={
+            "project_id": project.id,
+            "version_label": "evidence-v2",
+            "markdown": "Apply the revised evidence rules.",
+        },
+    )
+    assert new_guideline.status_code == 200, new_guideline.text
+    new_guideline_id = new_guideline.json()["id"]
+    manager_headers = {"Authorization": f"Bearer {client._token_for('second-manager')}"}
+    second_manager = db.query(User).filter(User.username == "second-manager").one()
+    db.add(
+        WorkspaceMember(
+            workspace_id=project.workspace_id,
+            user_id=second_manager.id,
+            role="manager",
+        )
+    )
+    db.commit()
+    for guideline_id in (old_guideline_id, new_guideline_id):
+        reviewed = client.post(
+            coverage_url,
+            json={
+                **scope,
+                "guideline_version_id": guideline_id,
+                "start_sentence_id": sentences[0]["id"],
+                "end_sentence_id": sentences[-1]["id"],
+            },
+            headers=manager_headers,
+        )
+        assert reviewed.status_code == 200, reviewed.text
+
+    payload = {
+        **scope,
+        "strategy": "custom",
+        "start_sentence_id": sentences[sentence_index]["id"],
+        "end_sentence_id": sentences[sentence_index]["id"],
+        "solo_gold": True,
+    }
+    with pytest.raises(AnnotationValidationError, match=expected_error):
+        client.post(
+            adjudication_url,
+            json={**payload, "guideline_version_id": old_guideline_id},
+            headers=manager_headers,
+        )
+
+    new_gold = client.post(
+        adjudication_url,
+        json={**payload, "guideline_version_id": new_guideline_id},
+        headers=manager_headers,
+    )
+    assert new_gold.status_code == 201, new_gold.text
+    assert new_gold.json()["guideline_version_id"] == new_guideline_id
+    assert new_gold.json()["annotator_user_id"] != old_gold.json()["annotator_user_id"]

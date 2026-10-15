@@ -9,7 +9,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { BrowserRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -40,7 +40,41 @@ vi.mock("@/api/client", () => ({
 }));
 
 vi.mock("@/features/evidence-block/EvidenceBlockCanvas", () => ({
-  default: () => <div>Evidence canvas</div>,
+  default: function EvidenceCanvas({
+    assignments,
+    selectedAssignmentId,
+    onActiveAssignmentChange,
+  }: {
+    assignments: TaskAssignment[];
+    selectedAssignmentId?: number | null;
+    onActiveAssignmentChange: (assignment: TaskAssignment | null) => void;
+  }): React.ReactElement {
+    const [selectedId, setSelectedId] = useState(assignments[0]?.id ?? null);
+    const activeId = selectedAssignmentId === undefined ? selectedId : selectedAssignmentId;
+    const selected = assignments.find((item) => item.id === activeId) ?? null;
+    useEffect(() => {
+      if (selectedAssignmentId !== undefined) return;
+      onActiveAssignmentChange(selected);
+      return () => onActiveAssignmentChange(null);
+    }, [onActiveAssignmentChange, selected, selectedAssignmentId]);
+    return (
+      <label>
+        Evidence canvas assignment
+        <select
+          value={activeId ?? ""}
+          onChange={(event) => {
+            const assignmentId = Number(event.target.value);
+            setSelectedId(assignmentId);
+            onActiveAssignmentChange(assignments.find((item) => item.id === assignmentId) ?? null);
+          }}
+        >
+          {assignments.map((item) => (
+            <option key={item.id} value={item.id}>Target {item.target_version_id}</option>
+          ))}
+        </select>
+      </label>
+    );
+  },
 }));
 
 const entityTask: AnnotationWorkbenchTask = {
@@ -124,25 +158,27 @@ interface HarnessProps {
   personal: boolean;
   initialAssignments?: TaskAssignment[];
   finishFirstOnRefresh?: boolean;
+  initialWorkbench?: AnnotationWorkbench;
 }
 
 function Harness({
   personal,
   initialAssignments = [assignment(10, "assigned")],
   finishFirstOnRefresh = false,
+  initialWorkbench = workbench,
 }: HarnessProps): React.ReactElement {
   const [assignments, setAssignments] = useState(initialAssignments);
   const [selectedDocumentId, setSelectedDocumentId] = useState<number | null>(1);
   const [currentWorkbench, setWorkbench] = useState<AnnotationWorkbench | null>(
-    workbench,
+    initialWorkbench,
   );
   const [busy, setBusy] = useState(false);
 
   return (
     <BrowserRouter>
       <AnnotatorWorkspace
-        projects={[project]}
-        selectedProject={project}
+        projects={[initialWorkbench.project]}
+        selectedProject={initialWorkbench.project}
         selectedProjectId={1}
         setSelectedProjectId={vi.fn()}
         documents={[documentItem]}
@@ -437,6 +473,151 @@ describe("AnnotatorWorkspace workspace language", () => {
     expect(
       screen.queryByRole("button", { name: "Edit this paper task" }),
     ).toBeNull();
+  });
+});
+
+describe("explicit assignment selection", () => {
+  const evidenceTask: AnnotationWorkbenchTask = {
+    ...entityTask,
+    annotation_type: "evidence_block",
+    display_name: "Evidence blocks",
+    annotation_type_spec: {
+      ...entityTask.annotation_type_spec,
+      name: "evidence_block",
+      selection_mode: "sentence_range",
+      renderer_key: "evidence_block",
+    },
+  };
+  const evidenceWorkbench: AnnotationWorkbench = {
+    ...workbench,
+    project: { ...project, tasks: [evidenceTask] },
+    tasks: [evidenceTask],
+    annotation_type_specs: [evidenceTask.annotation_type_spec],
+  };
+
+  it.each(["URL", "task dropdown"])(
+    "opens and reopens a submitted task chosen through the %s while another task is open",
+    async (source) => {
+      window.history.replaceState(
+        null,
+        "",
+        `/my-work/rounds/1?project=1&document=1&assignment=${source === "URL" ? 10 : 11}&view=annotate`,
+      );
+      render(
+        <Harness
+          personal
+          initialAssignments={[
+            assignment(10, "submitted"),
+            { ...assignment(11, "assigned"), task_id: classificationTask.id },
+          ]}
+          initialWorkbench={{
+            ...workbench,
+            project: navigationProject,
+            tasks: navigationTasks,
+            annotation_type_specs: navigationTasks.map((task) => task.annotation_type_spec),
+          }}
+        />,
+      );
+      if (source === "task dropdown") {
+        fireEvent.change(screen.getByRole("combobox", { name: "Task" }), {
+          target: { value: "10" },
+        });
+      }
+
+      expect((screen.getByRole("combobox", { name: "Task" }) as HTMLSelectElement).value).toBe("10");
+      expect(new URLSearchParams(window.location.search).get("assignment")).toBe("10");
+      expect(screen.queryByRole("button", { name: "Submit task for this paper" })).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Edit this paper task" }));
+      fireEvent.click(screen.getByRole("button", { name: "Reopen and edit" }));
+
+      await waitFor(() => expect(mocks.reopenPersonalTaskAssignment).toHaveBeenCalledWith(1, 10));
+      expect(await screen.findByRole("button", { name: "Submit task for this paper" })).toBeTruthy();
+      expect((screen.getByRole("combobox", { name: "Task" }) as HTMLSelectElement).value).toBe("10");
+      expect(new URLSearchParams(window.location.search).get("assignment")).toBe("10");
+    },
+  );
+
+  it("submits the evidence canvas assignment chosen after submitting another target", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/my-work/rounds/1?project=1&document=1&assignment=10&view=annotate&tool=evidence",
+    );
+    render(
+      <Harness
+        personal
+        finishFirstOnRefresh
+        initialAssignments={[
+          { ...assignment(10, "assigned"), target_version_id: 100 },
+          { ...assignment(11, "assigned"), target_version_id: 101 },
+        ]}
+        initialWorkbench={evidenceWorkbench}
+      />,
+    );
+
+    const submitBlankTask = (): void => {
+      fireEvent.click(screen.getByRole("button", { name: "Submit task for this paper" }));
+      fireEvent.click(screen.getByRole("checkbox", {
+        name: "I confirm that this paper has no annotations for this task.",
+      }));
+      fireEvent.click(screen.getByRole("button", { name: "Submit with no annotations" }));
+    };
+    submitBlankTask();
+    await waitFor(() => expect(mocks.createSubmission).toHaveBeenNthCalledWith(1, 1, 1, {
+      annotator_id: "max",
+      assignment_id: 10,
+    }));
+    await screen.findByRole("button", { name: "Edit this paper task" });
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Evidence canvas assignment" }), {
+      target: { value: "11" },
+    });
+
+    expect((screen.getByRole("combobox", { name: "Evidence canvas assignment" }) as HTMLSelectElement).value).toBe("11");
+    expect((screen.getByRole("combobox", { name: "Task" }) as HTMLSelectElement).value).toBe("11");
+    expect(new URLSearchParams(window.location.search).get("assignment")).toBe("11");
+    submitBlankTask();
+    await waitFor(() => expect(mocks.createSubmission).toHaveBeenNthCalledWith(2, 1, 1, {
+      annotator_id: "max",
+      assignment_id: 11,
+    }));
+  });
+
+  it("keeps the team submit control in sync with the evidence canvas assignment", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/annotator/workbench?project=1&document=1&assignment=10&view=annotate&tool=evidence",
+    );
+    render(
+      <Harness
+        personal={false}
+        initialAssignments={[
+          { ...assignment(10, "submitted"), target_version_id: 100 },
+          { ...assignment(11, "assigned"), target_version_id: 101 },
+        ]}
+        initialWorkbench={evidenceWorkbench}
+      />,
+    );
+
+    const submissionChoice = screen.getByRole("combobox", { name: "Assignment to submit" });
+    const canvasChoice = screen.getByRole("combobox", { name: "Evidence canvas assignment" });
+    expect((submissionChoice as HTMLSelectElement).value).toBe("10");
+    expect((canvasChoice as HTMLSelectElement).value).toBe("10");
+    expect((screen.getByRole("button", { name: "Submit assignment" }) as HTMLButtonElement).disabled).toBe(true);
+
+    fireEvent.change(submissionChoice, { target: { value: "11" } });
+    expect((canvasChoice as HTMLSelectElement).value).toBe("11");
+    fireEvent.click(screen.getByRole("button", { name: "Submit assignment" }));
+    fireEvent.click(screen.getByRole("checkbox", {
+      name: "I confirm that this paper has no annotations for this task.",
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "Submit with no annotations" }));
+
+    await waitFor(() => expect(mocks.createSubmission).toHaveBeenCalledWith(1, 1, {
+      annotator_id: "max",
+      assignment_id: 11,
+    }));
   });
 });
 

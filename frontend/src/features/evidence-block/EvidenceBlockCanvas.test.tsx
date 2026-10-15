@@ -2,6 +2,7 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -307,6 +308,7 @@ function renderCanvas(
   annotations: Annotation[] = [],
   onActiveAssignmentChange = vi.fn(),
   allowAssignmentlessEditing = false,
+  selectedAssignmentId?: number | null,
 ) {
   return render(
     <EvidenceBlockCanvas
@@ -314,6 +316,7 @@ function renderCanvas(
       document={DOCUMENT}
       task={TASK}
       assignments={Array.isArray(assignment) ? assignment : [assignment]}
+      selectedAssignmentId={selectedAssignmentId}
       annotations={annotations}
       annotatorId="alice"
       allowAssignmentlessEditing={allowAssignmentlessEditing}
@@ -586,6 +589,118 @@ describe("EvidenceBlockCanvas", () => {
     expect(screen.getByText("submitted assignment · read-only")).toBeTruthy();
     expect((screen.getByRole("button", { name: "Create block" }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByLabelText("Note") as HTMLInputElement).disabled).toBe(true);
+  });
+
+  it("keeps an explicitly selected submitted round while another round is mutable", async () => {
+    const submitted = { ...ASSIGNMENT, status: "submitted" as const };
+    const replacement = { ...ASSIGNMENT, id: 52, status: "assigned" as const };
+    const onActiveAssignmentChange = vi.fn();
+    const { unmount } = renderCanvas(
+      [submitted, replacement], [], onActiveAssignmentChange, false, submitted.id,
+    );
+
+    await screen.findByRole("button", { name: /Sentence 1, unreviewed/i });
+
+    expect(screen.getByText("submitted assignment · read-only")).toBeTruthy();
+    expect((screen.getByLabelText("Note") as HTMLInputElement).disabled).toBe(true);
+    expect(onActiveAssignmentChange).not.toHaveBeenCalled();
+    unmount();
+    expect(onActiveAssignmentChange).not.toHaveBeenCalled();
+  });
+
+  it("follows external assignment changes across targets and rounds on the same target", async () => {
+    api.listEvidenceTargets.mockResolvedValue([
+      {
+        ...TARGETS[0],
+        versions: [
+          ...TARGETS[0].versions,
+          { ...TARGETS[0].versions[0], id: 102, version_number: 2 },
+        ],
+      },
+    ]);
+    const first = { ...ASSIGNMENT, status: "submitted" as const };
+    const second = { ...ASSIGNMENT, id: 52, target_version_id: 102 };
+    const submittedSecond = { ...second, id: 53, status: "submitted" as const };
+    const props = {
+      projectId: 1,
+      document: DOCUMENT,
+      task: TASK,
+      assignments: [first, second, submittedSecond],
+      annotations: [],
+      annotatorId: "alice",
+      busy: false,
+      setBusy: vi.fn(),
+      setError: vi.fn(),
+      onAnnotationsChanged: vi.fn(),
+      onRefreshAnnotations: vi.fn().mockResolvedValue(undefined),
+      onActiveAssignmentChange: vi.fn(),
+    };
+    const { rerender } = render(
+      <EvidenceBlockCanvas {...props} selectedAssignmentId={first.id} />,
+    );
+    await screen.findByRole("button", { name: /Sentence 1, unreviewed/i });
+    expect((screen.getByLabelText("Evidence target") as HTMLSelectElement).value).toBe("101");
+    expect(screen.getByText("submitted assignment · read-only")).toBeTruthy();
+
+    rerender(<EvidenceBlockCanvas {...props} selectedAssignmentId={second.id} />);
+    await waitFor(() =>
+      expect((screen.getByLabelText("Evidence target") as HTMLSelectElement).value).toBe("102"),
+    );
+    expect((screen.getByLabelText("Note") as HTMLInputElement).disabled).toBe(false);
+
+    rerender(<EvidenceBlockCanvas {...props} selectedAssignmentId={submittedSecond.id} />);
+    expect((screen.getByLabelText("Evidence target") as HTMLSelectElement).value).toBe("102");
+    expect(screen.getByText("submitted assignment · read-only")).toBeTruthy();
+    expect((screen.getByLabelText("Note") as HTMLInputElement).disabled).toBe(true);
+    expect(props.onActiveAssignmentChange).not.toHaveBeenCalled();
+  });
+
+  it("updates the controlled assignment when the user chooses another evidence target", async () => {
+    api.listEvidenceTargets.mockResolvedValue([
+      {
+        ...TARGETS[0],
+        versions: [
+          ...TARGETS[0].versions,
+          { ...TARGETS[0].versions[0], id: 102, version_number: 2 },
+        ],
+      },
+    ]);
+    const submitted = { ...ASSIGNMENT, status: "submitted" as const };
+    const replacement = { ...ASSIGNMENT, id: 52, target_version_id: 102 };
+    const onActiveAssignmentChange = vi.fn();
+    function ControlledCanvas() {
+      const [selectedAssignmentId, setSelectedAssignmentId] = useState(submitted.id);
+      return (
+        <EvidenceBlockCanvas
+          projectId={1}
+          document={DOCUMENT}
+          task={TASK}
+          assignments={[submitted, replacement]}
+          selectedAssignmentId={selectedAssignmentId}
+          annotations={[]}
+          annotatorId="alice"
+          busy={false}
+          setBusy={vi.fn()}
+          setError={vi.fn()}
+          onAnnotationsChanged={vi.fn()}
+          onRefreshAnnotations={vi.fn().mockResolvedValue(undefined)}
+          onActiveAssignmentChange={(assignment) => {
+            onActiveAssignmentChange(assignment);
+            if (assignment) setSelectedAssignmentId(assignment.id);
+          }}
+        />
+      );
+    }
+    render(<ControlledCanvas />);
+    await screen.findByRole("button", { name: /Sentence 1, unreviewed/i });
+    expect((screen.getByLabelText("Evidence target") as HTMLSelectElement).value).toBe("101");
+    expect(onActiveAssignmentChange).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText("Evidence target"), { target: { value: "102" } });
+
+    expect(onActiveAssignmentChange).toHaveBeenCalledExactlyOnceWith(replacement);
+    expect((screen.getByLabelText("Evidence target") as HTMLSelectElement).value).toBe("102");
+    expect((screen.getByLabelText("Note") as HTMLInputElement).disabled).toBe(false);
   });
 
   it("uses personal task and setup language for evidence review", async () => {
