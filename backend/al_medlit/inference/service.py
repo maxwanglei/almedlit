@@ -519,11 +519,13 @@ def cancel_inference_run_with_backend(
     run = lock_inference_run(db, run_id)
     if run.status not in OPEN_RUN_STATUSES:
         return run
-    state = (
-        backend.cancel(run.external_job_id)
-        if run.external_job_id is not None
-        else JobState(status="cancelled", raw_state="CANCELLED_BEFORE_SUBMIT")
-    )
+    if run.external_job_id is None:
+        state = JobState(status="cancelled", raw_state="CANCELLED_BEFORE_SUBMIT")
+    elif run.compute_profile.backend == "local":
+        # Local runs execute in process; the claim's job id names no backend job.
+        state = JobState(status="cancelled", raw_state="CANCELLED_LOCAL_RUN")
+    else:
+        state = backend.cancel(run.external_job_id)
     _apply_run_state(run, state)
     db.commit()
     db.refresh(run)
