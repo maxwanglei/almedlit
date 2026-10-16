@@ -21,7 +21,12 @@ from test_system_administration_postgres_contention import (
     postgres_session_factory as _shared_postgres_session_factory,
 )
 from test_training_publication_postgres_contention import PausedPublicationStorage
-from test_training_run_execution import FakeTrainer, _training_run_fixture
+from test_training_run_execution import (
+    FakeEvaluator,
+    FakeTrainer,
+    MemoryObjectStorage,
+    _training_run_fixture,
+)
 
 from al_medlit.core.exceptions import ConflictError
 from al_medlit.model_artifacts import quota as artifact_quota
@@ -31,7 +36,12 @@ from al_medlit.model_artifacts.models import (
     ArtifactStorageReservation,
     WorkspaceArtifactQuota,
 )
-from al_medlit.training.run_execution import execute_training_run, reconcile_stale_training_runs
+from al_medlit.training.evaluators.contracts import EvaluatorPluginRegistry
+from al_medlit.training.run_execution import (
+    execute_training_run,
+    heartbeat_training_run,
+    reconcile_stale_training_runs,
+)
 from al_medlit.training.trainers.contracts import TrainerPluginRegistry
 from al_medlit.workflow import schemas, service
 from al_medlit.workflow.models import ModelVersion, TrainingRun
@@ -183,3 +193,95 @@ def test_publication_refreshes_waiting_run_mutations(
         assert quota.reserved_bytes == 0
         assert quota.used_bytes == reservation.committed_bytes == physical_bytes
         assert physical_bytes > 0
+
+
+class _HeartbeatDuringEvaluation(FakeEvaluator):
+    def __init__(self, *, during_evaluation: Callable[[], None], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.during_evaluation = during_evaluation
+
+    def evaluate(self, **kwargs: Any):
+        self.during_evaluation()
+        return super().evaluate(**kwargs)
+
+
+def test_heartbeat_keeps_run_alive_after_candidate_publication(
+    postgres_session_factory: sessionmaker[Session],
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AL_MEDLIT_WORKER_IMAGE_DIGEST", "a" * 64)
+    storage = MemoryObjectStorage()
+    with postgres_session_factory() as db:
+        scope = _training_run_fixture(
+            db,
+            storage=storage,
+            suffix=f"evaluation-heartbeat-{uuid4().hex[:8]}",
+            evaluation_plan={"splits": ["validation", "test"], "metrics": ["accuracy"]},
+        )
+        run_id = scope.run.id
+        reservation_id = scope.run.artifact_reservation_id
+
+    trainer = FakeTrainer(
+        key="sklearn_tfidf",
+        recipe_key="tfidf_logistic_regression",
+        runtime_class="classical-cpu",
+        output_name="model.skops",
+    )
+    trainers = TrainerPluginRegistry()
+    trainers.register(trainer)
+    results: dict[str, Any] = {}
+
+    def heartbeat_then_reconcile() -> None:
+        with postgres_session_factory() as db:
+            db.execute(text(f"SET lock_timeout = '{_LOCK_TIMEOUT_SECONDS}s'"))
+            reservation = db.get(ArtifactStorageReservation, reservation_id)
+            results["reservation"] = reservation.status
+            claimed_at = db.get(TrainingRun, run_id).started_at
+            results["heartbeat"] = heartbeat_training_run(
+                db,
+                run_id,
+                now=claimed_at + timedelta(seconds=290),
+            )
+        with postgres_session_factory() as db:
+            db.execute(text(f"SET lock_timeout = '{_LOCK_TIMEOUT_SECONDS}s'"))
+            results["reconciled"] = reconcile_stale_training_runs(
+                db,
+                now=claimed_at + timedelta(seconds=400),
+                stale_after_seconds=300,
+            )
+
+    evaluators = EvaluatorPluginRegistry()
+    evaluators.register(
+        _HeartbeatDuringEvaluation(
+            during_evaluation=heartbeat_then_reconcile,
+            recipe_key="tfidf_logistic_regression",
+            trainer=trainer,
+        )
+    )
+    with postgres_session_factory() as db:
+        db.execute(text(f"SET lock_timeout = '{_LOCK_TIMEOUT_SECONDS}s'"))
+        try:
+            results["executor"] = (
+                "ok",
+                execute_training_run(
+                    db,
+                    storage,
+                    training_run_id=run_id,
+                    trainer_registry=trainers,
+                    evaluator_registry=evaluators,
+                ).status,
+            )
+        except ConflictError as exc:
+            results["executor"] = ("conflict", str(exc))
+
+    assert results == {
+        "reservation": "committed",
+        "heartbeat": True,
+        "reconciled": [],
+        "executor": ("ok", "succeeded"),
+    }, results
+    with postgres_session_factory() as db:
+        run = db.get(TrainingRun, run_id)
+        assert run.status == "succeeded"
+        assert "worker_recovery" not in run.runtime_snapshot
+        assert run.runtime_snapshot["protected_test_evaluation"]["status"] == "succeeded"
