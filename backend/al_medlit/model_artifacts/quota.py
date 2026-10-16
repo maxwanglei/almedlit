@@ -263,9 +263,12 @@ def _locked_reservation(
     if reservation is None:
         raise NotFoundError("Artifact storage reservation not found")
     quota = _locked_quota(db, reservation.workspace_id)
+    # The unlocked read above may predate a transition that committed before
+    # this transaction acquired the quota lock.
     reservation = (
         db.query(ArtifactStorageReservation)
         .filter(ArtifactStorageReservation.id == reservation_id)
+        .populate_existing()
         .with_for_update()
         .one()
     )
@@ -388,6 +391,8 @@ def admit_artifact_publication(
     quota = _locked_quota(db, workspace_id)
     effective_now = datetime.now(UTC)
     _expire_locked(db, quota, now=effective_now)
+    # Blobs read earlier in this transaction, such as a staged base model's,
+    # may since have been purged by GC.
     existing_by_checksum = {
         blob.checksum_sha256: blob
         for blob in db.query(ArtifactBlob)
@@ -395,6 +400,7 @@ def admit_artifact_publication(
             ArtifactBlob.workspace_id == workspace_id,
             ArtifactBlob.checksum_sha256.in_(sizes),
         )
+        .populate_existing()
         .with_for_update()
         .all()
     }
@@ -501,9 +507,11 @@ def complete_owner_artifact_reservation(
         )
         .one_or_none()
     )
-    if reservation is None or reservation.status != _ACTIVE_STATUS:
-        return reservation
+    if reservation is None:
+        return None
     quota, reservation = _locked_reservation(db, reservation.id)
+    if reservation.status != _ACTIVE_STATUS:
+        return reservation
     if reservation.reserved_bytes > quota.reserved_bytes:
         raise ConflictError("Workspace artifact reservation accounting is inconsistent")
     quota.reserved_bytes -= reservation.reserved_bytes
