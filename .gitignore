@@ -85,4 +85,4 @@ PROJECT.md
 docs/
 docs/*
 design-system/*
-.audit/
+.audit/*
