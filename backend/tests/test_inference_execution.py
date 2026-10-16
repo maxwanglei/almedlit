@@ -314,8 +314,8 @@ def test_local_inference_rejects_oversized_sentences_before_prediction(
     assert scope.run.status == "failed"
     assert scope.run.failure_reason == str(error.value)
     assert scope.run.completed_at is not None
-    assert scope.run.started_at is None
-    assert scope.run.external_job_id is None
+    assert scope.run.started_at is not None
+    assert scope.run.external_job_id == f"local:inference-{scope.run.id}"
 
 
 def test_local_inference_failure_after_claim_marks_run_failed(

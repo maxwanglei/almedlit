@@ -132,6 +132,33 @@ def _uses_direct_checkpoint_package(checkpoint) -> bool:
     return True
 
 
+def _claim_inference_run(db: Session, run_id: int) -> tuple[InferenceRun, bool]:
+    run = service.lock_inference_run(db, run_id)
+    if run.status in {"succeeded", "running"}:
+        db.rollback()
+        return run, False
+    if run.status != "queued":
+        db.rollback()
+        raise ConflictError(f"Inference cannot execute from status '{run.status}'")
+    run.status = "running"
+    run.started_at = datetime.now(UTC)
+    run.external_job_id = f"local:inference-{run.id}"
+    db.commit()
+    return run, True
+
+
+def _mark_failed(db: Session, run_id: int, exc: Exception) -> None:
+    db.rollback()
+    run = service.lock_inference_run(db, run_id)
+    if run.status != "running":
+        db.rollback()
+        return
+    run.status = "failed"
+    run.completed_at = datetime.now(UTC)
+    run.failure_reason = str(exc) or type(exc).__name__
+    db.commit()
+
+
 def execute_local_inference(
     db: Session,
     storage: ObjectStorage,
@@ -139,13 +166,28 @@ def execute_local_inference(
     run_id: int,
     work_root: str | Path | None = None,
 ) -> InferenceRun:
+    """Execute one queued local run; a repeated or concurrent delivery is a no-op."""
+
     run = service.get_inference_run(db, run_id)
-    if run.status == "succeeded":
-        return run
-    if run.status in {"failed", "cancelled"}:
-        raise ConflictError(f"Inference cannot execute from status '{run.status}'")
     if run.compute_profile.backend != "local":
         raise ValidationError("This execution path is only for local compute profiles")
+    run, claimed = _claim_inference_run(db, run_id)
+    if not claimed:
+        return run
+    try:
+        return _execute_claimed_local_inference(db, storage, run=run, work_root=work_root)
+    except Exception as exc:
+        _mark_failed(db, run_id, exc)
+        raise
+
+
+def _execute_claimed_local_inference(
+    db: Session,
+    storage: ObjectStorage,
+    *,
+    run: InferenceRun,
+    work_root: str | Path | None,
+) -> InferenceRun:
     synthetic_mode = bool(run.checkpoint.manifest.get("synthetic_mode"))
     model_type = str(run.checkpoint.manifest.get("model_type", "evidence_block_sentence_tagger"))
 
@@ -295,24 +337,11 @@ def execute_local_inference(
                 len(predictor.tokenizer.encode(text, add_special_tokens=False)),
             )
 
-    try:
-        windows = service.materialize_inference_windows(
-            db,
-            run_id=run.id,
-            token_counter=token_counter,
-        )
-    except ValidationError as exc:
-        run.status = "failed"
-        run.completed_at = datetime.now(UTC)
-        run.failure_reason = str(exc)
-        db.commit()
-        raise
-
-    if run.started_at is None:
-        run.started_at = datetime.now(UTC)
-    run.status = "running"
-    run.external_job_id = run.external_job_id or f"local:inference-{run.id}"
-    db.commit()
+    windows = service.materialize_inference_windows(
+        db,
+        run_id=run.id,
+        token_counter=token_counter,
+    )
 
     windows_by_scope: dict[tuple[int, int, int], list[InferenceWindow]] = defaultdict(list)
     for window in windows:
@@ -589,7 +618,11 @@ def execute_local_inference(
         .filter(EvidenceCandidatePrediction.run_id == run.id)
         .count()
     )
-    run = service.get_inference_run(db, run.id)
+    run = service.lock_inference_run(db, run.id)
+    if run.status != "running":
+        # A cancel committed mid-run; its verdict stands over the completion.
+        db.rollback()
+        return run
     run.status = "succeeded"
     run.completed_at = datetime.now(UTC)
     run.metrics = {
@@ -916,10 +949,12 @@ def finalize_remote_inference(
 ) -> InferenceRun:
     import json
 
-    run = service.get_inference_run(db, run_id)
+    run = service.lock_inference_run(db, run_id)
     if run.status != "succeeded":
+        db.rollback()
         raise ConflictError("Only a succeeded inference run can be finalized")
     if run.diagnostics_artifact_id is not None:
+        db.rollback()
         return run
     root = (
         Path(work_root)
@@ -1007,7 +1042,8 @@ def finalize_remote_inference(
             result,
             [model.id for model in window_models],
         )
-    db.commit()
+    # Storing diagnostics commits and releases the run lock taken above. Until
+    # then a concurrent finalization waits, and afterwards it sees the artifact.
     diagnostics_artifact_id = service.store_inference_diagnostics(
         db,
         storage,
