@@ -318,6 +318,48 @@ def test_local_inference_rejects_oversized_sentences_before_prediction(
     assert scope.run.external_job_id is None
 
 
+def test_local_inference_failure_after_claim_marks_run_failed(
+    db,
+    object_storage,
+    tmp_path,
+    monkeypatch,
+):
+    archive = tmp_path / "checkpoint.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("checkpoint/model.json", "{}")
+    scope = _inference_scope(
+        db,
+        checkpoint_object=object_storage.put_file(
+            "checkpoints/synthetic.zip",
+            archive,
+            content_type="application/zip",
+        ),
+        window_config=WINDOW_CONFIG,
+        decoder_config=DECODER_CONFIG,
+        run_status="queued",
+        with_window=False,
+    )
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("diagnostics storage unavailable")
+
+    monkeypatch.setattr(service, "store_inference_diagnostics", explode)
+
+    with pytest.raises(RuntimeError, match="diagnostics storage unavailable"):
+        execution.execute_local_inference(
+            db,
+            object_storage,
+            run_id=scope.run.id,
+            work_root=tmp_path / "work",
+        )
+
+    db.rollback()
+    db.expire(scope.run)
+    assert scope.run.status == "failed"
+    assert scope.run.failure_reason == "diagnostics storage unavailable"
+    assert scope.run.completed_at is not None
+
+
 def test_inference_window_validation_leaves_no_partial_windows_for_earlier_targets(db):
     scope = _inference_scope(
         db,
