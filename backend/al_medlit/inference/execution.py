@@ -947,15 +947,38 @@ def finalize_remote_inference(
     backend: SSHSlurmComputeBackend,
     work_root: str | Path | None = None,
 ) -> InferenceRun:
+    try:
+        run = service.lock_inference_run(db, run_id)
+        if run.status != "succeeded":
+            raise ConflictError("Only a succeeded inference run can be finalized")
+        if (
+            run.diagnostics_artifact_id is not None
+            and run.metrics.get("inference_log_artifact_id") is not None
+        ):
+            db.rollback()
+            return run
+        return _finalize_locked_remote_inference(
+            db,
+            storage,
+            run=run,
+            backend=backend,
+            work_root=work_root,
+        )
+    except Exception:
+        db.rollback()
+        raise
+
+
+def _finalize_locked_remote_inference(
+    db: Session,
+    storage: ObjectStorage,
+    *,
+    run: InferenceRun,
+    backend: SSHSlurmComputeBackend,
+    work_root: str | Path | None,
+) -> InferenceRun:
     import json
 
-    run = service.lock_inference_run(db, run_id)
-    if run.status != "succeeded":
-        db.rollback()
-        raise ConflictError("Only a succeeded inference run can be finalized")
-    if run.diagnostics_artifact_id is not None:
-        db.rollback()
-        return run
     root = (
         Path(work_root)
         if work_root is not None
@@ -1042,15 +1065,16 @@ def finalize_remote_inference(
             result,
             [model.id for model in window_models],
         )
-    # Storing diagnostics commits and releases the run lock taken above. Until
-    # then a concurrent finalization waits, and afterwards it sees the artifact.
-    diagnostics_artifact_id = service.store_inference_diagnostics(
-        db,
-        storage,
-        run_id=run.id,
-        diagnostics=inference_result,
-        actor_user_id=run.created_by_user_id,
-    )
+    diagnostics_artifact_id = run.diagnostics_artifact_id
+    if diagnostics_artifact_id is None:
+        diagnostics_artifact_id = service.store_inference_diagnostics(
+            db,
+            storage,
+            run_id=run.id,
+            diagnostics=inference_result,
+            actor_user_id=run.created_by_user_id,
+            commit=False,
+        )
     for scope, (result, window_ids) in decoded_by_scope.items():
         service.persist_decoder_result(
             db,
@@ -1061,6 +1085,7 @@ def finalize_remote_inference(
             result=result,
             source_window_ids=window_ids,
             diagnostics_artifact_id=diagnostics_artifact_id,
+            commit=False,
         )
     stored_log = storage.put_file(
         f"projects/{run.project_id}/inference/runs/{run.id}/infer.log",

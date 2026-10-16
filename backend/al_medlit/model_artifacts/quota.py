@@ -75,6 +75,7 @@ def _locked_quota(db: Session, workspace_id: int) -> WorkspaceArtifactQuota:
     quota = (
         db.query(WorkspaceArtifactQuota)
         .filter(WorkspaceArtifactQuota.workspace_id == workspace_id)
+        .populate_existing()
         .with_for_update()
         .one_or_none()
     )
@@ -97,6 +98,7 @@ def _locked_quota(db: Session, workspace_id: int) -> WorkspaceArtifactQuota:
         return (
             db.query(WorkspaceArtifactQuota)
             .filter(WorkspaceArtifactQuota.workspace_id == workspace_id)
+            .populate_existing()
             .with_for_update()
             .one()
         )
@@ -207,16 +209,17 @@ def reserve_artifact_bytes(
     workspace_id = _project_workspace_id(db, project_id)
     quota = _locked_quota(db, workspace_id)
     effective_now = now or datetime.now(UTC)
-    _expire_locked(db, quota, now=effective_now)
     existing = (
         db.query(ArtifactStorageReservation)
         .filter(
             ArtifactStorageReservation.workspace_id == workspace_id,
             ArtifactStorageReservation.idempotency_key == normalized_key,
         )
+        .populate_existing()
         .with_for_update()
         .one_or_none()
     )
+    _expire_locked(db, quota, now=effective_now)
     if existing is not None:
         if (
             existing.project_id != project_id
@@ -227,6 +230,7 @@ def reserve_artifact_bytes(
             raise ConflictError(
                 "Artifact reservation idempotency key was reused with different inputs"
             )
+        db.flush()
         return existing
 
     projected = quota.used_bytes + quota.reserved_bytes + amount
@@ -390,7 +394,6 @@ def admit_artifact_publication(
     sizes = _candidate_sizes(candidates)
     quota = _locked_quota(db, workspace_id)
     effective_now = datetime.now(UTC)
-    _expire_locked(db, quota, now=effective_now)
     # Blobs read earlier in this transaction, such as a staged base model's,
     # may since have been purged by GC.
     existing_by_checksum = {
@@ -418,6 +421,7 @@ def admit_artifact_publication(
         reservation = (
             db.query(ArtifactStorageReservation)
             .filter(ArtifactStorageReservation.id == reservation_id)
+            .populate_existing()
             .with_for_update()
             .one_or_none()
         )
@@ -427,7 +431,10 @@ def admit_artifact_publication(
             or reservation.project_id != project_id
         ):
             raise NotFoundError("Artifact storage reservation not found for publication")
+    _expire_locked(db, quota, now=effective_now)
+    if reservation is not None:
         if reservation.status == "committed" and physical_delta == 0:
+            db.flush()
             return 0
         if reservation.status != _ACTIVE_STATUS:
             raise ConflictError(
@@ -476,6 +483,7 @@ def link_reservation_artifact_package(
     reservation = (
         db.query(ArtifactStorageReservation)
         .filter(ArtifactStorageReservation.id == reservation_id)
+        .populate_existing()
         .with_for_update()
         .one_or_none()
     )
