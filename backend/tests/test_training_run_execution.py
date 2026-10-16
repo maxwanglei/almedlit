@@ -1556,6 +1556,10 @@ def test_registered_model_feedback_scoring_is_deterministic_and_idempotent(db):
         ]
     ]
 
+    # Queued scoring may finish after deactivation; publishing a new selection
+    # is a separate trainer action and requires an active actor.
+    scope.actor.is_active = True
+    db.commit()
     selection_run = service.create_selection_run(
         db,
         schemas.SelectionRunCreate(

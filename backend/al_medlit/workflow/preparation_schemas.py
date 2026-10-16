@@ -85,6 +85,7 @@ class PreparationSourceCounts(InputModel):
 class TrainingPreparationPreview(InputModel):
     ready: bool
     issues: list[PreparationIssue]
+    warnings: list[PreparationIssue] = Field(default_factory=list)
     source_counts: list[PreparationSourceCounts]
     input_count: int
     labeled_count: int

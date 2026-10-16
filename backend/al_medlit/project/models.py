@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from al_medlit.core.database import Base
@@ -89,12 +89,15 @@ class ProjectTask(Base, IntPrimaryKeyMixin, TimestampMixin):
 class TaskAssignment(Base, IntPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "task_assignments"
     __table_args__ = (
-        UniqueConstraint(
+        Index(
+            "uq_task_assignments_live_scope",
             "task_id",
             "document_id",
             "assignee_user_id",
             "assignment_scope_key",
-            name="uq_task_assignments_task_document_assignee_scope",
+            unique=True,
+            postgresql_where=text("status != 'withdrawn'"),
+            sqlite_where=text("status != 'withdrawn'"),
         ),
     )
 

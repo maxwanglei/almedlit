@@ -5,10 +5,8 @@ import type { Project } from "@/types/api";
 
 import {
   cancelTrainingRun,
-  createDatasetWithVersion,
   createExecutionEnvironment,
   createStoragePolicy,
-  createTaskWithVersion,
   createTrainingDataset,
   createTrainingOnlyProject,
   findWorkspaceTrainingRun,
@@ -22,6 +20,7 @@ import DataScreen from "./DataScreen";
 import TrainingDatasetBuilder from "./TrainingDatasetBuilder";
 import PlatformDialog from "./PlatformDialog";
 import TrainingScreen, { type TrainingLaunchDraft } from "./TrainingScreen";
+import { useResourceCreation } from "./useResourceCreation";
 import {
   PlatformEmpty,
   PlatformPageHeader,
@@ -1024,6 +1023,7 @@ function TrainingData({
     null,
   );
   const [projectId, setProjectId] = useState(0);
+  const resourceCreation = useResourceCreation(projectId || null, workspaceId);
   const [data, setData] = useState(EMPTY_PLATFORM_PROJECT_DATA);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -1245,10 +1245,10 @@ function TrainingData({
             setDialogDatasetId(null);
           }}
           onCreateDataset={(draft) =>
-            mutate(() => createDatasetWithVersion(projectId, draft))
+            mutate(() => resourceCreation.createDataset(draft))
           }
           onCreateTask={(draft) =>
-            mutate(() => createTaskWithVersion(projectId, draft))
+            mutate(() => resourceCreation.createTask(draft))
           }
           onPrepareTrainingData={(draft) =>
             mutate(() => createTrainingDataset(projectId, draft))

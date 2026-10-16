@@ -112,6 +112,83 @@ export class ApiError extends Error {
   }
 }
 
+function fallbackErrorMessage(status: number): string {
+  switch (status) {
+    case 400:
+      return "The request could not be processed. Check your input and try again.";
+    case 401:
+      return "Authentication is required. Please sign in again.";
+    case 403:
+      return "You do not have permission to perform this action.";
+    case 404:
+      return "The requested resource could not be found.";
+    case 408:
+    case 504:
+      return "The server took too long to respond. Please try again.";
+    case 409:
+      return "This change conflicts with the current state. Refresh and try again.";
+    case 413:
+      return "The request is too large. Reduce its size and try again.";
+    case 415:
+      return "This file or request format is not supported.";
+    case 422:
+      return "Some values are invalid. Check your input and try again.";
+    case 429:
+      return "Too many requests. Please wait and try again.";
+    case 502:
+    case 503:
+      return "The server is temporarily unavailable. Please try again.";
+    default:
+      return status >= 500
+        ? "The server could not complete the request. Please try again."
+        : `Request failed (HTTP ${status}). Please try again.`;
+  }
+}
+
+function readableErrorText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const message = value.trim();
+  // Reject documents and fragments even when a proxy sends the wrong content type.
+  if (!message || /<(?:!doctype\b|!--|\/?[a-z][a-z\d-]*(?:\s|\/?>|$))/i.test(message)) {
+    return null;
+  }
+  return message;
+}
+
+function detailErrorMessage(body: unknown): string | null {
+  if (!body || typeof body !== "object" || !("detail" in body)) return null;
+  if (!Array.isArray(body.detail)) return readableErrorText(body.detail);
+  const messages = body.detail
+    .map((item: unknown) => item && typeof item === "object" && "msg" in item
+      ? readableErrorText(item.msg)
+      : null)
+    .filter((message): message is string => message !== null);
+  return messages.length ? messages.join("; ") : null;
+}
+
+async function responseErrorMessage(response: Response): Promise<string> {
+  const fallback = fallbackErrorMessage(response.status);
+  const contentType = response.headers.get("Content-Type")?.toLowerCase() ?? "";
+  if (contentType.includes("text/html") || contentType.includes("application/xhtml+xml")) {
+    return fallback;
+  }
+  try {
+    const text = await response.text();
+    let body: unknown;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      // Malformed JSON is not a useful message, even if its header is missing.
+      const trimmed = text.trim();
+      if (contentType.includes("json") || trimmed.startsWith("{") || trimmed.startsWith("[")) return fallback;
+      return readableErrorText(trimmed) ?? fallback;
+    }
+    return detailErrorMessage(body) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 async function requestResponse(path: string, init?: RequestInit): Promise<Response> {
   const requestGeneration = getSessionGeneration();
   const method = (init?.method ?? "GET").toUpperCase();
@@ -128,27 +205,7 @@ async function requestResponse(path: string, init?: RequestInit): Promise<Respon
   });
 
   if (!response.ok) {
-    let message = response.statusText;
-    const responseClone = response.clone();
-    try {
-      const body = (await response.json()) as { detail?: unknown };
-      if (typeof body.detail === "string") {
-        message = body.detail;
-      }
-    } catch {
-      try {
-        const text = await responseClone.text();
-        if (text.trim()) {
-          message = text.trim();
-        }
-      } catch {
-        // Keep the HTTP status text when the body cannot be read.
-      }
-    }
-
-    if (response.status >= 500 && message === response.statusText) {
-      message = "Backend API is unavailable or returned an internal error.";
-    }
+    const message = await responseErrorMessage(response);
     if (
       response.status === 401 &&
       getSessionGeneration() === requestGeneration

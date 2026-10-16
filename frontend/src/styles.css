@@ -272,6 +272,72 @@
   border-bottom: 0;
 }
 
+#evidence-setup {
+  scroll-margin-top: 24px;
+}
+
+#evidence-setup .platform-panel {
+  min-width: 0;
+  padding: 24px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+#evidence-setup .platform-panel > h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+#evidence-setup fieldset {
+  min-width: 0;
+  display: grid;
+  gap: 14px;
+  margin: 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+#evidence-setup fieldset label {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  color: var(--ink-2);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+#evidence-setup pre {
+  max-width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  line-height: 1.5;
+}
+
+#evidence-setup .platform-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+}
+
+#evidence-setup button:not(.astryx-button):not(.platform-text-action) {
+  min-height: 44px;
+  padding: 8px 12px;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  font-weight: 700;
+}
+
+#evidence-setup button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+#evidence-setup .platform-form-fieldset + .platform-form-fieldset {
+  margin-top: 14px;
+}
+
 .platform-section-header {
   margin-bottom: 14px;
 }
@@ -3120,6 +3186,62 @@ select:disabled {
 
 .shell-banner {
   border-bottom: 1px solid var(--line);
+}
+
+.route-error {
+  flex: 1;
+  padding: 48px 24px;
+}
+
+.route-error > section {
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+.route-error p {
+  color: var(--ink-2);
+  line-height: 1.6;
+}
+
+.recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.recovery-actions button {
+  min-height: 44px;
+  padding: 8px 16px;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+}
+
+.recovery-actions button:first-child {
+  color: var(--paper);
+  background: var(--ink);
+}
+
+.preload-recovery {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 24px;
+  color: var(--status-warning-text);
+  background: var(--status-warning-surface);
+  border-bottom: 1px solid var(--status-warning-border);
+}
+
+.preload-recovery p {
+  margin: 8px 0 0;
+}
+
+.preload-recovery .recovery-actions {
+  margin-top: 0;
 }
 
 .xds-button.logout-button {

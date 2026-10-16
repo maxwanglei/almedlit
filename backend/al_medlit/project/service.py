@@ -684,6 +684,13 @@ def delete_project_task(db: Session, project_id: int, task_id: int) -> bool:
         raise ConflictError(
             "Evidence-block tasks with versioned targets cannot be deleted; disable the task"
         )
+    if (
+        db.query(TaskAssignment.id)
+        .filter(TaskAssignment.task_id == task.id)
+        .first()
+        is not None
+    ):
+        raise ConflictError("Tasks with assignments cannot be deleted; disable the task")
     db.delete(task)
     db.flush()
     _sync_project_annotation_schema(db, project_id)
@@ -801,6 +808,7 @@ def create_task_assignment(
             TaskAssignment.document_id == payload["document_id"],
             TaskAssignment.assignee_user_id == payload["assignee_user_id"],
             TaskAssignment.assignment_scope_key == payload["assignment_scope_key"],
+            TaskAssignment.status != "withdrawn",
         )
         .first()
     )
@@ -892,6 +900,7 @@ def ensure_personal_project_self_assignments(
             TaskAssignment.assignee_user_id == user.id,
             TaskAssignment.task_id.in_(task_id_values),
             TaskAssignment.document_id.in_(document_id_values),
+            TaskAssignment.status != "withdrawn",
         )
         .all()
     }
@@ -1171,6 +1180,8 @@ def update_task_assignment(
             or final_status_order[next_status] < final_status_order[assignment.status]
         ):
             raise ConflictError("Finalized task assignments cannot be reopened or moved backward")
+    if assignment.status != "withdrawn" and next_status == "withdrawn":
+        raise ValidationError("The withdrawn status is reserved for workspace offboarding")
     if "assignee_user_id" in updates or "annotator_id" in updates:
         project = _get_required_project(db, project_id)
         assignee = _resolve_user_for_assignment(

@@ -19,6 +19,7 @@ import type {
 import ActivityScreen from "./ActivityScreen";
 import AnnotateScreen from "./AnnotateScreen";
 import DataScreen from "./DataScreen";
+import EvidenceSetupPanel from "./EvidenceSetupPanel";
 import SourceDatasetSetup from "./SourceDatasetSetup";
 import InferenceScreen from "./InferenceScreen";
 import {
@@ -66,6 +67,7 @@ interface ProjectPlatformProps {
   onUpdateModules: (selected: ProjectModule[]) => Promise<void>;
   onRefresh: () => Promise<void>;
   onDocumentsImported?: () => Promise<unknown>;
+  onEvidenceChanged?: () => Promise<unknown>;
   dialogContent?: ReactNode;
 }
 
@@ -92,6 +94,7 @@ export default function ProjectPlatform({
   onUpdateModules,
   onRefresh,
   onDocumentsImported,
+  onEvidenceChanged = onRefresh,
   dialogContent,
 }: ProjectPlatformProps): React.ReactElement {
   const route = parseProjectPlatformRoute(pathname);
@@ -187,6 +190,7 @@ export default function ProjectPlatform({
       break;
     case "tasks":
       content = (
+        <>
         <AnnotateScreen
           view="tasks"
           data={data}
@@ -201,6 +205,11 @@ export default function ProjectPlatform({
           onCreateScore={() => onDialogChange("feedbackScore")}
           onRefresh={onRefresh}
         />
+        {canManageAnnotation && effectiveModules.has("annotate") ? <EvidenceSetupPanel
+          projectId={project.id} workspaceId={access.workspaceId} busy={busy}
+          onChanged={onEvidenceChanged} onNavigate={onNavigate}
+        /> : null}
+        </>
       );
       break;
     case "rounds":
@@ -229,6 +238,7 @@ export default function ProjectPlatform({
           documents={documents}
           assignments={assignments}
           allowSoloGold={access.isWorkspaceOwner}
+          onSetupEvidence={() => onNavigate(`/projects/${project.id}/tasks#evidence-setup`)}
         />
       );
       break;

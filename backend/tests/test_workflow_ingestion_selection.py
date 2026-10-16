@@ -691,7 +691,7 @@ def test_materialized_selection_is_deterministic_and_excludes_protected_splits(c
     assert materialized.status_code == 201, materialized.text
     selection = materialized.json()
     assert [item["dataset_item_id"] for item in selection["items"]] == [
-        item_by_key["b"]["id"],
+        item_by_key["a"]["id"],
         item_by_key["c"]["id"],
     ]
     assert [item["rank"] for item in selection["items"]] == [1, 2]
@@ -702,8 +702,10 @@ def test_materialized_selection_is_deterministic_and_excludes_protected_splits(c
         "selection_basis": "deterministic_rank",
         "probability_basis": "deterministic_rank",
         "signal": "uncertainty",
-        "signal_value": 0.8,
+        "signal_value": 0.7,
         "signal_source": "score",
+        "signal_transform": "1 - confidence",
+        "confidence": 0.3,
         "feedback_candidate_id": selection["items"][0]["reason"]["feedback_candidate_id"],
         "candidate_key": "primary",
     }

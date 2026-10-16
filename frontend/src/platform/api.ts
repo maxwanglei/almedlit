@@ -921,20 +921,86 @@ export interface DatasetDraft {
   purposes?: Dataset["purposes"];
 }
 
+export function validateDatasetDraft(draft: DatasetDraft): void {
+  const name = draft.name.trim();
+  if (!name) throw new Error("Enter a dataset name.");
+  if ([...name].length > 255) throw new Error("Dataset names must be 255 characters or fewer.");
+
+  if (draft.sourceType === "project_corpus") {
+    if (draft.documentIds && (
+      draft.documentIds.length === 0 ||
+      draft.documentIds.some((id) => !Number.isInteger(id) || id <= 0)
+    )) throw new Error("Select at least one valid project document.");
+    return;
+  }
+
+  if (draft.sourceType === "upload" || draft.sourceType === "public_registry") {
+    if (!draft.file) {
+      throw new Error(draft.sourceType === "upload"
+        ? "Choose a CSV, JSONL, or Parquet file."
+        : "Choose an exported snapshot of the pinned public dataset.");
+    }
+    if (draft.file.size === 0) throw new Error("Choose a dataset file that is not empty.");
+    if (draft.file.size > 25 * 1024 * 1024) throw new Error("Dataset files must be 25 MB or smaller.");
+    if ([...draft.stableKeyField.trim()].length > 255) throw new Error("Stable ID fields must be 255 characters or fewer.");
+    if ([...draft.groupKeyField.trim()].length > 255) throw new Error("Group ID fields must be 255 characters or fewer.");
+
+    if (draft.sourceType === "upload") {
+      if (!["csv", "jsonl", "parquet", "other"].includes(draft.sourceFormat)) {
+        throw new Error("Dataset uploads must be CSV, JSONL, or Parquet.");
+      }
+      if (draft.sourceFormat === "other" && !/\.(csv|jsonl|ndjson|parquet)$/i.test(draft.file.name)) {
+        throw new Error("Choose a CSV, JSONL, or Parquet file, or select its format explicitly.");
+      }
+      return;
+    }
+
+    if (!["csv", "jsonl", "parquet"].includes(draft.sourceFormat)) {
+      throw new Error("Public dataset snapshots must be CSV, JSONL, or Parquet.");
+    }
+    const registryId = draft.registryDatasetId.trim();
+    if (registryId.length > 255 || !/^[A-Za-z0-9][A-Za-z0-9_.-]*(?:\/[A-Za-z0-9][A-Za-z0-9_.-]*)?$/.test(registryId)) {
+      throw new Error("Enter a valid Hugging Face dataset ID, such as owner/dataset.");
+    }
+    if (!/^[0-9a-fA-F]{40}$/.test(draft.sourceRevision.trim())) {
+      throw new Error("Public datasets require an exact 40-character hexadecimal commit revision.");
+    }
+    const configuration = draft.registryConfigName.trim();
+    if (configuration && (configuration.length > 255 || !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(configuration))) {
+      throw new Error("Enter a valid dataset configuration of at most 255 letters, numbers, periods, underscores, or hyphens.");
+    }
+    if ([...draft.license.trim()].length > 255) throw new Error("License identifiers must be 255 characters or fewer.");
+    return;
+  }
+
+  const revision = draft.sourceRevision.trim();
+  if (!revision) throw new Error("Enter an exact dataset revision.");
+  if ([...revision].length > 255) throw new Error("Dataset revisions must be 255 characters or fewer.");
+  if ([...draft.sourceUri.trim()].length > 1024) throw new Error("Dataset source URIs must be 1024 characters or fewer.");
+}
+
 export async function createDatasetWithVersion(
   projectId: number,
   draft: DatasetDraft,
+  onDefinitionCreated?: (dataset: Dataset) => void,
+  existingDefinitionId?: number | null,
 ): Promise<DatasetVersion> {
-  const dataset = await post<Dataset>("/datasets", {
-    project_id: projectId,
-    name: draft.name.trim(),
-    description: draft.description.trim() || null,
-    source_type: draft.sourceType,
-    purposes: draft.purposes ?? [],
-  });
+  validateDatasetDraft(draft);
+  let datasetId = existingDefinitionId;
+  if (!datasetId) {
+    const dataset = await post<Dataset>("/datasets", {
+      project_id: projectId,
+      name: draft.name.trim(),
+      description: draft.description.trim() || null,
+      source_type: draft.sourceType,
+      purposes: draft.purposes ?? [],
+    });
+    datasetId = dataset.id;
+    onDefinitionCreated?.(dataset);
+  }
   if (draft.sourceType === "project_corpus") {
     return post<DatasetVersion>(
-      `/projects/${projectId}/datasets/${dataset.id}/versions/project-corpus`,
+      `/projects/${projectId}/datasets/${datasetId}/versions/project-corpus`,
       draft.documentIds ? { document_ids: draft.documentIds } : {},
     );
   }
@@ -946,7 +1012,7 @@ export async function createDatasetWithVersion(
     if (draft.stableKeyField.trim()) form.set("stable_key_field", draft.stableKeyField.trim());
     if (draft.groupKeyField.trim()) form.set("group_key_field", draft.groupKeyField.trim());
     return request<DatasetVersion>(
-      `/projects/${projectId}/datasets/${dataset.id}/versions/upload`,
+      `/projects/${projectId}/datasets/${datasetId}/versions/upload`,
       { method: "POST", body: form },
     );
   }
@@ -975,13 +1041,13 @@ export async function createDatasetWithVersion(
       form.set("group_key_field", draft.groupKeyField.trim());
     }
     return request<DatasetVersion>(
-      `/projects/${projectId}/datasets/${dataset.id}/versions/public-registry-snapshot`,
+      `/projects/${projectId}/datasets/${datasetId}/versions/public-registry-snapshot`,
       { method: "POST", body: form },
     );
   }
   return post<DatasetVersion>("/datasets/versions", {
     project_id: projectId,
-    dataset_id: dataset.id,
+    dataset_id: datasetId,
     source_uri: draft.sourceUri.trim() || null,
     source_revision: draft.sourceRevision.trim(),
     source_format: draft.sourceFormat,
@@ -1004,12 +1070,47 @@ export interface TaskDraft {
   annotationMode?: "paper_entities";
 }
 
+export function validateTaskDraft(draft: TaskDraft): void {
+  const name = draft.name.trim();
+  if (!name) throw new Error("Enter a task name.");
+  if ([...name].length > 255) throw new Error("Task names must be 255 characters or fewer.");
+  const key = draft.key.trim();
+  if (key.length > 120 || !/^[a-z0-9][a-z0-9_.-]*$/.test(key)) {
+    throw new Error("Enter a task key of at most 120 lowercase letters, numbers, periods, underscores, or hyphens, starting with a letter or number.");
+  }
+  if (draft.annotationMode === "paper_entities") {
+    createPaperEntityTaskVersionPayload(0, 0, draft.labelValues);
+  }
+}
+
 export async function createTaskWithVersion(
   projectId: number,
   draft: TaskDraft,
   onDefinitionCreated?: (task: TaskDefinition) => void,
   existingDefinitionId?: number | null,
 ): Promise<TaskVersion> {
+  validateTaskDraft(draft);
+  const payload = draft.annotationMode === "paper_entities"
+    ? createPaperEntityTaskVersionPayload(projectId, existingDefinitionId ?? 0, draft.labelValues)
+    : defaultTaskVersionPayload(projectId, existingDefinitionId ?? 0, draft.taskKind);
+  if (draft.annotationMode !== "paper_entities") {
+    payload.label_rules = {
+      values: draft.labelValues,
+      closed_set: draft.labelValues.length > 0,
+    };
+    if (draft.labelValues.length && draft.taskKind === "classification") {
+      payload.output_schema = { type: "string", enum: draft.labelValues };
+    } else if (
+      draft.labelValues.length &&
+      draft.taskKind === "multilabel_classification"
+    ) {
+      payload.output_schema = {
+        type: "array",
+        items: { type: "string", enum: draft.labelValues },
+        uniqueItems: true,
+      };
+    }
+  }
   const task = existingDefinitionId ? { id: existingDefinitionId } : await post<TaskDefinition>("/tasks", {
     project_id: projectId,
     key: draft.key.trim(),
@@ -1017,27 +1118,7 @@ export async function createTaskWithVersion(
     description: draft.description.trim() || null,
   });
   if (!existingDefinitionId) onDefinitionCreated?.(task as TaskDefinition);
-  if (draft.annotationMode === "paper_entities") {
-    return post<TaskVersion>("/tasks/versions", createPaperEntityTaskVersionPayload(projectId, task.id, draft.labelValues));
-  }
-  const payload = defaultTaskVersionPayload(projectId, task.id, draft.taskKind);
-  payload.label_rules = {
-    values: draft.labelValues,
-    closed_set: draft.labelValues.length > 0,
-  };
-  if (draft.labelValues.length && draft.taskKind === "classification") {
-    payload.output_schema = { type: "string", enum: draft.labelValues };
-  } else if (
-    draft.labelValues.length &&
-    draft.taskKind === "multilabel_classification"
-  ) {
-    payload.output_schema = {
-      type: "array",
-      items: { type: "string", enum: draft.labelValues },
-      uniqueItems: true,
-    };
-  }
-  return post<TaskVersion>("/tasks/versions", payload);
+  return post<TaskVersion>("/tasks/versions", { ...payload, task_definition_id: task.id });
 }
 
 export interface TrainingDataDraft {

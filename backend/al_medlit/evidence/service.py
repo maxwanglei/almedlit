@@ -320,6 +320,7 @@ def _lock_actor_assignment_if_present(
             if required_assignment_id is not None
             else True
         )
+        .order_by((TaskAssignment.status == "withdrawn").asc(), TaskAssignment.id.desc())
         .populate_existing()
         .with_for_update(of=TaskAssignment)
         .first()

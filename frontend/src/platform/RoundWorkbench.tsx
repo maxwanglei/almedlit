@@ -263,7 +263,7 @@ export default function RoundWorkbench({
   const currentDecision = currentRoundItem
     ? ownLatest.get(currentRoundItem.id) ?? null
     : null;
-  const currentFeedback = currentRoundItem
+  const currentFeedback = currentRoundItem && round.status === "open"
     ? feedbackByItem[currentRoundItem.id]
     : undefined;
   const currentSelectionStrategy = currentRoundItem &&
@@ -273,6 +273,17 @@ export default function RoundWorkbench({
   const currentUserSubmitted = work?.submissions
     .filter((submission) => submission.annotator_user_id === currentUserId)
     .sort((left, right) => right.sequence - left.sequence)[0];
+  const canAdjudicateClosedRound = canManage && round.status === "closed";
+  const canWriteDecision =
+    round.status === "open" ||
+    (canAdjudicateClosedRound && decisionKind === "adjudication");
+  const canFinalizeDecisions =
+    round.status === "open" ||
+    (canAdjudicateClosedRound &&
+      ownLatest.size > 0 &&
+      [...ownLatest.values()].every(
+        (decision) => decision.decision_kind === "adjudication",
+      ));
 
   const reloadWork = useCallback(async (): Promise<void> => {
     if (roundIdentityRef.current !== roundIdentity) return;
@@ -322,7 +333,7 @@ export default function RoundWorkbench({
   }, [currentDecision, currentRoundItem?.id, task]);
 
   const revealFeedback = useCallback(async (): Promise<void> => {
-    if (!currentRoundItem || !round.feedback_available) return;
+    if (!currentRoundItem || !round.feedback_available || round.status !== "open") return;
     setBusy(true);
     setError(null);
     try {
@@ -345,11 +356,13 @@ export default function RoundWorkbench({
     round.feedback_available,
     round.id,
     round.project_id,
+    round.status,
   ]);
 
   useEffect(() => {
     if (
       !currentRoundItem ||
+      round.status !== "open" ||
       !round.feedback_available ||
       !["immediate_suggestions", "critique", "micro_question"].includes(
         round.assistance_policy,
@@ -367,10 +380,11 @@ export default function RoundWorkbench({
     revealFeedback,
     round.assistance_policy,
     round.feedback_available,
+    round.status,
   ]);
 
   async function saveDecision(): Promise<void> {
-    if (!task || !currentRoundItem || currentUserId === null) return;
+    if (!canWriteDecision || !task || !currentRoundItem || currentUserId === null) return;
     let output: unknown;
     try {
       output = parsedOutput(task, editorText);
@@ -420,7 +434,7 @@ export default function RoundWorkbench({
   }
 
   async function submit(): Promise<void> {
-    if (!work || currentUserId === null) return;
+    if (!canFinalizeDecisions || !work || currentUserId === null) return;
     const decisions = latestDecisions(work.decisions, currentUserId);
     const decisionIds = work.roundItems
       .map((item) => decisions.get(item.id)?.id)
@@ -484,6 +498,7 @@ export default function RoundWorkbench({
   }
 
   const canReveal =
+    round.status === "open" &&
     round.feedback_available &&
     round.assistance_policy !== "blind" &&
     (round.assistance_policy !== "reveal_after_first_pass" || Boolean(currentDecision));
@@ -546,23 +561,23 @@ export default function RoundWorkbench({
                   <span>Decision type</span>
                   <select
                     value={decisionKind}
-                    disabled={busy || round.status !== "open"}
+                    disabled={busy || (round.status !== "open" && !canAdjudicateClosedRound)}
                     onChange={(event) =>
                       setDecisionKind(
                         event.target.value as AnnotationDecision["decision_kind"],
                       )
                     }
                   >
-                    <option value="annotation">Annotation</option>
+                    <option value="annotation" disabled={round.status === "closed"}>Annotation</option>
                     <option value="adjudication">Adjudication</option>
-                    <option value="correction">Correction</option>
+                    <option value="correction" disabled={round.status === "closed"}>Correction</option>
                   </select>
                 </label>
               ) : null}
               <AnnotationEditor
                 task={task}
                 value={editorText}
-                disabled={busy || round.status !== "open"}
+                disabled={busy || !canWriteDecision}
                 onChange={setEditorText}
               />
               <label className="platform-workbench-field">
@@ -570,7 +585,7 @@ export default function RoundWorkbench({
                 <textarea
                   rows={3}
                   value={rationale}
-                  disabled={busy || round.status !== "open"}
+                  disabled={busy || !canWriteDecision}
                   onChange={(event) => setRationale(event.target.value)}
                 />
               </label>
@@ -625,7 +640,7 @@ export default function RoundWorkbench({
                 <button
                   type="button"
                   onClick={() => void saveDecision()}
-                  disabled={busy || round.status !== "open" || currentUserId === null}
+                  disabled={busy || !canWriteDecision || currentUserId === null}
                 >
                   <Save size={17} aria-hidden="true" />
                   Save decision
@@ -664,7 +679,8 @@ export default function RoundWorkbench({
               onClick={() => void submit()}
               disabled={
                 busy ||
-                round.status !== "open" ||
+                !canFinalizeDecisions ||
+                currentUserId === null ||
                 ownLatest.size !== work.roundItems.length
               }
             >

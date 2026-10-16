@@ -283,6 +283,10 @@ def lock_project_member_for_mutation(
     changes lock the same membership row after their workspace lock.  This route
     never acquires the workspace lock afterward, so the ordering is deadlock-safe
     without serializing unrelated members' writes on one workspace row.
+
+    Assignment policy is locked separately by document authorization. Holding a
+    shared project lock here would deadlock concurrent trainers when their
+    services subsequently acquire an exclusive project lock.
     """
 
     project = db.query(Project).filter(Project.id == project_id).populate_existing().first()
@@ -352,22 +356,6 @@ def lock_project_member_for_mutation(
         if not _role_satisfies(member.role, min_role):
             raise ForbiddenError("Insufficient workspace role")
 
-    if not has_assignment_bypass(actor, member):
-        # A shared project lock permits concurrent annotators while preventing
-        # assignment mode or task scope from changing underneath a restricted
-        # user's authorization decision. Assignment/task mutations take the
-        # corresponding exclusive project lock. Bypass roles do not depend on
-        # assignment state and avoid holding this lock through longer writes
-        # such as object-store submission.
-        locked_project = (
-            db.query(Project.id)
-            .filter(Project.id == project_id, Project.workspace_id == workspace_id)
-            .populate_existing()
-            .with_for_update(read=True)
-            .first()
-        )
-        if locked_project is None:
-            raise NotFoundError("Project not found")
     return member
 
 
@@ -397,6 +385,17 @@ def lock_document_resource_for_mutation(
         raise ValidationError(f"Document {document_id} does not belong to project {project_id}")
 
     if not has_assignment_bypass(user, member):
+        # Keep assignment mode and task scope stable while a restricted actor
+        # authorizes a document write. Shared locks allow concurrent annotators;
+        # assignment/task mutations take the corresponding exclusive lock.
+        locked_project = (
+            db.query(Project.id)
+            .filter(Project.id == project_id, Project.workspace_id == member.workspace_id)
+            .with_for_update(read=True)
+            .first()
+        )
+        if locked_project is None:
+            raise NotFoundError("Project not found")
         has_project_assignments = (
             db.query(TaskAssignment.id).filter(TaskAssignment.project_id == project_id).first()
             is not None
@@ -550,16 +549,20 @@ def assert_task_assigned(
         query = query.filter(TaskAssignment.structure_version_id == structure_version_id)
     if guideline_version_id is not None or match_guideline_version:
         query = query.filter(TaskAssignment.guideline_version_id == guideline_version_id)
+    query = query.order_by(
+        (TaskAssignment.status == "withdrawn").asc(),
+        TaskAssignment.id.desc(),
+    )
     if require_mutable_assignment:
         if annotation_type != "evidence_block":
             # Evidence mutations acquire their stable target-version lock first and
             # re-check the assignment in the evidence service to keep one lock order.
             query = query.with_for_update(of=TaskAssignment)
-        assignment = query.populate_existing().order_by(TaskAssignment.id.desc()).first()
+        assignment = query.populate_existing().first()
         if assignment is not None and assignment.status not in MUTABLE_ASSIGNMENT_STATUSES:
             raise ForbiddenError(f"The {annotation_type!r} assignment is finalized and read-only")
     else:
-        assignment = query.order_by(TaskAssignment.id.desc()).first()
+        assignment = query.first()
     if assignment is None:
         if bypass:
             return None

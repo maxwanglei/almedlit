@@ -2,7 +2,6 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from al_medlit.auth.models import User
@@ -13,6 +12,7 @@ from al_medlit.workflow import prediction_schemas as schemas
 
 from .common import _canonical_hash, _commit, _next_sequence, _scoped
 from .feedback_scoring import _validate_scoring_context
+from .holdouts import protected_dataset_item_ids as _protected_items
 from .rounds import _lock_and_validate_active_round_annotators
 
 ORIGIN = "standalone_prediction_v1"
@@ -170,97 +170,6 @@ def _submitted_items(db: Session, run: models.FeedbackRun) -> set[int]:
         .all()
         if decision_id in decision_ids
     }
-
-
-def _protected_items(
-    db: Session, items: list[models.DatasetItem], task_version_id: int
-) -> set[int]:
-    from .preparation import (
-        _identity_tokens,
-        _prepared_provenance_items,
-        _protected_source_context,
-    )
-
-    if not items:
-        return set()
-    project_id = items[0].project_id
-    protected_ids, protected_tokens = _protected_source_context(db, project_id, task_version_id)
-    versions = {
-        version.id: version
-        for version in db.query(models.DatasetVersion)
-        .filter(
-            models.DatasetVersion.project_id == project_id,
-        )
-        .all()
-    }
-    ancestry = {
-        version_id: _prepared_provenance_items(db, versions[version_id])
-        for version_id in {item.dataset_version_id for item in items}
-    }
-    origins: dict[int, set[int]] = {}
-    for item in items:
-        metadata = ancestry[item.dataset_version_id].get(item.stable_key)
-        source_origins = metadata.get("origins", []) if isinstance(metadata, dict) else []
-        source_origins = source_origins if isinstance(source_origins, list) else []
-        origins[item.id] = {
-            origin["dataset_item_id"]
-            for origin in source_origins
-            if isinstance(origin, dict) and isinstance(origin.get("dataset_item_id"), int)
-        }
-    origin_ids = set().union(*origins.values())
-    source_items = (
-        db.query(models.DatasetItem)
-        .filter(models.DatasetItem.project_id == project_id, models.DatasetItem.id.in_(origin_ids))
-        .all()
-        if origin_ids
-        else []
-    )
-    candidates = {item.id: item for item in [*items, *source_items]}
-    version_ids = {item.dataset_version_id for item in candidates.values()}
-    local_keys: dict[int, set[str]] = {version_id: set() for version_id in version_ids}
-    split_owners = db.query(models.TrainingDatasetVersion.id).filter(
-        models.TrainingDatasetVersion.split_map_id == models.SplitMap.id
-    )
-    task_owners = split_owners.filter(
-        models.TrainingDatasetVersion.task_version_id == task_version_id
-    )
-    for split in (
-        db.query(models.SplitMap)
-        .filter(
-            models.SplitMap.project_id == project_id,
-            models.SplitMap.dataset_version_id.in_(version_ids),
-            or_(~split_owners.exists(), task_owners.exists()),
-        )
-        .all()
-    ):
-        local_keys[split.dataset_version_id].update(
-            key for key, value in split.assignments.items() if value in set(split.protected_splits)
-        )
-    local_groups: dict[int, set[str]] = {version_id: set() for version_id in version_ids}
-    for version_id, keys in local_keys.items():
-        if keys:
-            local_groups[version_id].update(
-                group
-                for (group,) in db.query(models.DatasetItem.group_key)
-                .filter(
-                    models.DatasetItem.dataset_version_id == version_id,
-                    models.DatasetItem.stable_key.in_(keys),
-                    models.DatasetItem.group_key.is_not(None),
-                )
-                .all()
-            )
-    protected = {
-        item.id
-        for item in candidates.values()
-        if (
-            item.id in protected_ids
-            or _identity_tokens(versions[item.dataset_version_id].dataset_id, item)
-            & protected_tokens
-            or item.stable_key in local_keys[item.dataset_version_id]
-            or item.group_key in local_groups[item.dataset_version_id]
-        )
-    }
-    return {item.id for item in items if item.id in protected or origins[item.id] & protected}
 
 
 def result_rows(

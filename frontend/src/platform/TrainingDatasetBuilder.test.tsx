@@ -31,6 +31,23 @@ describe("TrainingDatasetBuilder", () => {
     expect(mocks.prepare.mock.calls[0]?.[3]).toBe(mocks.prepare.mock.calls[1]?.[3]);
     expect(mocks.prepare.mock.calls[1]?.[2]).toEqual(preview);
   });
+  it("shows split adjustment warnings and allows saving a ready preview", async () => {
+    const user = userEvent.setup();
+    const adjustedPreview: TrainingPreview = { ...preview, warnings: [{ code: "split_percentage_adjusted", message: "Protected evaluation groups require train: 9, validation: 1, test: 2 instead of the requested split.", source_index: null, item_key: null }] };
+    mocks.preview.mockResolvedValueOnce(adjustedPreview);
+    mocks.prepare.mockResolvedValueOnce({ training_dataset_version: { id: 33, name: "Prepared", version_number: 1 } });
+    render(<TrainingDatasetBuilder projectId={7} data={data} onImport={vi.fn()} onCreated={async () => undefined} onCancel={vi.fn()} />);
+    await user.type(screen.getByLabelText("Training dataset name"), "Prepared");
+    await user.click(screen.getByRole("button", { name: "Preview training dataset" }));
+    const warnings = await screen.findByRole("status", { name: "Training dataset warnings" });
+    expect(warnings.textContent).toContain(adjustedPreview.warnings?.[0].message);
+    expect(warnings.textContent).not.toContain("Source 1:");
+    const saveButton = screen.getByRole("button", { name: "Create training dataset" });
+    expect((saveButton as HTMLButtonElement).disabled).toBe(false);
+    await user.click(saveButton);
+    await waitFor(() => expect(mocks.prepare).toHaveBeenCalledWith(7, expect.anything(), adjustedPreview, expect.any(String)));
+    expect(await screen.findByText(/Prepared · v1 is ready/)).toBeTruthy();
+  });
   it("removes historical metadata and chooses one immutable label source for a new version", () => {
     expect(inheritedTrainingSource({ dataset_version_id: 11, input_mapping: { text: "abstract" }, label_set_version_id: 8, label_field: "label", annotation_round_id: 9, submission_ids: [10] })).toEqual({ dataset_version_id: 11, input_mapping: { text: "abstract" }, label_set_version_id: 8 });
   });

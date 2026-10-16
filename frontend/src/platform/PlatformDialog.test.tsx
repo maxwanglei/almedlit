@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { useState } from "react";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -187,6 +187,29 @@ function learningProjectData(): PlatformProjectData {
   };
 }
 
+function renderCreationDialog(kind: "dataset" | "task") {
+  const onCreateDataset = vi.fn().mockResolvedValue(undefined);
+  const onCreateTask = vi.fn().mockResolvedValue(undefined);
+  const onClose = vi.fn();
+  const complete = async (): Promise<void> => undefined;
+  render(
+    <PlatformDialog
+      kind={kind}
+      data={EMPTY_PLATFORM_PROJECT_DATA}
+      busy={false}
+      onClose={onClose}
+      onCreateDataset={onCreateDataset}
+      onCreateCycle={complete}
+      onCreateRound={complete}
+      onScoreFeedback={complete}
+      onCreateGuideline={complete}
+      onCreateTask={onCreateTask}
+      onPrepareTrainingData={complete}
+    />,
+  );
+  return { onCreateDataset, onCreateTask, onClose };
+}
+
 beforeEach(() => {
   Object.defineProperty(window, "requestAnimationFrame", {
     configurable: true,
@@ -203,6 +226,107 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+});
+
+describe("PlatformDialog creation validation", () => {
+  it.each(["", " , , "])("preserves a NER draft with invalid labels %j until corrected", async (invalidLabels) => {
+    const user = userEvent.setup();
+    const { onCreateTask, onClose } = renderCreationDialog("task");
+    await user.type(screen.getByLabelText("Name"), "Clinical entities");
+    await user.type(screen.getByLabelText("Stable key"), "clinical_entities");
+    await user.selectOptions(screen.getByLabelText("Task kind"), "paper_entities");
+    const labels = screen.getByLabelText<HTMLInputElement>("Allowed labels");
+    fireEvent.change(labels, { target: { value: invalidLabels } });
+
+    await act(async () => { fireEvent.submit(labels.closest("form")!); });
+
+    expect((await screen.findByRole("alert")).textContent).toMatch(/label/i);
+    expect(onCreateTask).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(labels.value).toBe(invalidLabels);
+    expect(screen.getByLabelText<HTMLInputElement>("Name").value).toBe("Clinical entities");
+    await user.clear(labels);
+    await user.type(labels, "Disease, Drug");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(onCreateTask).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      key: "clinical_entities",
+      annotationMode: "paper_entities",
+      labelValues: ["Disease", "Drug"],
+    })));
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("requires non-empty labels for NER while allowing open outputs", async () => {
+    const user = userEvent.setup();
+    renderCreationDialog("task");
+    const labels = screen.getByLabelText<HTMLInputElement>("Allowed labels");
+    expect(labels.required).toBe(false);
+
+    await user.selectOptions(screen.getByLabelText("Task kind"), "paper_entities");
+
+    expect(labels.required).toBe(true);
+    expect(labels.checkValidity()).toBe(false);
+    fireEvent.change(labels, { target: { value: ", ," } });
+    expect(labels.checkValidity()).toBe(false);
+    expect(labels.placeholder).not.toContain("optional");
+    expect(screen.getByText(/NER requires at least one/i)).toBeTruthy();
+    await user.selectOptions(screen.getByLabelText("Task kind"), "generation");
+    expect(labels.required).toBe(false);
+    expect(labels.checkValidity()).toBe(true);
+  });
+
+  it("offers only supported public snapshot formats when switching from Other", async () => {
+    const user = userEvent.setup();
+    renderCreationDialog("dataset");
+    await user.selectOptions(screen.getByLabelText("Source"), "generated");
+    await user.selectOptions(screen.getByLabelText("Format"), "other");
+
+    await user.selectOptions(screen.getByLabelText("Source"), "public_registry");
+
+    const format = screen.getByRole<HTMLSelectElement>("combobox", { name: "Format" });
+    expect(within(format).getAllByRole("option").map((option) => option.getAttribute("value")))
+      .toEqual(["csv", "jsonl", "parquet"]);
+    expect(format.value).toBe("jsonl");
+  });
+
+  it.each(["main", "a".repeat(39), "a".repeat(41), "g".repeat(40)])(
+    "preserves a public snapshot draft with invalid revision %s until corrected",
+    async (invalidRevision) => {
+      const user = userEvent.setup();
+      const { onCreateDataset, onClose } = renderCreationDialog("dataset");
+      await user.type(screen.getByLabelText("Name"), "Clinical abstracts");
+      await user.selectOptions(screen.getByLabelText("Source"), "public_registry");
+      await user.type(screen.getByLabelText("Hugging Face dataset"), "lab/clinical");
+      const file = new File(['{"text":"example"}\n'], "clinical.jsonl", { type: "application/json" });
+      await user.upload(screen.getByLabelText("Pinned dataset snapshot"), file);
+      const revision = screen.getByLabelText<HTMLInputElement>("Exact revision");
+      await user.type(revision, invalidRevision);
+
+      await act(async () => { fireEvent.submit(revision.closest("form")!); });
+
+      expect((await screen.findByRole("alert")).textContent).toMatch(/revision|commit/i);
+      expect(onCreateDataset).not.toHaveBeenCalled();
+      expect(onClose).not.toHaveBeenCalled();
+      expect(revision.value).toBe(invalidRevision);
+      expect(revision.checkValidity()).toBe(false);
+      expect(screen.getByLabelText<HTMLInputElement>("Name").value).toBe("Clinical abstracts");
+      expect(screen.getByLabelText<HTMLInputElement>("Pinned dataset snapshot").files?.[0]).toBe(file);
+      await user.clear(revision);
+      await user.type(revision, "a".repeat(40));
+      expect(revision.checkValidity()).toBe(true);
+      await act(async () => { fireEvent.submit(revision.closest("form")!); });
+
+      await waitFor(() => expect(onCreateDataset).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        name: "Clinical abstracts",
+        sourceType: "public_registry",
+        sourceRevision: "a".repeat(40),
+        sourceFormat: "jsonl",
+        file,
+      })));
+      expect(onClose).toHaveBeenCalledOnce();
+    },
+  );
 });
 
 describe("PlatformDialog accessibility", () => {

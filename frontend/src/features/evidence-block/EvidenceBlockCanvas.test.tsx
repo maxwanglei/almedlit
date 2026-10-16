@@ -591,6 +591,59 @@ describe("EvidenceBlockCanvas", () => {
     expect((screen.getByLabelText("Note") as HTMLInputElement).disabled).toBe(true);
   });
 
+  it("does not clear the active assignment when an uncontrolled canvas unmounts", async () => {
+    const onActiveAssignmentChange = vi.fn();
+    const { unmount } = renderCanvas(ASSIGNMENT, [], onActiveAssignmentChange);
+    await waitFor(() =>
+      expect(onActiveAssignmentChange).toHaveBeenLastCalledWith(ASSIGNMENT),
+    );
+    onActiveAssignmentChange.mockClear();
+
+    unmount();
+
+    expect(onActiveAssignmentChange).not.toHaveBeenCalled();
+  });
+
+  it("reports assignment and callback changes without clearing the active assignment first", async () => {
+    const originalCallback = vi.fn();
+    const nextCallback = vi.fn();
+    const replacement = { ...ASSIGNMENT, id: 52 };
+    const props = {
+      projectId: 1,
+      document: DOCUMENT,
+      task: TASK,
+      assignments: [ASSIGNMENT],
+      annotations: [],
+      annotatorId: "alice",
+      busy: false,
+      setBusy: vi.fn(),
+      setError: vi.fn(),
+      onAnnotationsChanged: vi.fn(),
+      onRefreshAnnotations: vi.fn().mockResolvedValue(undefined),
+    };
+    const { rerender } = render(
+      <EvidenceBlockCanvas {...props} onActiveAssignmentChange={originalCallback} />,
+    );
+    await waitFor(() => expect(originalCallback).toHaveBeenLastCalledWith(ASSIGNMENT));
+    originalCallback.mockClear();
+
+    rerender(<EvidenceBlockCanvas {...props} onActiveAssignmentChange={nextCallback} />);
+
+    expect(originalCallback).not.toHaveBeenCalled();
+    expect(nextCallback).toHaveBeenCalledExactlyOnceWith(ASSIGNMENT);
+    nextCallback.mockClear();
+
+    rerender(
+      <EvidenceBlockCanvas
+        {...props}
+        assignments={[replacement]}
+        onActiveAssignmentChange={nextCallback}
+      />,
+    );
+
+    expect(nextCallback).toHaveBeenCalledExactlyOnceWith(replacement);
+  });
+
   it("keeps an explicitly selected submitted round while another round is mutable", async () => {
     const submitted = { ...ASSIGNMENT, status: "submitted" as const };
     const replacement = { ...ASSIGNMENT, id: 52, status: "assigned" as const };
@@ -715,7 +768,7 @@ describe("EvidenceBlockCanvas", () => {
     ).toBeTruthy();
     expect(
       screen.getByText(
-        "Configure and activate an evidence target in Project Setup before annotation.",
+        "Configure and activate an evidence target in the project's Tasks → Evidence setup section before annotation.",
       ),
     ).toBeTruthy();
     expect(screen.queryByText(/manager must assign/i)).toBeNull();

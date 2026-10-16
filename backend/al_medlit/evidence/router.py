@@ -204,6 +204,7 @@ def _authorize_review_scope(
             TaskAssignment.structure_version_id == structure_version_id,
             ProjectTask.annotation_type == "evidence_block",
         )
+        .order_by((TaskAssignment.status == "withdrawn").asc(), TaskAssignment.id.desc())
         .first()
     )
     if manager_assignment is not None:

@@ -6,7 +6,6 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -16,7 +15,13 @@ from al_medlit.project.models import Project
 from al_medlit.workflow import models, schemas
 from al_medlit.workflow import preparation_schemas as api
 
-from .common import _canonical_hash, _scoped, _validate_task_input, _validate_task_output
+from .common import (
+    _canonical_hash,
+    _scoped,
+    _task_output_hash,
+    _validate_task_input,
+    _validate_task_output,
+)
 
 PREPARATION_KIND = "training_preparation_v1"
 MAX_PREPARATION_ITEMS = 100_000
@@ -31,7 +36,11 @@ class _Example:
     origins: list[dict] = field(default_factory=list)
     identity_tokens: set[str] = field(default_factory=set)
     fixed_splits: set[str] = field(default_factory=set)
+    allowed_splits: set[str] = field(
+        default_factory=lambda: {"train", "validation", "test", "pool"}
+    )
     group_key: str = ""
+    model_assisted: bool = False
 
 
 @dataclass
@@ -61,8 +70,16 @@ def _identity_tokens(dataset_id: int, item: models.DatasetItem) -> set[str]:
     tokens = {
         f"source:{dataset_id}:group:{group}",
         f"source:{dataset_id}:item:{item.stable_key}",
+        # Item keys can change when positional uploads are reordered or copied
+        # into another source. The server-computed payload hash stays stable.
+        f"content:{item.content_hash}",
     }
     payload = item.payload
+    document_id = payload.get("document_id")
+    if type(document_id) is int and document_id > 0:
+        # Corpus snapshots retain document identity even if the source dataset
+        # or the document's text/metadata changes.
+        tokens.add(f"project:{item.project_id}:document:{document_id}")
     metadata = payload.get("metadata")
     metadata = metadata if isinstance(metadata, dict) else {}
     pmid = payload.get("pmid") or metadata.get("pmid")
@@ -78,79 +95,37 @@ def _prepared_provenance_items(db: Session, version: models.DatasetVersion) -> d
     provenance = version.provenance or {}
     if provenance.get("ingestion") != PREPARATION_KIND:
         return {}
-    owners = db.query(models.TrainingDatasetVersion).filter(
+    owner = db.query(models.TrainingDatasetVersion.id).filter(
         models.TrainingDatasetVersion.project_id == version.project_id,
         models.TrainingDatasetVersion.dataset_version_id == version.id,
-    )
-    if not any(
-        (owner.preparation_manifest or {}).get("kind") == PREPARATION_KIND for owner in owners
-    ):
+        models.TrainingDatasetVersion.preparation_manifest["kind"].as_string() == PREPARATION_KIND,
+    ).first()
+    if owner is None:
         return {}
     items = provenance.get("items", {})
     return items if isinstance(items, dict) else {}
 
 
 def _protected_source_context(
-    db: Session, project_id: int, task_version_id: int | None = None
+    db: Session, project_id: int, task_version_id: int | None = None,
+    *, identity_ids: set[int] | None = None, identity_tokens: set[str] | None = None,
 ) -> tuple[set[int], set[str]]:
     """Follow immutable prepared split membership back to original inputs."""
+    from .holdout_queries import historical_assignments
+    from .holdouts import _item_identity
+
     protected_ids: set[int] = set()
     protected_tokens: set[str] = set()
-    versions: dict[int, models.DatasetVersion] = {}
-    items: dict[int, dict[str, models.DatasetItem]] = {}
-    split_query = db.query(models.SplitMap).filter(models.SplitMap.project_id == project_id)
-    if task_version_id is not None:
-        owners = db.query(models.TrainingDatasetVersion.id).filter(
-            models.TrainingDatasetVersion.split_map_id == models.SplitMap.id
+    for record in historical_assignments(
+        db, project_id, task_version_id, protected_only=True,
+        identity_ids=identity_ids, identity_tokens=identity_tokens,
+    ):
+        item = record.item
+        ids, tokens = _item_identity(
+            record.version, item, {item.stable_key: record.provenance}
         )
-        task_owners = owners.filter(
-            models.TrainingDatasetVersion.task_version_id == task_version_id
-        )
-        # Source split maps have no task until training first uses them. Their
-        # explicit protected groups apply across source revisions; maps owned
-        # solely by another task do not constrain this task's preparation.
-        split_query = split_query.filter(or_(~owners.exists(), task_owners.exists()))
-    for split in split_query:
-        protected = set(split.protected_splits or [])
-        keys = {key for key, value in split.assignments.items() if value in protected}
-        if not keys:
-            continue
-        if split.dataset_version_id not in versions:
-            version = _scoped(
-                db,
-                models.DatasetVersion,
-                split.dataset_version_id,
-                project_id,
-                "Split dataset version",
-            )
-            versions[version.id] = version
-            items[version.id] = {
-                item.stable_key: item
-                for item in db.query(models.DatasetItem).filter(
-                    models.DatasetItem.dataset_version_id == version.id
-                )
-            }
-        version = versions[split.dataset_version_id]
-        provenance_items = _prepared_provenance_items(db, version)
-        for key in keys:
-            item = items[version.id].get(key)
-            if item is None:
-                continue
-            protected_ids.add(item.id)
-            protected_tokens.update(_identity_tokens(version.dataset_id, item))
-            origin = provenance_items.get(key, {})
-            origin = origin if isinstance(origin, dict) else {}
-            protected_tokens.update(origin.get("identity_tokens", []))
-            for source in origin.get("origins", []):
-                if isinstance(source.get("dataset_item_id"), int):
-                    protected_ids.add(source["dataset_item_id"])
-                protected_tokens.update(source.get("identity_tokens", []))
-                if isinstance(source.get("dataset_id"), int) and isinstance(
-                    source.get("stable_key"), str
-                ):
-                    protected_tokens.add(
-                        f"source:{source['dataset_id']}:item:{source['stable_key']}"
-                    )
+        protected_ids.update(ids)
+        protected_tokens.update(tokens)
     return protected_ids, protected_tokens
 
 
@@ -158,15 +133,17 @@ def is_source_item_in_prepared_holdout(
     db: Session, item: models.DatasetItem, task_version_id: int | None = None
 ) -> bool:
     """Used by manual review as well as preparation; old held-out data stays held out."""
+    from .holdouts import _item_identity
+
     version = _scoped(
         db, models.DatasetVersion, item.dataset_version_id, item.project_id, "Dataset version"
     )
+    ids, tokens = _item_identity(version, item, _prepared_provenance_items(db, version))
     protected_ids, protected_tokens = _protected_source_context(
-        db, item.project_id, task_version_id
+        db, item.project_id, task_version_id,
+        identity_ids=ids, identity_tokens=tokens,
     )
-    if item.id in protected_ids:
-        return True
-    return bool(_identity_tokens(version.dataset_id, item) & protected_tokens)
+    return bool(ids & protected_ids or tokens & protected_tokens)
 
 
 def _unique_dataset_name(db: Session, project_id: int, base: str) -> str:
@@ -183,6 +160,66 @@ def _unique_dataset_name(db: Session, project_id: int, base: str) -> str:
         candidate = base[: 255 - len(suffix)] + suffix
         number += 1
     return candidate
+
+
+def _assisted_label_set_keys(
+    db: Session, label_set: models.LabelSetVersion
+) -> tuple[set[str], set[int]]:
+    """Retain model assistance through published labels and their version ancestry."""
+    assisted_keys: set[str] = set()
+    assisted_rounds: set[int] = set()
+    visited: set[int] = set()
+    current = label_set
+    while current.id not in visited:
+        visited.add(current.id)
+        if current.source_annotation_round_id is not None:
+            annotation_round = _scoped(
+                db, models.AnnotationRound, current.source_annotation_round_id,
+                label_set.project_id, "Source annotation round",
+            )
+            if annotation_round.assistance_policy != "blind":
+                assisted_keys.update(current.labels)
+                assisted_rounds.add(annotation_round.id)
+        elif current.source_decision_ids:
+            # Historical composed sets can retain decisions without a single
+            # source round. Resolve their per-item assistance rather than
+            # treating the composed source kind as evidence of blind labeling.
+            decision_ids = current.source_decision_ids
+            for offset in range(0, len(decision_ids), 400):
+                assisted = (
+                    db.query(models.DatasetItem.stable_key, models.AnnotationRound.id)
+                    .join(
+                        models.RoundItem, models.RoundItem.dataset_item_id == models.DatasetItem.id,
+                    )
+                    .join(
+                        models.RoundAnnotationDecision,
+                        models.RoundAnnotationDecision.round_item_id == models.RoundItem.id,
+                    )
+                    .join(
+                        models.AnnotationRound,
+                        models.AnnotationRound.id == models.RoundItem.annotation_round_id,
+                    )
+                    .filter(
+                        models.RoundAnnotationDecision.project_id == label_set.project_id,
+                        models.RoundAnnotationDecision.id.in_(decision_ids[offset : offset + 400]),
+                        models.AnnotationRound.assistance_policy != "blind",
+                    )
+                )
+                for key, round_id in assisted:
+                    assisted_keys.add(key)
+                    assisted_rounds.add(round_id)
+        if current.parent_version_id is None:
+            break
+        current = _scoped(
+            db, models.LabelSetVersion, current.parent_version_id,
+            label_set.project_id, "Parent label set version",
+        )
+        if (
+            current.dataset_version_id != label_set.dataset_version_id
+            or current.task_version_id != label_set.task_version_id
+        ):
+            raise ValidationError("Parent labels must match the selected dataset and task versions")
+    return assisted_keys & label_set.labels.keys(), assisted_rounds
 
 
 def _resolve_labels(
@@ -205,10 +242,17 @@ def _resolve_labels(
             raise ValidationError(
                 "Source label set must match the selected dataset and task versions"
             )
-        if label_set.composition_policy == "exclude":
-            raise ValidationError("An exclusion label set cannot supply training labels")
+        from .labels import _validate_training_label_set
+
+        _validate_training_label_set(label_set)
+        assisted_keys, assisted_rounds = _assisted_label_set_keys(db, label_set)
         ref.update(source_kind=label_set.source_kind, label_content_hash=label_set.content_hash)
-        return {"labels": label_set.labels, "ref": ref, "existing": label_set}
+        if assisted_rounds:
+            ref["assisted_annotation_round_ids"] = sorted(assisted_rounds)
+        return {
+            "labels": label_set.labels, "ref": ref, "existing": label_set,
+            "assisted_keys": assisted_keys,
+        }
     if source.annotation_round_id is not None:
         from .labels import resolve_round_labels
 
@@ -250,7 +294,19 @@ def _resolve_labels(
             source_decision_ids=resolved["source_decision_ids"],
             label_content_hash=_canonical_hash(resolved["labels"]),
         )
-        return {"labels": resolved["labels"], "ref": ref, "existing": None}
+        annotation_round = _scoped(
+            db, models.AnnotationRound, source.annotation_round_id,
+            project_id, "Source annotation round",
+        )
+        ref["assistance_policy"] = annotation_round.assistance_policy
+        assisted_keys = set()
+        if annotation_round.assistance_policy != "blind":
+            assisted_keys.update(resolved["labels"])
+            ref["assisted_annotation_round_ids"] = [annotation_round.id]
+        return {
+            "labels": resolved["labels"], "ref": ref, "existing": None,
+            "assisted_keys": assisted_keys,
+        }
     labels = {}
     for item in items:
         value = item.payload.get(source.label_field)
@@ -358,7 +414,8 @@ def _inherit_parent(db: Session, parent, examples: list[_Example], issues: list)
 
 
 def _assign_splits(
-    examples: list[_Example], data: api.TrainingPreparationRequest, issues: list
+    examples: list[_Example], data: api.TrainingPreparationRequest, issues: list,
+    *, warnings: list | None = None,
 ) -> tuple[dict[str, str], int]:
     # Union common article/group identities, including identities joined by
     # duplicate examples across two sources. No related rows cross partitions.
@@ -378,6 +435,13 @@ def _assign_splits(
     groups: dict[str, list[_Example]] = {}
     for item in examples:
         groups.setdefault(root(item.stable_key), []).append(item)
+    # Unlabeled rows can connect labeled siblings to prior learning data.
+    # Keep those bridges when resolving identities, but assign only groups
+    # containing labeled examples to the prepared snapshot.
+    groups = {
+        key: group for key, group in groups.items()
+        if any(item.label is not _UNLABELED for item in group)
+    }
     if len(groups) < 3:
         _issue(
             issues,
@@ -385,17 +449,24 @@ def _assign_splits(
             "At least three independent labeled groups are required across the selected sources",
         )
     assigned_groups: dict[str, str] = {}
+    allowed_by_group: dict[str, set[str]] = {}
     for key, group in groups.items():
         tokens = sorted({token for item in group for token in item.identity_tokens})
         group_key = "group:" + _canonical_hash(tokens)
+        model_assisted = any(item.model_assisted for item in group)
         for item in group:
             item.group_key = group_key
+            item.model_assisted = model_assisted
+        allowed = set.intersection(*(item.allowed_splits for item in group))
+        allowed_by_group[key] = allowed
         fixed = {split for item in group for split in item.fixed_splits}
-        if len(fixed) > 1:
+        if not allowed or len(fixed) > 1 or not fixed.issubset(allowed):
             _issue(
                 issues,
                 "split_conflict",
-                "A shared example or article has conflicting existing split assignments",
+                "A shared example or article has conflicting split requirements; "
+                "articles used for training, validation, or model-assisted review "
+                "cannot become new test holdouts",
                 item_key=group[0].stable_key,
             )
         elif fixed:
@@ -407,58 +478,118 @@ def _assign_splits(
             key,
         ),
     )
-    established_test = "test" in assigned_groups.values()
+    total = len(groups)
+    desired_train = min(max(1, round(total * data.train_percent / 100)), max(1, total - 2))
+    desired_validation = min(
+        max(1, round(total * data.validation_percent / 100)),
+        max(1, total - desired_train - 1),
+    )
+    desired_test = max(1, total - desired_train - desired_validation)
+    counts = {
+        split: sum(value == split for value in assigned_groups.values())
+        for split in ("train", "validation", "test", "pool")
+    }
+    frozen_test = data.parent_version_id is not None
+    if not frozen_test:
+        # Source holdouts count toward a new series' quota; they do not freeze
+        # it. Reserve all remaining test groups before learning can use them.
+        missing_learning_splits = sum(counts[split] == 0 for split in ("train", "validation"))
+        eligible_test = [key for key in unassigned if "test" in allowed_by_group[key]]
+        reserve_count = min(
+            max(0, desired_test - counts["test"]),
+            len(eligible_test),
+            max(0, len(unassigned) - missing_learning_splits),
+        )
+        reserved = eligible_test[-reserve_count:] if reserve_count else []
+        assigned_groups.update((key, "test") for key in reserved)
+        counts["test"] += len(reserved)
+        reserved_keys = set(reserved)
+        unassigned = [key for key in unassigned if key not in reserved_keys]
     needed = [
         split for split in ("train", "validation", "test") if split not in assigned_groups.values()
     ]
+    # Reserve scarce eligible groups first, especially the only article that
+    # has never been used for learning. Equal availability preserves seed order.
+    needed.sort(key=lambda split: sum(split in allowed_by_group[key] for key in unassigned))
     for split in needed:
-        if unassigned:
-            assigned_groups[unassigned.pop(0)] = split
-    total = len(groups)
-    desired_train = max(1, round(total * data.train_percent / 100))
-    desired_validation = max(1, round(total * data.validation_percent / 100))
+        candidate = next((key for key in unassigned if split in allowed_by_group[key]), None)
+        if candidate is not None:
+            unassigned.remove(candidate)
+            assigned_groups[candidate] = split
+            counts[split] += 1
     for key in unassigned:
-        counts = {
-            split: sum(value == split for value in assigned_groups.values())
-            for split in ("train", "validation", "test")
-        }
-        if counts["train"] < desired_train:
+        allowed = allowed_by_group[key]
+        if not allowed:
+            continue
+        if counts["train"] < desired_train and "train" in allowed:
             split = "train"
-        elif counts["validation"] < desired_validation:
+        elif counts["validation"] < desired_validation and "validation" in allowed:
             split = "validation"
-        elif established_test or data.parent_version_id is not None:
-            # Test membership is frozen once a governed test set exists.
+        elif "train" in allowed and "validation" in allowed and (
+            frozen_test or counts["test"] >= desired_test or "test" not in allowed
+        ):
+            # Updates retain their holdout; new series stop at their test quota.
             ratio = counts["train"] / max(1, counts["train"] + counts["validation"])
             split = (
                 "train"
                 if ratio < data.train_percent / (data.train_percent + data.validation_percent)
                 else "validation"
             )
-        else:
+        elif "test" in allowed:
             split = "test"
+        else:
+            split = next(split for split in ("train", "validation", "pool") if split in allowed)
         assigned_groups[key] = split
+        counts[split] += 1
     assignments = {
         item.stable_key: assigned_groups.get(key, "pool")
         for key, group in groups.items()
         for item in group
+        if item.label is not _UNLABELED
     }
     for split in ("train", "validation", "test"):
         if split not in assignments.values():
             _issue(
                 issues,
                 "empty_split",
-                f"The combined labeled examples cannot provide a non-empty {split} split",
+                f"The combined labeled examples cannot provide a non-empty {split} split"
+                + (
+                    "; include a labeled article without prior training, validation, "
+                    "or model assistance"
+                    if split == "test" else ""
+                ),
             )
+    requested = {"train": desired_train, "validation": desired_validation, "test": desired_test}
+    if warnings is not None and not issues and any(
+        counts[split] != target for split, target in requested.items()
+    ):
+        requested_counts = ", ".join(f"{split} {count}" for split, count in requested.items())
+        actual_counts = ", ".join(f"{split} {counts[split]}" for split in requested)
+        if counts["pool"]:
+            actual_counts += f", pool {counts['pool']}"
+        reason = (
+            "Existing-series test membership stays frozen as articles are added."
+            if frozen_test else
+            "Fixed assignments and prior training boundaries prevent the requested percentages."
+        )
+        _issue(
+            warnings,
+            "split_percentage_adjusted",
+            f"Requested group counts: {requested_counts}; actual group counts: {actual_counts}. "
+            + reason,
+        )
     return assignments, len(groups)
 
 
 def _build_preparation(
     db: Session, project_id: int, data: api.TrainingPreparationRequest
 ) -> _Preparation:
+    from .holdouts import _item_identity, source_split_constraints
+
     task = _scoped(db, models.TaskVersion, data.task_version_id, project_id, "Task version")
     issues: list[api.PreparationIssue] = []
+    warnings: list[api.PreparationIssue] = []
     parent = _parent_version(db, project_id, data)
-    protected_ids, protected_tokens = _protected_source_context(db, project_id, task.id)
     counts: list[api.PreparationSourceCounts] = []
     resolved: list[dict] = []
     examples: dict[str, _Example] = {}
@@ -485,6 +616,13 @@ def _build_preparation(
             _issue(
                 issues, "empty_source", "The source dataset must contain imported examples", index
             )
+        try:
+            split_constraints = source_split_constraints(
+                db, version, items, task.id, input_mapping=source.input_mapping
+            )
+        except ValidationError as exc:
+            _issue(issues, "split_conflict", exc.message, index)
+            split_constraints = {}
         split = None
         if source.split_map_id is not None:
             split = _scoped(
@@ -523,13 +661,12 @@ def _build_preparation(
             )
         )
         for item in items:
-            tokens = _identity_tokens(version.dataset_id, item)
+            _, tokens = _item_identity(version, item, inherited_items)
             inherited = inherited_items.get(item.stable_key, {})
             tokens.update(inherited.get("identity_tokens", []))
             protected = bool(
                 (split is not None and split.assignments.get(item.stable_key) == "test")
-                or item.id in protected_ids
-                or tokens & protected_tokens
+                or split_constraints.get(item.stable_key) == {"test"}
             )
             labeled = item.stable_key in labels["labels"]
             label = labels["labels"][item.stable_key] if labeled else _UNLABELED
@@ -578,7 +715,7 @@ def _build_preparation(
                 example.label = label
             elif labeled:
                 duplicates += 1
-                if _canonical_hash(example.label) != _canonical_hash(label):
+                if _task_output_hash(task, example.label) != _task_output_hash(task, label):
                     _issue(
                         issues,
                         "label_conflict",
@@ -588,6 +725,14 @@ def _build_preparation(
                     )
             example.origins.extend(origins)
             example.identity_tokens.update(tokens)
+            if (
+                item.stable_key in labels.get("assisted_keys", set())
+                or inherited.get("model_assisted") is True
+            ):
+                example.model_assisted = True
+                example.allowed_splits.discard("test")
+            if item.stable_key in split_constraints:
+                example.allowed_splits.intersection_update(split_constraints[item.stable_key])
             if split is not None and item.stable_key in split.assignments:
                 example.fixed_splits.add(split.assignments[item.stable_key])
             if protected:
@@ -605,8 +750,8 @@ def _build_preparation(
                 index,
                 item_key,
             )
+    assignments, group_count = _assign_splits(rows, data, issues, warnings=warnings)
     rows = [example for example in rows if example.label is not _UNLABELED]
-    assignments, group_count = _assign_splits(rows, data, issues)
     split_counts = {
         split: sum(value == split for value in assignments.values())
         for split in ("train", "validation", "test", "pool")
@@ -637,6 +782,7 @@ def _build_preparation(
     preview = api.TrainingPreparationPreview(
         ready=not issues,
         issues=issues,
+        warnings=warnings,
         source_counts=counts,
         input_count=total,
         labeled_count=sum(count.labeled_count for count in counts),
@@ -840,7 +986,11 @@ def prepare_training_dataset(
         db.add(dataset)
         db.flush()
         item_provenance = {
-            row.stable_key: {"origins": row.origins, "identity_tokens": sorted(row.identity_tokens)}
+            row.stable_key: {
+                "origins": row.origins,
+                "identity_tokens": sorted(row.identity_tokens),
+                "model_assisted": row.model_assisted,
+            }
             for row in prepared.examples
         }
         provenance = {

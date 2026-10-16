@@ -21,6 +21,7 @@ export default function QualityScreen({
   documents,
   assignments,
   allowSoloGold,
+  onSetupEvidence,
 }: {
   data: PlatformProjectData;
   progress: ProjectProgress | null;
@@ -28,6 +29,7 @@ export default function QualityScreen({
   documents: Document[];
   assignments: TaskAssignment[];
   allowSoloGold: boolean;
+  onSetupEvidence?: () => void;
 }): React.ReactElement {
   const finalRounds = data.rounds.filter((round) =>
     ["closed", "completed"].includes(round.status),
@@ -121,6 +123,7 @@ export default function QualityScreen({
         documents={documents}
         assignments={assignments}
         allowSoloGold={allowSoloGold}
+        onSetup={onSetupEvidence}
       />
 
       {progress ? (

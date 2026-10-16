@@ -1603,6 +1603,246 @@ def test_assignment_with_persisted_work_cannot_be_revoked_by_deletion(
     )
 
 
+@pytest.mark.parametrize(
+    "status",
+    [
+        "assigned",
+        "in_progress",
+        "blocked",
+        "submitted",
+        "adjudication_ready",
+        "adjudicated",
+        "completed",
+        "withdrawn",
+    ],
+)
+def test_task_deletion_cannot_remove_last_assignment_and_reopen_project(client, db, status):
+    from al_medlit.auth.models import User
+    from al_medlit.project import service as project_service
+    from al_medlit.project.models import TaskAssignment
+    from al_medlit.project.schemas import TaskAssignmentCreate
+
+    fixture = _create_assignment_fixture(db)
+    assignment = project_service.create_task_assignment(
+        db,
+        fixture.open_project_id,
+        TaskAssignmentCreate(
+            task_id=fixture.open_entity_task_id,
+            document_id=fixture.open_document_id,
+            assignee_user_id=fixture.bob_user_id,
+        ),
+        assigned_by_user=db.get(User, fixture.owner_user_id),
+    )
+    assignment.status = status
+    db.commit()
+    assignment_id = assignment.id
+    task_url = f"/api/projects/{fixture.open_project_id}/tasks/{fixture.open_entity_task_id}"
+    document_url = f"/api/documents/{fixture.open_document_id}"
+    project_url = f"/api/projects/{fixture.open_project_id}"
+    project_before = client.get(project_url, headers=fixture.owner_headers).json()
+    assert client.get(document_url, headers=fixture.alice_headers).status_code == 403
+
+    response = client.delete(task_url, headers=fixture.manager_headers)
+
+    access_after = client.get(document_url, headers=fixture.alice_headers)
+    assert (response.status_code, access_after.status_code) == (409, 403), response.text
+    db.expire_all()
+    preserved_assignment = db.get(TaskAssignment, assignment_id)
+    assert preserved_assignment is not None
+    assert preserved_assignment.status == status
+    project = client.get(project_url, headers=fixture.owner_headers).json()
+    assert {task["id"] for task in project["tasks"]} == {fixture.open_entity_task_id}
+    assert project["annotation_schema"] == project_before["annotation_schema"]
+
+
+@pytest.mark.parametrize("submitted", [False, True])
+def test_task_deletion_preserves_assignments_with_persisted_work(client, db, submitted):
+    from al_medlit.project.models import TaskAssignment
+
+    fixture = _create_assignment_fixture(db)
+    if submitted:
+        submission = client.post(
+            f"/api/projects/{fixture.project_id}/documents/{fixture.shared_document_id}/submissions",
+            json={"assignment_id": fixture.alice_entity_assignment_id},
+            headers=fixture.alice_headers,
+        )
+        assert submission.status_code == 200, submission.text
+        assert submission.json()["assignment_id"] == fixture.alice_entity_assignment_id
+
+    response = client.delete(
+        f"/api/projects/{fixture.project_id}/tasks/{fixture.entity_task_id}",
+        headers=fixture.owner_headers,
+    )
+
+    assert response.status_code == 409, response.text
+    db.expire_all()
+    assert db.get(TaskAssignment, fixture.alice_entity_assignment_id) is not None
+    annotations = client.get(
+        "/api/annotations",
+        params={"project_id": fixture.project_id, "document_id": fixture.shared_document_id},
+        headers=fixture.alice_headers,
+    )
+    assert _response_ids(annotations) == set(fixture.alice_annotation_ids)
+    if submitted:
+        snapshot = client.get(
+            f"/api/submissions/{submission.json()['id']}/download",
+            headers=fixture.alice_headers,
+        )
+        assert snapshot.status_code == 200, snapshot.text
+
+
+def test_disabled_task_with_assignments_cannot_be_deleted(client, db):
+    from al_medlit.project.models import ProjectTask, TaskAssignment
+
+    fixture = _create_assignment_fixture(db)
+    response = client.delete(
+        f"/api/projects/{fixture.project_id}/tasks/{fixture.disabled_task_id}",
+        headers=fixture.manager_headers,
+    )
+
+    assert response.status_code == 409, response.text
+    db.expire_all()
+    task = db.get(ProjectTask, fixture.disabled_task_id)
+    assert task is not None
+    assert task.enabled is False
+    assert db.query(TaskAssignment.id).filter(TaskAssignment.task_id == task.id).first() is not None
+    assert (
+        client.get(
+            f"/api/documents/{fixture.disabled_document_id}",
+            headers=fixture.alice_headers,
+        ).status_code
+        == 403
+    )
+
+
+def test_unassigned_task_can_be_deleted_without_removing_other_assignments(client, db):
+    from al_medlit.project.models import TaskAssignment
+
+    fixture = _create_assignment_fixture(db)
+    assignments_before = {
+        row.id
+        for row in db.query(TaskAssignment.id).filter(
+            TaskAssignment.project_id == fixture.project_id
+        )
+    }
+
+    response = client.delete(
+        f"/api/projects/{fixture.project_id}/tasks/{fixture.doc_label_task_id}",
+        headers=fixture.manager_headers,
+    )
+
+    assert response.status_code == 204, response.text
+    db.expire_all()
+    assert {
+        row.id
+        for row in db.query(TaskAssignment.id).filter(
+            TaskAssignment.project_id == fixture.project_id
+        )
+    } == assignments_before
+    assert (
+        client.get(
+            f"/api/documents/{fixture.unassigned_document_id}",
+            headers=fixture.alice_headers,
+        ).status_code
+        == 403
+    )
+
+
+@pytest.mark.parametrize("status", ["assigned", "in_progress", "blocked"])
+def test_assignment_patch_cannot_withdraw_open_round(client, db, status):
+    from al_medlit.project.models import TaskAssignment
+
+    fixture = _create_assignment_fixture(db)
+    assignment = db.get(TaskAssignment, fixture.alice_entity_assignment_id)
+    assignment.status = status
+    db.commit()
+
+    response = client.patch(
+        f"/api/projects/{fixture.project_id}/assignments/{assignment.id}",
+        json={"status": "withdrawn"},
+        headers=fixture.manager_headers,
+    )
+
+    assert response.status_code == 422, response.text
+    db.refresh(assignment)
+    assert assignment.status == status
+
+
+def test_rejoined_member_can_receive_same_assignment_without_losing_withdrawal_history(client, db):
+    from al_medlit.project.models import TaskAssignment
+    from al_medlit.workspace import service as workspace_service
+
+    fixture = _create_assignment_fixture(db)
+    assignments_url = f"/api/projects/{fixture.project_id}/assignments"
+    assignment_id = fixture.alice_entity_assignment_id
+    withdrawn_records = {}
+    for _ in range(2):
+        workspace_service.remove_member(
+            db,
+            fixture.workspace_id,
+            fixture.alice_user_id,
+            actor_user_id=fixture.owner_user_id,
+        )
+        db.commit()
+        db.expire_all()
+        withdrawn = db.get(TaskAssignment, assignment_id)
+        assert withdrawn.status == "withdrawn"
+        withdrawn_records[assignment_id] = {
+            "status": withdrawn.status,
+            "metadata": withdrawn.metadata_,
+            "scope": withdrawn.assignment_scope_key,
+        }
+        workspace_service.add_member(
+            db, fixture.workspace_id, fixture.alice_user_id, role="annotator"
+        )
+        db.commit()
+
+        response = client.post(
+            assignments_url,
+            json={
+                "task_id": fixture.entity_task_id,
+                "document_id": fixture.shared_document_id,
+                "assignee_user_id": fixture.alice_user_id,
+            },
+            headers=fixture.manager_headers,
+        )
+
+        assert response.status_code == 200, response.text
+        assignment_id = response.json()["id"]
+        assert assignment_id not in withdrawn_records
+        assert response.json()["status"] == "assigned"
+        db.expire_all()
+        for withdrawn_id, record in withdrawn_records.items():
+            historical = db.get(TaskAssignment, withdrawn_id)
+            assert historical.status == record["status"]
+            assert historical.metadata_ == record["metadata"]
+            assert historical.assignment_scope_key == record["scope"]
+
+    duplicate = client.post(
+        assignments_url,
+        json={
+            "task_id": fixture.entity_task_id,
+            "document_id": fixture.shared_document_id,
+            "assignee_user_id": fixture.alice_user_id,
+        },
+        headers=fixture.manager_headers,
+    )
+    assert duplicate.status_code == 409, duplicate.text
+    created = client.post(
+        "/api/annotations",
+        json=_entity_payload(
+            fixture,
+            fixture.shared_document_id,
+            start_offset=11,
+            end_offset=16,
+            text_span="gamma",
+            label="ReassignedRound",
+        ),
+        headers=fixture.alice_headers,
+    )
+    assert created.status_code == 200, created.text
+
+
 def test_manager_admin_and_superuser_bypass_assignment_and_private_ownership(
     client,
     db,

@@ -46,11 +46,13 @@ export default function EvidenceAdjudicationPanel({
   documents,
   assignments,
   allowSoloGold,
+  onSetup,
 }: {
   projectId: number;
   documents: Document[];
   assignments: TaskAssignment[];
   allowSoloGold: boolean;
+  onSetup?: () => void;
 }): React.ReactElement {
   const scopes = useMemo(() => {
     const unique = new Map<string, AdjudicationScope>();
@@ -239,6 +241,8 @@ export default function EvidenceAdjudicationPanel({
         <PlatformEmpty
           title="No pinned evidence scope"
           detail="Evidence adjudication becomes available after assignments pin target, structure, and guideline versions."
+          actionLabel={onSetup ? "Set up evidence annotation" : undefined}
+          onAction={onSetup}
         />
       ) : (
         <div className="platform-adjudication">

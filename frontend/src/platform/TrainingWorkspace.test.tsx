@@ -7,9 +7,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Project } from "@/types/api";
 
 import TrainingWorkspace, { trainingDraftKey } from "./TrainingWorkspace";
+import type { DatasetDraft, TaskDraft } from "./api";
 import {
   EMPTY_PLATFORM_PROJECT_DATA,
+  type Dataset,
   type PlatformProjectData,
+  type TaskDefinition,
   type WorkspaceTrainingContext,
   type WorkspaceTrainingRun,
 } from "./types";
@@ -39,6 +42,8 @@ const mocks = vi.hoisted(() => ({
   listWorkspaceTrainingRuns: vi.fn(),
   loadPlatformProject: vi.fn(),
   verifyExecutionEnvironment: vi.fn(),
+  validateDatasetDraft: vi.fn(),
+  validateTaskDraft: vi.fn(),
 }));
 
 vi.mock("./api", () => mocks);
@@ -392,6 +397,70 @@ describe("TrainingWorkspace", () => {
     expect(
       screen.queryByRole("option", { name: "Stale dataset" }),
     ).toBeNull();
+  });
+
+  it("reuses a created dataset when retrying a failed version from Training Data", async () => {
+    mocks.listWorkspaceTrainingContexts.mockResolvedValue({
+      items: [trainingContext(project)],
+      next_cursor: null,
+    });
+    mocks.createDatasetWithVersion
+      .mockImplementationOnce(async (
+        projectId: number,
+        draft: DatasetDraft,
+        onCreated?: (dataset: Dataset) => void,
+      ) => {
+        onCreated?.({ id: 191, project_id: projectId, name: draft.name,
+          description: null, source_type: draft.sourceType });
+        throw new Error("Snapshot could not be created. Try again.");
+      })
+      .mockResolvedValueOnce({ id: 192 });
+    render(<TrainingWorkspace {...baseProps} view="data" search="?tab=source" initialProjectId={project.id} />);
+
+    await userEvent.click((await screen.findAllByRole("button", { name: "Import source data" }))[0]);
+    await userEvent.type(screen.getByRole("textbox", { name: "Name" }), "Corpus snapshot");
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Source" }), "project_corpus");
+    await userEvent.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(mocks.createDatasetWithVersion).toHaveBeenCalledTimes(1));
+    await userEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(mocks.createDatasetWithVersion).toHaveBeenCalledTimes(2));
+    expect(mocks.createDatasetWithVersion).toHaveBeenLastCalledWith(
+      project.id, expect.objectContaining({ name: "Corpus snapshot" }), expect.any(Function), 191,
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("reuses a created task when retrying a failed version from Training Data", async () => {
+    mocks.listWorkspaceTrainingContexts.mockResolvedValue({
+      items: [trainingContext(project)],
+      next_cursor: null,
+    });
+    mocks.createTaskWithVersion
+      .mockImplementationOnce(async (
+        projectId: number,
+        draft: TaskDraft,
+        onCreated?: (task: TaskDefinition) => void,
+      ) => {
+        onCreated?.({ id: 193, project_id: projectId, key: draft.key, name: draft.name, description: null });
+        throw new Error("Task version could not be created. Try again.");
+      })
+      .mockResolvedValueOnce({ id: 194 });
+    render(<TrainingWorkspace {...baseProps} view="data" initialProjectId={project.id} canCreateTask />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Define task" }));
+    await userEvent.type(screen.getByRole("textbox", { name: "Name" }), "Entities");
+    await userEvent.type(screen.getByRole("textbox", { name: "Stable key" }), "entities");
+    await userEvent.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(mocks.createTaskWithVersion).toHaveBeenCalledTimes(1));
+    await userEvent.type(screen.getByRole("textbox", { name: "Allowed labels" }), "drug");
+    await userEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(mocks.createTaskWithVersion).toHaveBeenCalledTimes(2));
+    expect(mocks.createTaskWithVersion).toHaveBeenLastCalledWith(
+      project.id, expect.objectContaining({ key: "entities", labelValues: ["drug"] }), expect.any(Function), 193,
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
   it("keeps late Training Data results from replacing the active project", async () => {

@@ -18,6 +18,7 @@ from .common import (
     _next_version,
     _project,
     _scoped,
+    _task_output_hash,
 )
 from .feedback import (
     _dataset_item_is_in_protected_group,
@@ -54,6 +55,7 @@ _SENSITIVE_TRAINING_CONFIG_FRAGMENTS = {
     "secret",
     "storage_key",
 }
+_IMPACT_DECISION_BATCH_SIZE = 400
 
 
 
@@ -384,33 +386,57 @@ def complete_guideline_impact(
         raise ConflictError(
             "Guideline impact evaluation can complete only after its pilot round closes"
         )
+    task_version = _scoped(
+        db, models.TaskVersion, pilot_round.task_version_id, project_id, "Task version"
+    )
     submissions = (
         db.query(models.RoundSubmission)
-        .filter(models.RoundSubmission.annotation_round_id == pilot_round.id)
+        .filter(
+            models.RoundSubmission.annotation_round_id == pilot_round.id,
+            models.RoundSubmission.project_id == project_id,
+        )
         .order_by(
             models.RoundSubmission.annotator_user_id,
             models.RoundSubmission.sequence,
+            models.RoundSubmission.id,
         )
         .all()
     )
-    latest_by_annotator = {submission.annotator_user_id: submission for submission in submissions}
-    outputs_by_item: dict[int, list[str]] = {}
-    for submission in latest_by_annotator.values():
+    submitted_decision_ids = sorted({
+        decision_id for submission in submissions for decision_id in submission.decision_ids
+    })
+    decisions_by_id: dict[int, models.RoundAnnotationDecision] = {}
+    for offset in range(0, len(submitted_decision_ids), _IMPACT_DECISION_BATCH_SIZE):
         decisions = (
             db.query(models.RoundAnnotationDecision)
-            .filter(models.RoundAnnotationDecision.id.in_(submission.decision_ids))
+            .join(
+                models.RoundItem,
+                models.RoundItem.id == models.RoundAnnotationDecision.round_item_id,
+            )
+            .filter(
+                models.RoundAnnotationDecision.id.in_(
+                    submitted_decision_ids[offset : offset + _IMPACT_DECISION_BATCH_SIZE]
+                ),
+                models.RoundAnnotationDecision.project_id == project_id,
+                models.RoundItem.annotation_round_id == pilot_round.id,
+                models.RoundItem.project_id == project_id,
+            )
             .all()
         )
-        for decision in decisions:
-            superseded = (
-                db.query(models.RoundAnnotationDecision.id)
-                .filter(models.RoundAnnotationDecision.supersedes_decision_id == decision.id)
-                .first()
-            )
-            if superseded is None:
-                outputs_by_item.setdefault(decision.round_item_id, []).append(
-                    _canonical_hash(decision.output)
-                )
+        decisions_by_id.update((decision.id, decision) for decision in decisions)
+    # A submission can contain a single paper. Retain one finalized vote per
+    # annotator and item; unsubmitted draft revisions do not replace that vote.
+    latest_by_item: dict[tuple[int, int], models.RoundAnnotationDecision] = {}
+    for submission in submissions:
+        for decision_id in submission.decision_ids:
+            decision = decisions_by_id.get(decision_id)
+            if decision is not None and decision.annotator_user_id == submission.annotator_user_id:
+                latest_by_item[(decision.annotator_user_id, decision.round_item_id)] = decision
+    outputs_by_item: dict[int, list[str]] = {}
+    for decision in latest_by_item.values():
+        outputs_by_item.setdefault(decision.round_item_id, []).append(
+            _task_output_hash(task_version, decision.output)
+        )
     round_item_ids = {
         item_id
         for (item_id,) in db.query(models.RoundItem.id)
@@ -438,7 +464,7 @@ def complete_guideline_impact(
         "item_count": item_count,
         "annotated_item_count": annotated_item_count,
         "compared_item_count": len(compared_outputs),
-        "annotator_count": len(latest_by_annotator),
+        "annotator_count": len({annotator_id for annotator_id, _ in latest_by_item}),
         "coverage": coverage,
         "exact_agreement": agreement,
         "minimum_agreement": data.minimum_agreement,

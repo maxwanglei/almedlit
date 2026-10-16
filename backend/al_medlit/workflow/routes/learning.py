@@ -120,7 +120,9 @@ def materialize_selection_run(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _write(
+    # Materialization acquires write authorization after its read-only ranking
+    # phase, so CPU work does not hold actor or membership row locks.
+    _read(
         db,
         current_user,
         project_id,

@@ -22,7 +22,8 @@ export interface TrainingPreparationDraft {
 }
 export interface TrainingPreview {
   ready: boolean;
-  issues: Array<{ code: string; message: string; source_index?: number; item_key?: string }>;
+  issues: Array<{ code: string; message: string; source_index?: number | null; item_key?: string | null }>;
+  warnings?: Array<{ code: string; message: string; source_index?: number | null; item_key?: string | null }>;
   source_counts: Array<{ dataset_version_id: number; total_count: number; labeled_count: number; excluded_unlabeled_count: number }>;
   input_count: number; labeled_count: number; excluded_unlabeled_count: number;
   duplicate_count: number; item_count: number; group_count: number;

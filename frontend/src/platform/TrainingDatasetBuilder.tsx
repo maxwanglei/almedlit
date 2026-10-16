@@ -161,7 +161,11 @@ export default function TrainingDatasetBuilder({ projectId, data, initialDataset
       <p role="status">{preview.item_count} records · {preview.group_count} groups · {preview.excluded_unlabeled_count} unlabeled records excluded · {preview.duplicate_count} duplicates removed</p>
       <p>{Object.entries(preview.split_counts).map(([split, count]) => `${split}: ${count}`).join(" · ")}</p>
       <ul>{preview.source_counts.map((source, index) => <li key={`${source.dataset_version_id}:${index}`}>Source {index + 1}: {source.total_count} records, {source.labeled_count} labeled, {source.excluded_unlabeled_count} unlabeled excluded</li>)}</ul>
-      {preview.issues.length ? <ul>{preview.issues.map((issue, index) => <li key={index}>{issue.source_index !== undefined ? `Source ${issue.source_index + 1}: ` : ""}{issue.message}</li>)}</ul> : null}
+      {preview.issues.length ? <ul>{preview.issues.map((issue, index) => <li key={index}>{issue.source_index != null ? `Source ${issue.source_index + 1}: ` : ""}{issue.message}</li>)}</ul> : null}
+      {preview.warnings?.length ? <div role="status" aria-label="Training dataset warnings" className="platform-form-warning">
+        <strong>Review warnings</strong>
+        <ul>{preview.warnings.map((warning, index) => <li key={index}>{warning.source_index != null ? `Source ${warning.source_index + 1}: ` : ""}{warning.message}</li>)}</ul>
+      </div> : null}
       <Button label={busy ? "Saving…" : parent ? "Create new training version" : "Create training dataset"} variant="primary" isDisabled={busy || !preview.ready} onClick={() => void prepare()} />
     </section> : null}
   </PlatformSection>;

@@ -191,6 +191,56 @@ def test_required_evidence_assignment_cannot_disappear_after_authorization(clien
     db.rollback()
 
 
+@pytest.mark.parametrize("reassign_older", [False, True])
+def test_reissued_evidence_assignment_uses_current_round(client, db, reassign_older):
+    ctx = _setup_evidence_project(client, "evidence-reissued-assignment")
+    headers = {"Authorization": f"Bearer {client._token_for('tester')}"}
+    assignments_url = f"/api/projects/{ctx['project']['id']}/assignments"
+    payload = {
+        "task_id": ctx["task"]["id"],
+        "document_id": ctx["document"]["id"],
+        "annotator_id": "tester",
+        "target_version_id": ctx["version"]["id"],
+    }
+    if reassign_older:
+        older = client.post(
+            assignments_url,
+            json=payload | {"annotator_id": "previous-owner"},
+            headers=headers,
+        )
+        assert older.status_code == 200, older.text
+    initial = client.post(assignments_url, json=payload, headers=headers)
+    assert initial.status_code == 200, initial.text
+    withdrawn = db.get(TaskAssignment, initial.json()["id"])
+    withdrawn.status = "withdrawn"
+    db.commit()
+    if reassign_older:
+        replacement = client.patch(
+            f"{assignments_url}/{older.json()['id']}",
+            json={"annotator_id": "tester"},
+            headers=headers,
+        )
+    else:
+        replacement = client.post(assignments_url, json=payload, headers=headers)
+    assert replacement.status_code == 200, replacement.text
+    current = db.get(TaskAssignment, replacement.json()["id"])
+
+    created = client.post("/api/annotations", json=_block_payload(ctx, 0, 0), headers=headers)
+    assert created.status_code == 200, created.text
+    assert created.json()["annotator_user_id"] == current.assignee_user_id
+    assert created.json()["evidence_block"]["target_version_id"] == current.target_version_id
+
+    current.status = "completed"
+    db.commit()
+    finalized = client.post("/api/annotations", json=_block_payload(ctx, 1, 1), headers=headers)
+    assert finalized.status_code == 403, finalized.text
+    assignments = client.get(assignments_url, headers=headers).json()
+    assert {assignment["id"]: assignment["status"] for assignment in assignments} == {
+        withdrawn.id: "withdrawn",
+        current.id: "completed",
+    }
+
+
 def test_targets_assignments_and_server_derived_block_payload(client):
     ctx = _setup_evidence_project(client, "evidence-target-assignment")
     assignment_response = client.post(

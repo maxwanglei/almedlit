@@ -703,10 +703,19 @@ export default function AnnotatorWorkspace({
     useState(false);
   const [reopenDialogOpen, setReopenDialogOpen] = useState(false);
   const isMobileWorkspace = useMediaQuery("(max-width: 1120px)");
-  const previousAssignmentIdRef = useRef<number | null>(null);
 
   const readPaneRef = useRef<HTMLDivElement | null>(null);
   const spanRefs = useRef<Map<number, HTMLElement>>(new Map());
+  const clearAnnotationInteractions = useCallback((): void => {
+    setPendingSelection(null);
+    setSpanMenu(null);
+    setRelationSourceId(null);
+    setRelationChoice(null);
+    setRelationMenu(null);
+    setSentenceMenu(null);
+    setSelectedAnnotationId(null);
+    setHoveredRelationId(null);
+  }, []);
   const handleActiveEvidenceAssignmentChange = useCallback(
     (assignment: TaskAssignment | null): void => {
       if (assignment === null) return;
@@ -854,11 +863,15 @@ export default function AnnotatorWorkspace({
           selectedSubmissionAssignment.guideline_version_id
         ] ?? activeWorkbench?.active_guideline ?? null
       : activeWorkbench?.active_guideline ?? null;
-  const canSubmitCurrentDocument =
-    Boolean(workbenchMatchesSelection && selectedAnnotatorId) &&
-    isMutableAssignment(selectedSubmissionAssignment);
   const selectedAssignmentTask =
     tasks.find((task) => task.id === selectedSubmissionAssignment?.task_id) ?? null;
+  const submissionMatchesTool =
+    (selectedAssignmentTask?.annotation_type === "evidence_block") ===
+    (annotationTool === "evidence");
+  const canSubmitCurrentDocument =
+    Boolean(workbenchMatchesSelection && selectedAnnotatorId) &&
+    isMutableAssignment(selectedSubmissionAssignment) &&
+    submissionMatchesTool;
   const selectedTaskAnnotationCount = useMemo(() => {
     if (
       !activeWorkbench ||
@@ -1083,27 +1096,6 @@ export default function AnnotatorWorkspace({
     selectedAnnotationId,
   ]);
 
-  useEffect(() => {
-    if (legacyAnnotationEditable) {
-      return;
-    }
-    setPendingSelection(null);
-    setSpanMenu(null);
-    setRelationSourceId(null);
-    setRelationChoice(null);
-    setRelationMenu(null);
-    setSentenceMenu(null);
-  }, [legacyAnnotationEditable]);
-
-  useEffect(() => {
-    setPendingSelection(null);
-    setSpanMenu(null);
-    setRelationSourceId(null);
-    setRelationChoice(null);
-    setRelationMenu(null);
-    setSentenceMenu(null);
-  }, [selectedSubmissionAssignment?.id]);
-
   const humanAnnotations = useMemo(() => {
     const annotations = activeWorkbench?.annotations ?? [];
     return annotations.filter(
@@ -1184,6 +1176,31 @@ export default function AnnotatorWorkspace({
     () => new Map(spanAnnotations.map((annotation) => [annotation.id, annotation])),
     [spanAnnotations],
   );
+  const relationSource = relationSourceId !== null ? spanById.get(relationSourceId) : undefined;
+  const interactionScope = [
+    selectedProjectId,
+    selectedDocumentId,
+    activeWorkbench?.document.id,
+    selectedSubmissionAssignment?.id,
+    selectedSubmissionAssignment?.status,
+    annotationGuidelineVersionId,
+    annotationStructureVersionId,
+    annotationTool,
+    legacyAnnotationEditable,
+    selectedAnnotatorId,
+  ].join(":");
+  const [previousInteractionScope, setPreviousInteractionScope] = useState(interactionScope);
+  if (
+    previousInteractionScope !== interactionScope ||
+    (relationSourceId !== null && !relationSource) ||
+    (relationChoice !== null &&
+      (!spanById.has(relationChoice.fromId) || !spanById.has(relationChoice.toId)))
+  ) {
+    // Reset in this update, before React commits a different annotation scope.
+    // Navigation and workbench refreshes can remove spans before effects run.
+    setPreviousInteractionScope(interactionScope);
+    clearAnnotationInteractions();
+  }
 
   const labelCounts = useMemo(() => {
     const counts = new Map<string, number>();
@@ -1235,7 +1252,7 @@ export default function AnnotatorWorkspace({
     }
     const labels = displayLabelsForTask(activeRelationTask);
     if (!relationChoiceHead || !relationChoiceTail) {
-      return labels;
+      return [];
     }
     return filterRelationLabels(
       labels,
@@ -1303,7 +1320,7 @@ export default function AnnotatorWorkspace({
                   (assignment) => assignment.task_id === task.id,
                 ),
             )
-          ? "Configure an active evidence target before annotating evidence blocks."
+          ? "Configure an active evidence target in the project's Tasks → Evidence setup section before annotating evidence blocks."
           : null;
   const nextOpenDocument =
     visibleDocuments.find((documentItem) => {
@@ -1428,29 +1445,34 @@ export default function AnnotatorWorkspace({
   }, [spanTasks]);
 
   useEffect(() => {
-    const assignmentChanged =
-      previousAssignmentIdRef.current !== selectedSubmissionAssignment?.id;
+    if (new URLSearchParams(window.location.search).toString() !== searchParams.toString()) return;
+    if (Number(searchParams.get("document")) !== selectedDocumentId) return;
+    const requestedTool = searchParams.get("tool");
+    if (requestedTool === "legacy" || (requestedTool === "evidence" && evidenceTask)) return;
+
+    // Infer a default only when the URL has no usable tool choice. Resolve the
+    // requested assignment first so an initial fallback cannot choose its tool.
+    const assignmentForTool = currentDocumentAssignments.find(
+      (assignment) => assignment.id === Number(searchParams.get("assignment")),
+    ) ?? selectedSubmissionAssignment;
+    const taskForTool = tasks.find((task) => task.id === assignmentForTool?.task_id);
+    if (assignmentForTool && !taskForTool) return;
     const expectedTool: AnnotationTool =
-      selectedAssignmentTask?.annotation_type === "evidence_block"
+      taskForTool?.annotation_type === "evidence_block"
         ? "evidence"
         : "legacy";
-    const currentToolIsIncompatible =
-      (annotationTool === "evidence" &&
-        selectedAssignmentTask?.annotation_type !== "evidence_block") ||
-      (annotationTool === "legacy" &&
-        selectedAssignmentTask?.annotation_type === "evidence_block") ||
-      (annotationTool === "evidence" && !evidenceTask);
 
-    if (assignmentChanged || currentToolIsIncompatible) {
-      setAnnotationTool(expectedTool);
+    setAnnotationTool(expectedTool);
+    if (assignmentForTool || requestedTool !== null) {
       updateSearch({ tool: expectedTool }, "replace");
     }
-    previousAssignmentIdRef.current = selectedSubmissionAssignment?.id ?? null;
   }, [
-    annotationTool,
+    currentDocumentAssignments,
     evidenceTask,
-    selectedAssignmentTask?.annotation_type,
-    selectedSubmissionAssignment?.id,
+    searchParams,
+    selectedDocumentId,
+    selectedSubmissionAssignment,
+    tasks,
     updateSearch,
   ]);
 
@@ -1790,7 +1812,10 @@ export default function AnnotatorWorkspace({
   }
 
   const createRelation = useCallback(async (labelName: string): Promise<void> => {
-    if (!activeWorkbench || !relationChoice || !labelName) {
+    if (
+      !activeWorkbench || !relationChoice || !labelName ||
+      !spanById.has(relationChoice.fromId) || !spanById.has(relationChoice.toId)
+    ) {
       return;
     }
     if (!selectedAnnotatorId) {
@@ -1817,7 +1842,7 @@ export default function AnnotatorWorkspace({
       setRelationSourceId(null);
       setRelationChoice(null);
     }, "Unable to create relation", activeRelationTask?.id ?? null);
-  }, [createAnnotationRecord, activeRelationTask, activeWorkbench, addWorkbenchAnnotation, annotationGuidelineVersionId, annotationStructureVersionId, relationChoice, runMutation, selectedAnnotatorId, setError]);
+  }, [createAnnotationRecord, activeRelationTask, activeWorkbench, addWorkbenchAnnotation, annotationGuidelineVersionId, annotationStructureVersionId, relationChoice, runMutation, selectedAnnotatorId, setError, spanById]);
 
   async function setDocumentLabel(labelName: string): Promise<void> {
     if (!activeWorkbench || !docLabelTask) {
@@ -1952,6 +1977,10 @@ export default function AnnotatorWorkspace({
       );
       return;
     }
+    if (!submissionMatchesTool) {
+      setError("Select a task assignment that matches the active annotation tool.");
+      return;
+    }
     const finishedAssignmentId = selectedSubmissionAssignment?.id ?? null;
     const finishedDocumentId = activeWorkbench.document.id;
     await runMutation(async () => {
@@ -2017,17 +2046,13 @@ export default function AnnotatorWorkspace({
       {
         document: documentId,
         assignment: null,
+        tool: null,
         view: nextTab,
         pane: "document",
       },
       "push",
     );
-    setPendingSelection(null);
-    setSpanMenu(null);
-    setRelationChoice(null);
-    setRelationMenu(null);
-    setRelationSourceId(null);
-    setSelectedAnnotationId(null);
+    clearAnnotationInteractions();
   }
 
   function moveDocument(direction: 1 | -1): void {
@@ -2045,9 +2070,12 @@ export default function AnnotatorWorkspace({
   function openNextPersonalWork(): void {
     setRecentlyFinished(null);
     if (nextOpenTaskAssignment) {
+      const task = tasks.find((item) => item.id === nextOpenTaskAssignment.task_id);
+      const tool = task?.annotation_type === "evidence_block" ? "evidence" : "legacy";
       setSubmissionAssignmentId(nextOpenTaskAssignment.id);
+      setAnnotationTool(tool);
       updateSearch(
-        { assignment: nextOpenTaskAssignment.id },
+        { assignment: nextOpenTaskAssignment.id, tool },
         "replace",
       );
       return;
@@ -2506,6 +2534,7 @@ export default function AnnotatorWorkspace({
                     project: nextProjectId,
                     document: null,
                     assignment: null,
+                    tool: null,
                   },
                   "push",
                 );
@@ -2578,8 +2607,12 @@ export default function AnnotatorWorkspace({
                     onChange={(event) => {
                       setRecentlyFinished(null);
                       const assignmentId = Number(event.target.value);
+                      const assignment = currentDocumentAssignments.find((item) => item.id === assignmentId);
+                      const task = tasks.find((item) => item.id === assignment?.task_id);
+                      const tool = task?.annotation_type === "evidence_block" ? "evidence" : "legacy";
                       setSubmissionAssignmentId(assignmentId);
-                      updateSearch({ assignment: assignmentId }, "replace");
+                      setAnnotationTool(tool);
+                      updateSearch({ assignment: assignmentId, tool }, "replace");
                     }}
                     disabled={busy}
                   >
@@ -3377,9 +3410,9 @@ export default function AnnotatorWorkspace({
                 })
               )}
 
-              {relationSourceId !== null && !relationChoice ? (
+              {relationSource && !relationChoice ? (
                 <div className="aw-relation-banner">
-                  Linking from <strong>{spanText(spanById.get(relationSourceId)!)}</strong>. Click a target span.
+                  Linking from <strong>{spanText(relationSource)}</strong>. Click a target span.
                   <span>Esc cancels</span>
                 </div>
               ) : null}

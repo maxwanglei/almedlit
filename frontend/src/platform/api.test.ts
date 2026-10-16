@@ -24,8 +24,11 @@ import {
   loadPlatformProject,
   loadRoundWork,
   materializeFeedbackRun,
+  validateDatasetDraft,
+  validateTaskDraft,
   verifyExecutionEnvironment,
 } from "./api";
+import type { DatasetDraft, TaskDraft } from "./api";
 import {
   EMPTY_PLATFORM_PROJECT_DATA,
   type PlatformProjectData,
@@ -49,6 +52,36 @@ vi.mock("@/api/client", () => ({
 function bodyOf(call: unknown[]): Record<string, unknown> {
   const init = call[1] as RequestInit | undefined;
   return JSON.parse(String(init?.body)) as Record<string, unknown>;
+}
+
+function datasetDraft(overrides: Partial<DatasetDraft> = {}): DatasetDraft {
+  return {
+    name: "Public benchmark",
+    description: "",
+    sourceType: "public_registry",
+    sourceUri: "",
+    sourceRevision: "a".repeat(40),
+    sourceFormat: "jsonl",
+    license: "Apache-2.0",
+    file: new File(['{"text":"Example"}\n'], "benchmark.jsonl"),
+    stableKeyField: "",
+    groupKeyField: "",
+    registryDatasetId: "owner/benchmark",
+    registryConfigName: "default",
+    ...overrides,
+  };
+}
+
+function taskDraft(overrides: Partial<TaskDraft> = {}): TaskDraft {
+  return {
+    key: "entities",
+    name: "Named entities",
+    description: "",
+    taskKind: "span_extraction",
+    annotationMode: "paper_entities",
+    labelValues: ["Disease"],
+    ...overrides,
+  };
 }
 
 beforeEach(() => {
@@ -789,6 +822,117 @@ describe("platform API orchestration", () => {
         enum: ["include", "exclude"],
       },
     });
+  });
+
+  it.each([
+    { labels: [], existingId: undefined },
+    { labels: [" ", "\t"], existingId: undefined },
+    { labels: [], existingId: 11 },
+  ])("rejects empty entity labels before creating a task or retrying its version ($existingId)", async ({ labels, existingId }) => {
+    const draft = taskDraft({ labelValues: labels });
+    const onDefinitionCreated = vi.fn();
+    mocks.request.mockResolvedValue({ id: 11 });
+
+    await expect(createTaskWithVersion(7, draft, onDefinitionCreated, existingId)).rejects.toThrow(
+      "Enter at least one entity label for document annotation.",
+    );
+
+    expect(mocks.request).not.toHaveBeenCalled();
+    expect(onDefinitionCreated).not.toHaveBeenCalled();
+    expect(() => validateTaskDraft(draft)).toThrow("Enter at least one entity label for document annotation.");
+  });
+
+  it("retains the task definition after a version failure and reuses it for retry", async () => {
+    const definition = { id: 11, key: "entities", name: "Named entities" };
+    const onDefinitionCreated = vi.fn();
+    let versionAttempts = 0;
+    mocks.request.mockImplementation(async (path: string) => {
+      if (path === "/tasks") return definition;
+      if (path === "/tasks/versions") {
+        expect(onDefinitionCreated).toHaveBeenCalledExactlyOnceWith(definition);
+        versionAttempts += 1;
+        if (versionAttempts === 1) throw new Error("Task version failed");
+        return { id: 12 };
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+
+    await expect(createTaskWithVersion(7, taskDraft(), onDefinitionCreated)).rejects.toThrow("Task version failed");
+    await expect(createTaskWithVersion(7, taskDraft(), onDefinitionCreated, definition.id)).resolves.toEqual({ id: 12 });
+
+    expect(mocks.request.mock.calls.map(([path]) => path)).toEqual([
+      "/tasks", "/tasks/versions", "/tasks/versions",
+    ]);
+    expect(bodyOf(mocks.request.mock.calls[2]).task_definition_id).toBe(definition.id);
+    expect(onDefinitionCreated).toHaveBeenCalledExactlyOnceWith(definition);
+  });
+
+  it.each([
+    { description: "blank name", overrides: { name: " " } },
+    { description: "missing snapshot", overrides: { file: null } },
+    { description: "missing upload", overrides: { sourceType: "upload", file: null } },
+    { description: "empty upload", overrides: { sourceType: "upload", file: new File([], "empty.csv") } },
+    { description: "unsupported public format", overrides: { sourceFormat: "other" } },
+    { description: "corpus public format", overrides: { sourceFormat: "project_corpus" } },
+    { description: "corpus upload format", overrides: { sourceType: "upload", sourceFormat: "project_corpus" } },
+    { description: "missing revision", overrides: { sourceRevision: " " } },
+    { description: "mutable revision", overrides: { sourceRevision: "main" } },
+    { description: "short revision", overrides: { sourceRevision: "a".repeat(39) } },
+    { description: "long revision", overrides: { sourceRevision: "a".repeat(41) } },
+    { description: "nonhex revision", overrides: { sourceRevision: "g".repeat(40) } },
+    { description: "missing registry ID", overrides: { registryDatasetId: " " } },
+    { description: "invalid registry ID", overrides: { registryDatasetId: "owner/dataset/extra" } },
+    { description: "invalid configuration", overrides: { registryConfigName: "bad/config" } },
+    { description: "blank generated revision", overrides: { sourceType: "generated", sourceRevision: " " } },
+    { description: "empty document selection", overrides: { sourceType: "project_corpus", documentIds: [] } },
+    { description: "invalid document selection", overrides: { sourceType: "project_corpus", documentIds: [0] } },
+  ] satisfies Array<{ description: string; overrides: Partial<DatasetDraft> }>)(
+    "rejects $description before creating a dataset definition",
+    async ({ overrides }) => {
+      const draft = datasetDraft(overrides);
+      const onDefinitionCreated = vi.fn();
+      mocks.request.mockResolvedValue({ id: 21 });
+
+      expect(() => validateDatasetDraft(draft)).toThrow();
+      await expect(createDatasetWithVersion(7, draft, onDefinitionCreated)).rejects.toThrow();
+
+      expect(mocks.request).not.toHaveBeenCalled();
+      expect(onDefinitionCreated).not.toHaveBeenCalled();
+    },
+  );
+
+  it("validates a corrected dataset draft before retrying an existing definition", async () => {
+    mocks.request.mockResolvedValue({ id: 22 });
+
+    await expect(createDatasetWithVersion(7, datasetDraft({ sourceRevision: "main" }), undefined, 21)).rejects.toThrow();
+
+    expect(mocks.request).not.toHaveBeenCalled();
+  });
+
+  it("retains the dataset definition after ingestion failure and reuses it for retry", async () => {
+    const definition = { id: 21, name: "Public benchmark", source_type: "public_registry" };
+    const onDefinitionCreated = vi.fn();
+    let versionAttempts = 0;
+    mocks.request.mockImplementation(async (path: string) => {
+      if (path === "/datasets") return definition;
+      if (path === "/projects/7/datasets/21/versions/public-registry-snapshot") {
+        expect(onDefinitionCreated).toHaveBeenCalledExactlyOnceWith(definition);
+        versionAttempts += 1;
+        if (versionAttempts === 1) throw new Error("Snapshot ingestion failed");
+        return { id: 22 };
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+
+    await expect(createDatasetWithVersion(7, datasetDraft(), onDefinitionCreated)).rejects.toThrow("Snapshot ingestion failed");
+    await expect(createDatasetWithVersion(7, datasetDraft(), onDefinitionCreated, definition.id)).resolves.toEqual({ id: 22 });
+
+    expect(mocks.request.mock.calls.map(([path]) => path)).toEqual([
+      "/datasets",
+      "/projects/7/datasets/21/versions/public-registry-snapshot",
+      "/projects/7/datasets/21/versions/public-registry-snapshot",
+    ]);
+    expect(onDefinitionCreated).toHaveBeenCalledExactlyOnceWith(definition);
   });
 
   it("routes uploaded data through multipart ingestion", async () => {

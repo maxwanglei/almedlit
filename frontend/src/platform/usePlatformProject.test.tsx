@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
+import { act, cleanup, render, renderHook, screen, waitFor } from "@testing-library/react";
+import { Profiler } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { WorkspaceRole } from "@/types/api";
 
-import type { RoundDraft } from "./api";
+import type { DatasetDraft, RoundDraft, TaskDraft } from "./api";
+import type { Dataset, TaskDefinition } from "./types";
 import { EMPTY_PLATFORM_PROJECT_DATA } from "./types";
 import { usePlatformProject } from "./usePlatformProject";
 
@@ -91,6 +93,91 @@ describe("usePlatformProject load scope", () => {
 
     expect(mocks.loadPlatformProject).not.toHaveBeenCalled();
     expect(result.current.data).toBe(EMPTY_PLATFORM_PROJECT_DATA);
+  });
+
+  it("exposes initial and retry failures and recovers when a later reload succeeds", async () => {
+    const failedRetry = deferred<typeof EMPTY_PLATFORM_PROJECT_DATA>();
+    const successfulRetry = deferred<typeof EMPTY_PLATFORM_PROJECT_DATA>();
+    const projectData = {
+      ...EMPTY_PLATFORM_PROJECT_DATA,
+      projectModules: {
+        ...EMPTY_PLATFORM_PROJECT_DATA.projectModules,
+        project_id: 7,
+      },
+    };
+    mocks.loadPlatformProject
+      .mockRejectedValueOnce(new Error("Initial project load failed"))
+      .mockReturnValueOnce(failedRetry.promise)
+      .mockReturnValueOnce(successfulRetry.promise);
+    const { result } = renderHook(() => usePlatformProject(7, 5, true, "data"));
+
+    await waitFor(() => expect(result.current.error).toBe("Initial project load failed"));
+    expect(result.current.loading).toBe(false);
+    expect(result.current.data).toBe(EMPTY_PLATFORM_PROJECT_DATA);
+
+    let retryPromise!: Promise<void>;
+    act(() => { retryPromise = result.current.reload(); });
+
+    expect(result.current.loading).toBe(true);
+    expect(result.current.error).toBeNull();
+    expect(result.current.data).toBe(EMPTY_PLATFORM_PROJECT_DATA);
+    await act(async () => {
+      failedRetry.reject(new Error("Project retry failed"));
+      await retryPromise;
+    });
+    expect(result.current.loading).toBe(false);
+    expect(result.current.error).toBe("Project retry failed");
+    expect(result.current.data).toBe(EMPTY_PLATFORM_PROJECT_DATA);
+
+    act(() => { retryPromise = result.current.reload(); });
+
+    expect(result.current.loading).toBe(true);
+    expect(result.current.error).toBeNull();
+    expect(result.current.data).toBe(EMPTY_PLATFORM_PROJECT_DATA);
+    expect(mocks.loadPlatformProject).toHaveBeenCalledTimes(3);
+    expect(mocks.loadPlatformProject).toHaveBeenLastCalledWith(7, "data", 5, undefined);
+    await act(async () => {
+      successfulRetry.resolve(projectData);
+      await retryPromise;
+    });
+    expect(result.current.loading).toBe(false);
+    expect(result.current.error).toBeNull();
+    expect(result.current.data).toBe(projectData);
+  });
+
+  it.each([
+    { description: "project", projectId: 8, scope: "data" as const },
+    { description: "section", projectId: 7, scope: "rounds" as const },
+  ])("does not commit the previous error when the $description changes", async ({ projectId, scope }) => {
+    const nextLoad = deferred<typeof EMPTY_PLATFORM_PROJECT_DATA>();
+    mocks.loadPlatformProject
+      .mockRejectedValueOnce(new Error("Previous project context failed"))
+      .mockReturnValueOnce(nextLoad.promise);
+    function ProjectStatus({ projectId, scope }: { projectId: number; scope: "data" | "rounds" }) {
+      const project = usePlatformProject(projectId, 5, true, scope);
+      return <p>{project.error ?? "No project error"}</p>;
+    }
+    const committedPreviousErrors: boolean[] = [];
+    const onRender = () => {
+      committedPreviousErrors.push(screen.queryByText("Previous project context failed") !== null);
+    };
+    const { rerender } = render(
+      <Profiler id="project" onRender={onRender}>
+        <ProjectStatus projectId={7} scope="data" />
+      </Profiler>,
+    );
+    await screen.findByText("Previous project context failed");
+    committedPreviousErrors.length = 0;
+
+    rerender(
+      <Profiler id="project" onRender={onRender}>
+        <ProjectStatus projectId={projectId} scope={scope} />
+      </Profiler>,
+    );
+
+    expect(committedPreviousErrors.length).toBeGreaterThan(0);
+    expect(committedPreviousErrors).not.toContain(true);
+    expect(screen.getByText("No project error")).toBeTruthy();
   });
 
   it("ignores an older project response and its finally state", async () => {
@@ -241,5 +328,90 @@ describe("usePlatformProject load scope", () => {
     expect(mocks.loadPlatformProject).toHaveBeenLastCalledWith(7, "rounds", 5, roles);
     expect(result.current.busy).toBe(false);
     expect(result.current.error).toBeNull();
+  });
+});
+
+describe("usePlatformProject resource creation retries", () => {
+  const task: TaskDraft = {
+    key: "screening",
+    name: "Screening",
+    description: "Clinical review",
+    taskKind: "classification",
+    labelValues: ["Include", "Exclude"],
+  };
+  const taskDefinition: TaskDefinition = {
+    id: 31,
+    project_id: 7,
+    key: task.key,
+    name: task.name,
+    description: task.description,
+  };
+  const dataset: DatasetDraft = {
+    name: "Clinical papers",
+    description: "Imported abstracts",
+    sourceType: "upload",
+    sourceUri: "",
+    sourceRevision: "revision-1",
+    sourceFormat: "csv",
+    license: "",
+    file: new File(["bad input"], "papers.csv", { type: "text/csv" }),
+    stableKeyField: "id",
+    groupKeyField: "",
+    registryDatasetId: "",
+    registryConfigName: "",
+    purposes: ["training_source"],
+  };
+  const datasetDefinition: Dataset = {
+    id: 41,
+    project_id: 7,
+    name: dataset.name,
+    description: dataset.description,
+    source_type: dataset.sourceType,
+    purposes: dataset.purposes,
+  };
+
+  it("reuses a created task definition after correcting a failed version and clears it after success", async () => {
+    mocks.createTaskWithVersion.mockImplementationOnce(async (
+      _projectId: number, _draft: TaskDraft, onCreated?: (definition: TaskDefinition) => void,
+    ) => {
+      onCreated?.(taskDefinition);
+      throw new Error("Task version rejected");
+    }).mockResolvedValue({ id: 51 });
+    const { result } = renderHook(() => usePlatformProject(7, 5, true, "data"));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      await expect(result.current.addTask(task)).rejects.toThrow("Task version rejected");
+    });
+    await act(() => result.current.reload());
+    const corrected = { ...task, key: " screening ", labelValues: ["Relevant", "Not relevant"] };
+    await act(() => result.current.addTask(corrected));
+
+    expect(mocks.createTaskWithVersion).toHaveBeenNthCalledWith(2, 7, corrected, expect.any(Function), 31);
+    await act(() => result.current.addTask(task));
+    expect(mocks.createTaskWithVersion).toHaveBeenNthCalledWith(3, 7, task, expect.any(Function), undefined);
+  });
+
+  it("reuses a created dataset after replacing a failed file and revision, then clears it after success", async () => {
+    mocks.createDatasetWithVersion.mockImplementationOnce(async (
+      _projectId: number, _draft: DatasetDraft, onCreated?: (definition: Dataset) => void,
+    ) => {
+      onCreated?.(datasetDefinition);
+      throw new Error("Dataset version rejected");
+    }).mockResolvedValue({ id: 61 });
+    const { result } = renderHook(() => usePlatformProject(7, 5, true, "data"));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      await expect(result.current.addDataset(dataset)).rejects.toThrow("Dataset version rejected");
+    });
+    await act(() => result.current.reload());
+    const corrected = { ...dataset, name: " Clinical papers ", sourceRevision: "revision-2",
+      file: new File(["id,text\n1,abstract"], "fixed.csv", { type: "text/csv" }) };
+    await act(() => result.current.addDataset(corrected));
+
+    expect(mocks.createDatasetWithVersion).toHaveBeenNthCalledWith(2, 7, corrected, expect.any(Function), 41);
+    await act(() => result.current.addDataset(dataset));
+    expect(mocks.createDatasetWithVersion).toHaveBeenNthCalledWith(3, 7, dataset, expect.any(Function), undefined);
   });
 });

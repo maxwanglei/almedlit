@@ -12,6 +12,7 @@ import {
 
 import DialogFrame from "@/components/DialogFrame";
 
+import { validateDatasetDraft, validateTaskDraft } from "./api";
 import type {
   CycleDraft,
   DatasetDraft,
@@ -132,10 +133,16 @@ export default function PlatformDialog({
         />
       </header>
       {kind === "dataset" ? (
-        <DatasetForm busy={busy} onSubmit={(draft) => submit(() => onCreateDataset(draft))} />
+        <DatasetForm busy={busy} onSubmit={(draft) => submit(() => {
+          validateDatasetDraft(draft);
+          return onCreateDataset(draft);
+        })} />
       ) : null}
       {kind === "task" ? (
-        <TaskForm busy={busy} onSubmit={(draft) => submit(() => onCreateTask(draft))} />
+        <TaskForm busy={busy} onSubmit={(draft) => submit(() => {
+          validateTaskDraft(draft);
+          return onCreateTask(draft);
+        })} />
       ) : null}
       {kind === "trainingData" ? (
         <TrainingDataForm
@@ -250,7 +257,13 @@ function DatasetForm({
       <label><span>Name</span><input required maxLength={255} value={name} onChange={(event) => setName(event.target.value)} /></label>
       <label>
         <span>Source</span>
-        <select value={sourceType} onChange={(event) => setSourceType(event.target.value as DatasetDraft["sourceType"])}>
+        <select value={sourceType} onChange={(event) => {
+          const nextSourceType = event.target.value as DatasetDraft["sourceType"];
+          setSourceType(nextSourceType);
+          if (nextSourceType === "public_registry" && !["csv", "jsonl", "parquet"].includes(sourceFormat)) {
+            setSourceFormat("jsonl");
+          }
+        }}>
           <option value="upload">File upload</option>
           <option value="public_registry">Public registry</option>
           <option value="project_corpus">Existing project corpus</option>
@@ -305,15 +318,17 @@ function DatasetForm({
               <option value="csv">CSV</option>
               <option value="jsonl">JSONL</option>
               <option value="parquet">Parquet</option>
-              <option value="other">Other</option>
+              {sourceType !== "public_registry" ? <option value="other">Other</option> : null}
             </select>
           </label>
           <label>
             <span>Exact revision</span>
             <input
               required={sourceType !== "upload"}
+              pattern={sourceType === "public_registry" ? "[a-fA-F0-9]{40}" : undefined}
+              title={sourceType === "public_registry" ? "Enter the full 40-character hexadecimal commit hash." : undefined}
               value={sourceRevision}
-              placeholder={sourceType === "public_registry" ? "40-character commit" : "commit, tag, or checksum"}
+              placeholder={sourceType === "public_registry" ? "40-character hexadecimal commit hash" : "commit, tag, or checksum"}
               onChange={(event) => setSourceRevision(event.target.value)}
             />
           </label>
@@ -337,6 +352,7 @@ function TaskForm({
   busy: boolean;
   onSubmit: (draft: TaskDraft) => Promise<void>;
 }): React.ReactElement {
+  const labelsHelpId = useId();
   const [key, setKey] = useState("");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -377,11 +393,17 @@ function TaskForm({
       <label>
         <span>Allowed labels</span>
         <input
+          required={taskKind === "paper_entities"}
+          pattern={taskKind === "paper_entities" ? ".*[^\\s,].*" : undefined}
+          aria-describedby={taskKind === "paper_entities" ? labelsHelpId : undefined}
           value={labels}
-          placeholder="Comma-separated; optional for open outputs"
+          placeholder={taskKind === "paper_entities" ? "Disease, Drug, Gene" : "Comma-separated; optional for open outputs"}
           onChange={(event) => setLabels(event.target.value)}
         />
       </label>
+      {taskKind === "paper_entities" ? (
+        <small id={labelsHelpId}>NER requires at least one entity label. Separate multiple labels with commas.</small>
+      ) : null}
       <FormActions busy={busy} />
     </form>
   );

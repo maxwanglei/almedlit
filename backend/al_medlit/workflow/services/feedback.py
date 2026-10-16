@@ -20,6 +20,7 @@ from .common import (
     _project,
     _scoped,
 )
+from .holdouts import lock_holdout_policy, validate_annotation_assistance
 
 MAX_DATASET_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_DATASET_UPLOAD_ITEMS = 100_000
@@ -58,6 +59,7 @@ _SENSITIVE_TRAINING_CONFIG_FRAGMENTS = {
 def create_feedback_exposure(
     db: Session, data: schemas.FeedbackExposureCreate, actor: User
 ) -> models.FeedbackExposure:
+    lock_holdout_policy(db, data.project_id)
     item = _scoped(db, models.RoundItem, data.round_item_id, data.project_id, "Round item")
     annotation_round = _scoped(
         db,
@@ -88,6 +90,12 @@ def create_feedback_exposure(
         raise ValidationError("Feedback candidate is not pinned to this annotation round")
     if candidate.dataset_item_id != item.dataset_item_id:
         raise ValidationError("Feedback candidate and round item must reference the same item")
+    source_item = _scoped(
+        db, models.DatasetItem, item.dataset_item_id, data.project_id, "Source item"
+    )
+    validate_annotation_assistance(
+        db, [source_item], annotation_round.task_version_id, annotation_round.assistance_policy
+    )
     if annotation_round.assistance_policy == "reveal_after_first_pass":
         initial = (
             db.query(models.RoundAnnotationDecision.id)
@@ -124,6 +132,7 @@ def reveal_round_feedback(
 ) -> tuple[models.FeedbackExposure, models.FeedbackCandidate]:
     """Reveal one pinned candidate and append its exposure in one transaction."""
 
+    lock_holdout_policy(db, project_id)
     item = (
         db.query(models.RoundItem)
         .filter(
@@ -158,6 +167,12 @@ def reveal_round_feedback(
         raise ConflictError("Feedback cannot be revealed in a blind annotation round")
     if annotation_round.feedback_set_version_id is None:
         raise ConflictError("This annotation round has no pinned feedback set")
+    source_item = _scoped(
+        db, models.DatasetItem, item.dataset_item_id, project_id, "Source item"
+    )
+    validate_annotation_assistance(
+        db, [source_item], annotation_round.task_version_id, annotation_round.assistance_policy
+    )
     candidate = (
         db.query(models.FeedbackCandidate)
         .filter(
@@ -212,6 +227,17 @@ def create_feedback_decision(
     )
     if exposure.user_id != actor.id:
         raise ValidationError("Feedback decisions must belong to the exposed user")
+    lock_holdout_policy(db, data.project_id)
+    item = _scoped(db, models.RoundItem, exposure.round_item_id, data.project_id, "Round item")
+    annotation_round = _scoped(
+        db, models.AnnotationRound, item.annotation_round_id, data.project_id, "Annotation round"
+    )
+    source_item = _scoped(
+        db, models.DatasetItem, item.dataset_item_id, data.project_id, "Source item"
+    )
+    validate_annotation_assistance(
+        db, [source_item], annotation_round.task_version_id, annotation_round.assistance_policy
+    )
     if data.round_annotation_decision_id is not None:
         annotation_decision = _scoped(
             db,

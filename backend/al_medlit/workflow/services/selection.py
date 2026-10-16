@@ -12,7 +12,7 @@ from al_medlit.core.exceptions import (
     ConflictError,
     ValidationError,
 )
-from al_medlit.workflow import models, schemas
+from al_medlit.workflow import access, models, schemas
 
 from .common import (
     _canonical_hash,
@@ -20,6 +20,7 @@ from .common import (
     _next_version,
     _scoped,
 )
+from .holdouts import lock_holdout_policy, protected_dataset_item_ids
 
 MAX_DATASET_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_DATASET_UPLOAD_ITEMS = 100_000
@@ -211,9 +212,10 @@ def _eligible_selection_items(
         .order_by(models.DatasetItem.stable_key, models.DatasetItem.id)
         .all()
     )
+    protected_item_ids = protected_dataset_item_ids(db, items, run.task_version_id)
     eligible: list[models.DatasetItem] = []
     for item in items:
-        if item.id in unavailable_item_ids:
+        if item.id in unavailable_item_ids or item.id in protected_item_ids:
             continue
         split = split_assignments.get(item.stable_key)
         if split in protected_splits:
@@ -260,11 +262,14 @@ def _candidate_scalar_signal(
         return value, f"{container_name}.{signal_key}"
     if allow_candidate_score and candidate.score is not None:
         value = _finite_float(candidate.score)
-        if value is None:
+        if value is None or not 0.0 <= value <= 1.0:
             raise ValidationError(
-                f"Feedback candidate {candidate.id} has an invalid finite numeric score"
+                f"Feedback candidate {candidate.id} requires a finite confidence score "
+                "in [0, 1] for uncertainty selection"
             )
-        return value, "score"
+        # Model scores are confidence. Convert before choosing the most
+        # uncertain candidate per item or normalizing hybrid signals.
+        return 1.0 - value, "score"
     return None
 
 
@@ -380,6 +385,12 @@ def _best_embeddings(
     return best_by_item, sorted(missing_item_ids)
 
 
+def _confidence_fallback_reason(candidate: models.FeedbackCandidate, source: str) -> dict:
+    if source != "score":
+        return {}
+    return {"signal_transform": "1 - confidence", "confidence": candidate.score}
+
+
 def _signal_reason(
     strategy: str,
     signal_name: str,
@@ -396,6 +407,7 @@ def _signal_reason(
         "signal_source": source,
         "feedback_candidate_id": candidate.id,
         "candidate_key": candidate.candidate_key,
+        **_confidence_fallback_reason(candidate, source),
     }
 
 
@@ -449,42 +461,25 @@ def _rank_embedding_diversity(
         for axis in range(dimension)
     )
     remaining = dict(embeddings)
-    selected_vectors: list[tuple[float, ...]] = []
+    scores = (
+        {
+            item_id: _embedding_distance(embedding, centroid)
+            for item_id, (embedding, _, _) in remaining.items()
+        }
+        if limit > 0 else {}
+    )
     ranked: list[tuple[models.DatasetItem, float, float, dict]] = []
     while remaining and len(ranked) < limit:
-        scored: list[
-            tuple[
-                float,
-                models.DatasetItem,
-                tuple[float, ...],
-                models.FeedbackCandidate,
-                str,
-                str,
-            ]
-        ] = []
-        for item_id, (embedding, candidate, source) in remaining.items():
-            if selected_vectors:
-                score = min(
-                    _embedding_distance(embedding, selected) for selected in selected_vectors
-                )
-                metric = "minimum_distance_to_selected"
-            else:
-                score = _embedding_distance(embedding, centroid)
-                metric = "distance_to_centroid"
-            scored.append(
-                (
-                    score,
-                    item_by_id[item_id],
-                    embedding,
-                    candidate,
-                    source,
-                    metric,
-                )
-            )
-        score, item, embedding, candidate, source, metric = min(
-            scored,
-            key=lambda value: (-value[0], value[1].stable_key, value[1].id),
+        item_id = min(
+            remaining,
+            key=lambda item_id: (
+                -scores[item_id], item_by_id[item_id].stable_key, item_id,
+            ),
         )
+        item = item_by_id[item_id]
+        embedding, candidate, source = remaining.pop(item_id)
+        score = scores.pop(item_id)
+        metric = "minimum_distance_to_selected" if ranked else "distance_to_centroid"
         ranked.append(
             (
                 item,
@@ -505,8 +500,16 @@ def _rank_embedding_diversity(
                 },
             )
         )
-        selected_vectors.append(embedding)
-        remaining.pop(item.id)
+        if len(ranked) >= limit:
+            break
+        # A candidate's nearest selected vector can only change when a new
+        # vector is selected. Cache that minimum instead of rescanning the
+        # entire selected prefix on each iteration (O(N * L) distances).
+        for remaining_id, (vector, _, _) in remaining.items():
+            distance = _embedding_distance(vector, embedding)
+            scores[remaining_id] = (
+                min(scores[remaining_id], distance) if len(ranked) > 1 else distance
+            )
     return ranked
 
 
@@ -716,6 +719,7 @@ def _rank_hybrid_strategy(
                         "feedback_candidate_id": candidate.id,
                         "candidate_key": candidate.candidate_key,
                         "normalization": uncertainty_normalization,
+                        **_confidence_fallback_reason(candidate, source),
                     },
                     "diversity": {
                         "raw_score": diversity_scores[item_id],
@@ -733,6 +737,8 @@ def _rank_hybrid_strategy(
 def _materialized_selection_items(
     db: Session,
     run: models.SelectionRun,
+    *,
+    eligible: list[models.DatasetItem] | None = None,
 ) -> list[schemas.SelectionItem]:
     if run.strategy not in _AUTOMATIC_SELECTION_STRATEGIES:
         supported = ", ".join(sorted(_AUTOMATIC_SELECTION_STRATEGIES))
@@ -740,7 +746,8 @@ def _materialized_selection_items(
             f"Automatic selection does not yet support {run.strategy!r}; "
             f"supported strategies: {supported}"
         )
-    eligible = _eligible_selection_items(db, run)
+    if eligible is None:
+        eligible = _eligible_selection_items(db, run)
     if not eligible:
         raise ValidationError(
             "No eligible dataset items remain after excluding submitted annotations, "
@@ -890,6 +897,25 @@ def _materialized_selection_items(
     ]
 
 
+def _selection_input_hash(run: models.SelectionRun) -> str:
+    return _canonical_hash({
+        field: getattr(run, field)
+        for field in (
+            "project_id",
+            "cycle_id",
+            "dataset_version_id",
+            "task_version_id",
+            "feedback_set_version_id",
+            "split_map_id",
+            "strategy",
+            "parameters",
+            "eligibility_filter",
+            "seed",
+            "status",
+        )
+    })
+
+
 def materialize_selection_run(
     db: Session,
     *,
@@ -904,9 +930,27 @@ def materialize_selection_run(
         project_id,
         "Selection run",
     )
+    # Ranking is read-only and can be expensive. Defer mutation locks until
+    # publication, then reject a stale result instead of reranking under locks.
+    input_hash = _selection_input_hash(run)
+    eligible_ids: set[int] | None = None
+    items: list[schemas.SelectionItem] | None = None
+    if run.status != "completed":
+        eligible = _eligible_selection_items(db, run)
+        eligible_ids = {item.id for item in eligible}
+        items = _materialized_selection_items(db, run, eligible=eligible)
+
+    access.authorize_project_write(
+        db,
+        actor,
+        project_id,
+        min_role="trainer",
+        module="learning",
+    )
+    lock_holdout_policy(db, project_id)
     run = (
         db.query(models.SelectionRun)
-        .filter(models.SelectionRun.id == run.id)
+        .filter(models.SelectionRun.id == selection_run_id)
         .populate_existing()
         .with_for_update()
         .one()
@@ -921,7 +965,11 @@ def materialize_selection_run(
         if existing is None:
             raise ConflictError("Completed selection run has no materialized selection set")
         return existing
-    items = _materialized_selection_items(db, run)
+    if items is None or _selection_input_hash(run) != input_hash:
+        raise ConflictError("Selection run inputs changed during ranking; retry materialization")
+    current_eligible_ids = {item.id for item in _eligible_selection_items(db, run)}
+    if current_eligible_ids != eligible_ids:
+        raise ConflictError("Selection eligibility changed during ranking; retry materialization")
     return create_selection_set(
         db,
         schemas.SelectionSetCreate(
@@ -937,6 +985,7 @@ def create_selection_set(
     db: Session, data: schemas.SelectionSetCreate, actor: User
 ) -> models.SelectionSetVersion:
     run = _scoped(db, models.SelectionRun, data.selection_run_id, data.project_id, "Selection run")
+    lock_holdout_policy(db, data.project_id)
     db.query(models.SelectionRun).filter(models.SelectionRun.id == run.id).with_for_update().one()
     if run.status == "completed":
         raise ConflictError("A completed selection run cannot be rewritten")
@@ -951,20 +1000,22 @@ def create_selection_set(
     if any(item.dataset_version_id != run.dataset_version_id for item in selected_items):
         raise ValidationError("Selected items must belong to the selection dataset version")
 
+    protected_ids = protected_dataset_item_ids(db, selected_items, run.task_version_id)
+    leaked = {item.stable_key for item in selected_items if item.id in protected_ids}
     if run.split_map_id is not None:
         split_map = _scoped(db, models.SplitMap, run.split_map_id, data.project_id, "Split map")
         protected_splits = set(split_map.protected_splits)
         protected_keys = {
             key for key, split in split_map.assignments.items() if split in protected_splits
         }
-        leaked = sorted(
+        leaked.update(
             item.stable_key for item in selected_items if item.stable_key in protected_keys
         )
-        if leaked:
-            raise ValidationError(
-                "Protected evaluation items cannot enter active-learning selection: "
-                + ", ".join(leaked[:5])
-            )
+    if leaked:
+        raise ValidationError(
+            "Protected evaluation items cannot enter active-learning selection: "
+            + ", ".join(sorted(leaked)[:5])
+        )
 
     payloads = [item.model_dump() for item in sorted(data.items, key=lambda value: value.rank)]
     selection_set = models.SelectionSetVersion(

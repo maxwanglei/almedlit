@@ -55,7 +55,6 @@ vi.mock("@/features/evidence-block/EvidenceBlockCanvas", () => ({
     useEffect(() => {
       if (selectedAssignmentId !== undefined) return;
       onActiveAssignmentChange(selected);
-      return () => onActiveAssignmentChange(null);
     }, [onActiveAssignmentChange, selected, selectedAssignmentId]);
     return (
       <label>
@@ -618,6 +617,211 @@ describe("explicit assignment selection", () => {
       annotator_id: "max",
       assignment_id: 11,
     }));
+  });
+});
+
+describe("annotation tool selection", () => {
+  const evidenceTask: AnnotationWorkbenchTask = {
+    ...entityTask,
+    id: 3,
+    annotation_type: "evidence_block",
+    display_name: "Evidence blocks",
+    labels: [],
+    annotation_type_spec: {
+      ...entityTask.annotation_type_spec,
+      name: "evidence_block",
+      requires_span: false,
+      selection_mode: "sentence_range",
+      renderer_key: "evidence_block",
+    },
+  };
+  const relationTask: AnnotationWorkbenchTask = {
+    ...entityTask,
+    id: 2,
+    annotation_type: "relation",
+    display_name: "Relations",
+    labels: [{ name: "Associated with", color: "#4d6e5b", description: null }],
+    annotation_type_spec: {
+      ...entityTask.annotation_type_spec,
+      name: "relation",
+      requires_span: false,
+      requires_head_tail: true,
+      selection_mode: "head_tail",
+    },
+  };
+  const mixedTasks = [evidenceTask, entityTask, relationTask];
+  const mixedAssignments = [
+    { ...assignment(30, "assigned"), task_id: evidenceTask.id, target_version_id: 100 },
+    assignment(10, "assigned"),
+    { ...assignment(20, "assigned"), task_id: relationTask.id },
+  ];
+  const mixedDocuments = navigationDocuments.slice(0, 2);
+  const documentAssignments = [
+    assignment(10, "assigned"),
+    { ...assignment(30, "assigned"), document_id: 2, task_id: evidenceTask.id, target_version_id: 100 },
+  ];
+  const mixedProject = { ...project, tasks: mixedTasks };
+
+  function DocumentToolHarness({ initialDocumentId }: { initialDocumentId: number }): React.ReactElement {
+    const [documentId, setDocumentId] = useState<number | null>(initialDocumentId);
+    const document = mixedDocuments.find((item) => item.id === documentId)!;
+    return <BrowserRouter><AnnotatorWorkspace
+      projects={[mixedProject]} selectedProject={mixedProject} selectedProjectId={1}
+      setSelectedProjectId={vi.fn()} documents={mixedDocuments} assignments={documentAssignments}
+      annotatorId="max" projectProgress={null} selectedDocumentId={documentId} setSelectedDocumentId={setDocumentId}
+      workbench={{ ...workbench, project: mixedProject, document, tasks: mixedTasks,
+        annotation_type_specs: mixedTasks.map((task) => task.annotation_type_spec) }}
+      setWorkbench={() => undefined} busy={false} setBusy={vi.fn()} setError={vi.fn()}
+      refreshProjectData={async () => undefined} refreshWorkbench={async () => undefined}
+      onLogout={vi.fn()}
+    /></BrowserRouter>;
+  }
+
+  function renderMixedWorkspace(
+    query: string,
+    personal = false,
+    initialAssignments: TaskAssignment[] = mixedAssignments,
+  ): void {
+    window.history.replaceState(null, "", `/annotator/workbench?project=1&document=1&view=annotate&${query}`);
+    render(<Harness personal={personal} initialAssignments={initialAssignments} initialWorkbench={{
+      ...workbench,
+      project: { ...project, tasks: mixedTasks },
+      tasks: mixedTasks,
+      annotation_type_specs: mixedTasks.map((task) => task.annotation_type_spec),
+    }} />);
+  }
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("keeps an explicit legacy tool URL when an evidence assignment is selected", () => {
+    renderMixedWorkspace("assignment=30&tool=legacy");
+
+    expect(new URLSearchParams(window.location.search).get("tool")).toBe("legacy");
+    expect(screen.getByRole("button", { name: /^Spans & relations/ }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.queryByRole("combobox", { name: "Evidence canvas assignment" })).toBeNull();
+    expect((screen.getByRole("combobox", { name: "Assignment to submit" }) as HTMLSelectElement).value).toBe("30");
+    expect((screen.getByRole("button", { name: "Submit assignment" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it.each([
+    { assignmentId: 30, tool: "evidence" },
+    { assignmentId: 10, tool: "legacy" },
+  ])("infers $tool for requested assignment $assignmentId when the URL has no explicit tool", ({ assignmentId, tool }) => {
+    renderMixedWorkspace(`assignment=${assignmentId}`);
+
+    expect(new URLSearchParams(window.location.search).get("tool")).toBe(tool);
+    expect((screen.getByRole("combobox", { name: "Assignment to submit" }) as HTMLSelectElement).value).toBe(String(assignmentId));
+    if (tool === "evidence") {
+      expect((screen.getByRole("combobox", { name: "Evidence canvas assignment" }) as HTMLSelectElement).value).toBe("30");
+    } else {
+      expect(screen.queryByRole("combobox", { name: "Evidence canvas assignment" })).toBeNull();
+    }
+  });
+
+  it("selects the matching tool when the assignment dropdown changes between evidence, entities, and relations", () => {
+    renderMixedWorkspace("assignment=30&tool=evidence");
+
+    const assignments = screen.getByRole("combobox", { name: "Assignment to submit" });
+    for (const assignmentId of [10, 20]) {
+      fireEvent.change(assignments, { target: { value: String(assignmentId) } });
+      expect(new URLSearchParams(window.location.search).get("tool")).toBe("legacy");
+      expect((assignments as HTMLSelectElement).value).toBe(String(assignmentId));
+      expect(screen.queryByRole("combobox", { name: "Evidence canvas assignment" })).toBeNull();
+    }
+    expect((screen.getByRole("button", { name: /^Associated with/ }) as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.change(assignments, { target: { value: "30" } });
+    expect(new URLSearchParams(window.location.search).get("tool")).toBe("evidence");
+    expect((screen.getByRole("combobox", { name: "Evidence canvas assignment" }) as HTMLSelectElement).value).toBe("30");
+  });
+
+  it.each([
+    { finishedId: 30, nextId: 10, currentTool: "evidence", nextTool: "legacy" },
+    { finishedId: 10, nextId: 30, currentTool: "legacy", nextTool: "evidence" },
+  ])("opens the matching $nextTool tool for Next task after assignment $finishedId", ({ finishedId, nextId, currentTool, nextTool }) => {
+    renderMixedWorkspace(
+      `assignment=${finishedId}&tool=${currentTool}`,
+      true,
+      mixedAssignments.map((item) => item.id === finishedId ? { ...item, status: "submitted" } : item),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Next task" }));
+
+    expect((screen.getByRole("combobox", { name: "Task" }) as HTMLSelectElement).value).toBe(String(nextId));
+    expect(new URLSearchParams(window.location.search).get("tool")).toBe(nextTool);
+    expect((screen.getByRole("button", { name: "Submit task for this paper" }) as HTMLButtonElement).disabled).toBe(false);
+    if (nextTool === "evidence") {
+      expect((screen.getByRole("combobox", { name: "Evidence canvas assignment" }) as HTMLSelectElement).value).toBe("30");
+    } else {
+      expect(screen.queryByRole("combobox", { name: "Evidence canvas assignment" })).toBeNull();
+    }
+  });
+
+  it.each([
+    { documentId: 1, assignmentId: 10, tool: "legacy", direction: "Next", nextDocumentId: 2, nextAssignmentId: 30, nextTool: "evidence" },
+    { documentId: 2, assignmentId: 30, tool: "evidence", direction: "Prev", nextDocumentId: 1, nextAssignmentId: 10, nextTool: "legacy" },
+  ])("opens the matching $nextTool tool after moving to document $nextDocumentId", ({ documentId, assignmentId, tool, direction, nextDocumentId, nextAssignmentId, nextTool }) => {
+    window.history.replaceState(
+      null,
+      "",
+      `/annotator/workbench?project=1&document=${documentId}&assignment=${assignmentId}&view=annotate&tool=${tool}`,
+    );
+    render(<DocumentToolHarness initialDocumentId={documentId} />);
+
+    fireEvent.click(screen.getByRole("button", { name: direction }));
+
+    expect(new URLSearchParams(window.location.search).get("document")).toBe(String(nextDocumentId));
+    expect((screen.getByRole("combobox", { name: "Assignment to submit" }) as HTMLSelectElement).value).toBe(String(nextAssignmentId));
+    expect(new URLSearchParams(window.location.search).get("tool")).toBe(nextTool);
+    expect((screen.getByRole("button", { name: "Submit assignment" }) as HTMLButtonElement).disabled).toBe(false);
+    if (nextTool === "evidence") {
+      expect((screen.getByRole("combobox", { name: "Evidence canvas assignment" }) as HTMLSelectElement).value).toBe("30");
+    } else {
+      expect(screen.queryByRole("combobox", { name: "Evidence canvas assignment" })).toBeNull();
+    }
+  });
+
+  it("switches from evidence to spans and relations and back when evidence is the first assignment", () => {
+    renderMixedWorkspace("assignment=30&tool=evidence");
+
+    fireEvent.click(screen.getByRole("button", { name: /^Spans & relations/ }));
+    expect(new URLSearchParams(window.location.search).get("tool")).toBe("legacy");
+    expect((screen.getByRole("combobox", { name: "Assignment to submit" }) as HTMLSelectElement).value).toBe("10");
+    expect(screen.queryByRole("combobox", { name: "Evidence canvas assignment" })).toBeNull();
+    expect(screen.getByRole("button", { name: /^Disease/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /^Associated with/ })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Evidence blocks/ }));
+    expect(new URLSearchParams(window.location.search).get("tool")).toBe("evidence");
+    expect((screen.getByRole("combobox", { name: "Assignment to submit" }) as HTMLSelectElement).value).toBe("30");
+    expect((screen.getByRole("combobox", { name: "Evidence canvas assignment" }) as HTMLSelectElement).value).toBe("30");
+  });
+
+  it("preserves the evidence assignment and tool while switching mobile panes", () => {
+    vi.spyOn(window, "matchMedia").mockImplementation((query) => ({
+      matches: true,
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: () => false,
+    }));
+    renderMixedWorkspace("assignment=30&tool=evidence&pane=document");
+
+    expect(screen.getByRole("combobox", { name: "Evidence canvas assignment" })).toBeTruthy();
+    for (const pane of ["Queue", "Tools", "Review", "Document"]) {
+      fireEvent.click(screen.getByRole("tab", { name: pane }));
+      expect(new URLSearchParams(window.location.search).get("pane")).toBe(pane.toLowerCase());
+      expect(new URLSearchParams(window.location.search).get("assignment")).toBe("30");
+      expect(new URLSearchParams(window.location.search).get("tool")).toBe("evidence");
+      expect((screen.getByRole("combobox", { name: "Assignment to submit" }) as HTMLSelectElement).value).toBe("30");
+      if (pane !== "Document") {
+        expect(screen.queryByRole("combobox", { name: "Evidence canvas assignment" })).toBeNull();
+      }
+    }
+    expect((screen.getByRole("combobox", { name: "Evidence canvas assignment" }) as HTMLSelectElement).value).toBe("30");
   });
 });
 

@@ -1,11 +1,11 @@
 import {
-  lazy,
   Suspense,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
@@ -22,6 +22,7 @@ import {
 } from "react-router-dom";
 
 import {
+  ApiError,
   getAnnotationWorkbench,
   getMe,
   getWorkspaceCapabilities,
@@ -34,6 +35,7 @@ import {
   subscribeSessionChanges,
 } from "@/auth/session";
 import AppShell from "@/components/AppShell";
+import RouteErrorBoundary from "@/components/RouteErrorBoundary";
 import WorkspaceSwitcher from "@/components/WorkspaceSwitcher";
 import { useEvidenceBlockStore } from "@/features/evidence-block/evidenceBlockStore";
 import {
@@ -41,6 +43,12 @@ import {
   readPreferredWorkspaceId,
   storePreferredWorkspaceId,
 } from "@/lib/workspaceSelection";
+import {
+  clearPreloadError,
+  getPreloadError,
+  subscribePreloadErrors,
+} from "@/lib/preloadErrorRecovery";
+import { retryableLazy } from "@/lib/retryableLazy";
 import {
   AccessProvider,
   canPerform,
@@ -89,19 +97,66 @@ import type {
   ProjectUpdate,
 } from "@/types/api";
 
-const AnnotatorWorkspace = lazy(() => import("@/pages/AnnotatorWorkspace"));
-const AccountActionPage = lazy(() => import("@/pages/AccountActionPage"));
-const ModelsWorkspace = lazy(() => import("@/platform/ModelsWorkspace"));
-const PlatformDialog = lazy(() => import("@/platform/PlatformDialog"));
-const ProjectPlatform = lazy(() => import("@/platform/ProjectPlatform"));
-const ProjectsWorkspace = lazy(() => import("@/platform/ProjectsWorkspace"));
-const RoundWorkbench = lazy(() => import("@/platform/RoundWorkbench"));
-const PaperRoundWorkspace = lazy(() => import("@/platform/PaperRoundWorkspace"));
-const SystemAdministration = lazy(
-  () => import("@/platform/SystemAdministration"),
-);
-const TrainingWorkspace = lazy(() => import("@/platform/TrainingWorkspace"));
-const WorkspaceSettings = lazy(() => import("@/platform/WorkspaceSettings"));
+const lazyScreens = {
+  AnnotatorWorkspace: retryableLazy(() => import("@/pages/AnnotatorWorkspace")),
+  AccountActionPage: retryableLazy(() => import("@/pages/AccountActionPage")),
+  ModelsWorkspace: retryableLazy(() => import("@/platform/ModelsWorkspace")),
+  PlatformDialog: retryableLazy(() => import("@/platform/PlatformDialog")),
+  ProjectPlatform: retryableLazy(() => import("@/platform/ProjectPlatform")),
+  ProjectsWorkspace: retryableLazy(() => import("@/platform/ProjectsWorkspace")),
+  RoundWorkbench: retryableLazy(() => import("@/platform/RoundWorkbench")),
+  PaperRoundWorkspace: retryableLazy(() => import("@/platform/PaperRoundWorkspace")),
+  SystemAdministration: retryableLazy(() => import("@/platform/SystemAdministration")),
+  TrainingWorkspace: retryableLazy(() => import("@/platform/TrainingWorkspace")),
+  WorkspaceSettings: retryableLazy(() => import("@/platform/WorkspaceSettings")),
+};
+const AnnotatorWorkspace = lazyScreens.AnnotatorWorkspace.Component;
+const AccountActionPage = lazyScreens.AccountActionPage.Component;
+const ModelsWorkspace = lazyScreens.ModelsWorkspace.Component;
+const PlatformDialog = lazyScreens.PlatformDialog.Component;
+const ProjectPlatform = lazyScreens.ProjectPlatform.Component;
+const ProjectsWorkspace = lazyScreens.ProjectsWorkspace.Component;
+const RoundWorkbench = lazyScreens.RoundWorkbench.Component;
+const PaperRoundWorkspace = lazyScreens.PaperRoundWorkspace.Component;
+const SystemAdministration = lazyScreens.SystemAdministration.Component;
+const TrainingWorkspace = lazyScreens.TrainingWorkspace.Component;
+const WorkspaceSettings = lazyScreens.WorkspaceSettings.Component;
+
+function retryFailedScreens(): void {
+  Object.values(lazyScreens).forEach((screen) => screen.retry());
+}
+
+function PreloadRecoveryNotice(): React.ReactElement | null {
+  const error = useSyncExternalStore(subscribePreloadErrors, getPreloadError, getPreloadError);
+  if (error === null) return null;
+  return (
+    <aside className="preload-recovery" role="alert">
+      <div>
+        <strong>A screen update could not be loaded</strong>
+        <p>You can keep working. Reload when you are ready; unsaved changes may be lost.</p>
+      </div>
+      <div className="recovery-actions">
+        <button type="button" onClick={() => window.location.reload()}>Reload</button>
+        <button type="button" onClick={clearPreloadError}>Keep working</button>
+      </div>
+    </aside>
+  );
+}
+
+function ApplicationRecovery(): React.ReactElement {
+  const location = useLocation();
+  const publicRoute = inviteTokenFromPath(location.pathname) !== null ||
+    accountActionTokenFromPath(location.pathname) !== null;
+  return (
+    <RouteErrorBoundary
+      resetKey={`${location.pathname}${location.search}${location.hash}`}
+      onRetry={retryFailedScreens}
+    >
+      {publicRoute ? <PreloadRecoveryNotice /> : null}
+      <Application />
+    </RouteErrorBoundary>
+  );
+}
 
 type TrainingRouteView =
   | "runs"
@@ -147,6 +202,7 @@ interface AuthenticatedLayoutProps {
   logoutError: string | null;
   redirecting: boolean;
   routeContext: ApplicationRouteContext;
+  recoveryKey: string;
 }
 
 function AuthenticatedLayout({
@@ -165,6 +221,7 @@ function AuthenticatedLayout({
   logoutError,
   redirecting,
   routeContext,
+  recoveryKey,
 }: AuthenticatedLayoutProps): React.ReactElement {
   return (
     <AccessProvider value={access}>
@@ -198,25 +255,28 @@ function AuthenticatedLayout({
             Signing out…
           </div>
         ) : null}
-        <Suspense
-          fallback={(
-            <main id="main-content" tabIndex={-1}>
-              <div className="status" role="status" aria-live="polite">
-                Loading workspace…
-              </div>
-            </main>
-          )}
-        >
-          {redirecting ? (
-            <main id="main-content" tabIndex={-1}>
-              <div className="status" role="status" aria-live="polite">
-                Opening workspace…
-              </div>
-            </main>
-          ) : (
-            <Outlet context={routeContext} />
-          )}
-        </Suspense>
+        <RouteErrorBoundary resetKey={recoveryKey} onRetry={retryFailedScreens}>
+          <PreloadRecoveryNotice />
+          <Suspense
+            fallback={(
+              <main id="main-content" tabIndex={-1}>
+                <div className="status" role="status" aria-live="polite">
+                  Loading workspace…
+                </div>
+              </main>
+            )}
+          >
+            {redirecting ? (
+              <main id="main-content" tabIndex={-1}>
+                <div className="status" role="status" aria-live="polite">
+                  Opening workspace…
+                </div>
+              </main>
+            ) : (
+              <Outlet context={routeContext} />
+            )}
+          </Suspense>
+        </RouteErrorBoundary>
       </AppShell>
     </AccessProvider>
   );
@@ -361,7 +421,7 @@ function describeRouteState(search: string, hash: string): string {
 export default function App(): React.ReactElement {
   return (
     <BrowserRouter>
-      <Application />
+      <ApplicationRecovery />
     </BrowserRouter>
   );
 }
@@ -376,6 +436,8 @@ function Application(): React.ReactElement {
   const [logoutError, setLogoutError] = useState<string | null>(null);
   const logoutInFlightRef = useRef(false);
   const [sessionReady, setSessionReady] = useState(false);
+  const [sessionLoadError, setSessionLoadError] = useState(false);
+  const [sessionRetryAttempt, setSessionRetryAttempt] = useState(0);
   const [justRegistered, setJustRegistered] = useState(false);
   const [onboarded, setOnboarded] = useState(false);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<number | null>(null);
@@ -565,6 +627,7 @@ function Application(): React.ReactElement {
     setAuthed(authenticated);
     setLogoutError(null);
     setSessionReady(!authenticated);
+    setSessionLoadError(false);
     setJustRegistered(false);
     setOnboarded(false);
     setActiveWorkspaceId(null);
@@ -749,6 +812,7 @@ function Application(): React.ReactElement {
     let cancelled = false;
     const generation = sessionGenerationRef.current;
     setSessionReady(false);
+    setSessionLoadError(false);
 
     async function loadCurrentWorkspace(): Promise<void> {
       try {
@@ -804,13 +868,14 @@ function Application(): React.ReactElement {
           }
           pendingWorkspaceSwitchRef.current = false;
         }
-      } catch {
+        setSessionReady(true);
+      } catch (caught) {
         if (!cancelled && generation === sessionGenerationRef.current) {
-          publishSessionChange(false);
-        }
-      } finally {
-        if (!cancelled && generation === sessionGenerationRef.current) {
-          setSessionReady(true);
+          if (caught instanceof ApiError && caught.status === 401) {
+            publishSessionChange(false);
+          } else {
+            setSessionLoadError(true);
+          }
         }
       }
     }
@@ -819,7 +884,7 @@ function Application(): React.ReactElement {
     return () => {
       cancelled = true;
     };
-  }, [authed, sessionGeneration]);
+  }, [authed, sessionGeneration, sessionRetryAttempt]);
 
   useEffect(() => {
     if (!authed || !sessionReady) {
@@ -1358,6 +1423,26 @@ function Application(): React.ReactElement {
     };
   }, [authed, selectedDocumentId, sessionReady, setBusy, setError, workspaceRoute]);
 
+  const sessionConnectionFailure = (
+    <main id="main-content" className="route-error" tabIndex={-1}>
+      <section role="alert" aria-labelledby="session-connection-error-title">
+        <h1 id="session-connection-error-title">Cannot reach server</h1>
+        <p>We could not load your session or workspace. You have not been signed out. Try again when the server is available.</p>
+        <div className="recovery-actions">
+          <button
+            type="button"
+            onClick={() => {
+              setSessionLoadError(false);
+              setSessionRetryAttempt((attempt) => attempt + 1);
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      </section>
+    </main>
+  );
+
   // Password activation/reset is public because the user may not have a usable
   // account yet. Completion adopts the returned cookie session and the session
   // subscription reloads the authenticated shell.
@@ -1384,6 +1469,7 @@ function Application(): React.ReactElement {
   // that gate.
   if (inviteToken !== null) {
     if (authed && !sessionReady) {
+      if (sessionLoadError) return sessionConnectionFailure;
       return (
         <main id="main-content" tabIndex={-1}>
           <div className="status" role="status" aria-live="polite">
@@ -1429,11 +1515,13 @@ function Application(): React.ReactElement {
   if (!sessionReady) {
     return (
       <div className="app-shell">
-        <main id="main-content" tabIndex={-1}>
-          <div className="status" role="status" aria-live="polite">
-            Loading workspace…
-          </div>
-        </main>
+        {sessionLoadError ? sessionConnectionFailure : (
+          <main id="main-content" tabIndex={-1}>
+            <div className="status" role="status" aria-live="polite">
+              Loading workspace…
+            </div>
+          </main>
+        )}
       </div>
     );
   }
@@ -1630,6 +1718,22 @@ function Application(): React.ReactElement {
           {!projectsReady || loading ? "Loading project…" : "Project not found."}
         </div>
       </main>
+    ) : !platformProjectReady && !platform.loading && platform.error !== null ? (
+      <main id="main-content" className="route-error" tabIndex={-1}>
+        <section role="alert" aria-labelledby="project-load-error-title">
+          <h1 id="project-load-error-title">Project could not be loaded</h1>
+          <p>{platform.error || "The project resources could not be loaded. Please try again."}</p>
+          <div className="recovery-actions">
+            <button
+              type="button"
+              disabled={platform.loading || platform.busy}
+              onClick={() => void platform.reload()}
+            >
+              Retry
+            </button>
+          </div>
+        </section>
+      </main>
     ) : !platformProjectReady ? (
       <main id="main-content" tabIndex={-1}>
         <div className="status" role="status" aria-live="polite">
@@ -1666,6 +1770,10 @@ function Application(): React.ReactElement {
           if (activeWorkspaceId !== null) await loadProjects(routedProject.id, true, activeWorkspaceId);
         }}
         onDocumentsImported={() => loadProjectData(routedProject.id, true, "all")}
+        onEvidenceChanged={async () => {
+          await loadProjectData(routedProject.id, true, "all");
+          if (activeWorkspaceId !== null) await loadProjects(routedProject.id, true, activeWorkspaceId);
+        }}
         dialog={platformDialog}
         onDialogChange={setPlatformDialog}
         onProjectSelect={(projectId, nextTab) => {
@@ -1695,7 +1803,10 @@ function Application(): React.ReactElement {
                 onCreateGuideline={platform.addGuideline}
                 onCreateTask={async (draft) => {
                   await platform.addTask(draft);
-                  if (activeWorkspaceId !== null) await loadProjects(routedProject.id, true, activeWorkspaceId);
+                  if (activeWorkspaceId !== null) {
+                    // The task is saved; the store reports project-list refresh errors separately.
+                    await loadProjects(routedProject.id, true, activeWorkspaceId).catch(() => undefined);
+                  }
                 }}
                 onPrepareTrainingData={platform.prepareTrainingData}
               />
@@ -1982,6 +2093,13 @@ function Application(): React.ReactElement {
             logoutError={logoutError}
             redirecting={routeRedirect !== null}
             routeContext={routeContext}
+            recoveryKey={JSON.stringify([
+              activeWorkspaceId,
+              sessionGeneration,
+              location.pathname,
+              location.search,
+              location.hash,
+            ])}
           />
           )}
         >

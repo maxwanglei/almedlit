@@ -462,7 +462,6 @@ export default function EvidenceBlockCanvas({
     // earlier render here could overwrite a newer navigation before it settles.
     if (selectedAssignmentId !== undefined) return;
     onActiveAssignmentChange?.(selectedAssignment);
-    return () => onActiveAssignmentChange?.(null);
   }, [onActiveAssignmentChange, selectedAssignment, selectedAssignmentId]);
   const structureVersionId =
     selectedAssignment?.structure_version_id ?? document.active_structure_version_id;
@@ -1246,7 +1245,7 @@ export default function EvidenceBlockCanvas({
           <span className="eb-target-text">
             {selectedTargetOption?.text ??
               (allowAssignmentlessEditing
-                ? "Configure and activate an evidence target in Project Setup before annotation."
+                ? "Configure and activate an evidence target in the project's Tasks → Evidence setup section before annotation."
                 : "A manager must assign and activate a target before annotation.")}
           </span>
           {selectedTargetOption?.guidance ||

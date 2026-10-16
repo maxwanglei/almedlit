@@ -4,10 +4,8 @@ import type { WorkspaceRole } from "@/types/api";
 
 import {
   createCycle,
-  createDatasetWithVersion,
   createGuidelineWithRevision,
   createRound,
-  createTaskWithVersion,
   createTrainingDataset,
   launchTrainingRun,
   loadPlatformProject,
@@ -23,6 +21,7 @@ import {
   type TrainingDataDraft,
 } from "./api";
 import type { TrainingLaunchDraft } from "./TrainingScreen";
+import { useResourceCreation } from "./useResourceCreation";
 import {
   EMPTY_PLATFORM_PROJECT_DATA,
   type PlatformProjectData,
@@ -58,7 +57,10 @@ export function usePlatformProject(
   } | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [loadError, setError] = useState<{
+    contextKey: string;
+    message: string;
+  } | null>(null);
   const loadRequestIdRef = useRef(0);
   const mutationRequestIdRef = useRef(0);
   const rolesKey = effectiveRoles?.join(",") ?? "";
@@ -70,6 +72,8 @@ export function usePlatformProject(
   const data = loadedData?.contextKey === contextKey
     ? loadedData.data
     : EMPTY_PLATFORM_PROJECT_DATA;
+  const error = loadError?.contextKey === contextKey ? loadError.message : null;
+  const resourceCreation = useResourceCreation(projectId, workspaceId);
 
   const reload = useCallback(async (): Promise<void> => {
     if (contextKeyRef.current !== contextKey) return;
@@ -99,7 +103,10 @@ export function usePlatformProject(
       }
     } catch (caught) {
       if (isCurrentRequest()) {
-        setError(caught instanceof Error ? caught.message : "Unable to load project resources.");
+        setError({
+          contextKey,
+          message: caught instanceof Error ? caught.message : "Unable to load project resources.",
+        });
       }
     } finally {
       if (isCurrentRequest()) {
@@ -135,7 +142,7 @@ export function usePlatformProject(
         const message =
           caught instanceof Error ? caught.message : "The project update could not be completed.";
         if (isCurrentRequest()) {
-          setError(message);
+          setError({ contextKey, message });
         }
         throw caught;
       } finally {
@@ -171,7 +178,7 @@ export function usePlatformProject(
             ? caught.message
             : "The project modules could not be updated.";
         if (isCurrentRequest()) {
-          setError(message);
+          setError({ contextKey, message });
         }
         throw caught;
       } finally {
@@ -194,12 +201,12 @@ export function usePlatformProject(
     busy,
     error,
     reload,
-    addDataset: (draft) => mutate((id) => createDatasetWithVersion(id, draft)),
+    addDataset: (draft) => mutate(() => resourceCreation.createDataset(draft)),
     addCycle: (draft) => mutate((id) => createCycle(id, draft)),
     addRound: (draft) => mutate((id) => createRound(id, draft)),
     scoreFeedback: (draft) => mutate((id) => scoreFeedbackRun(id, draft)),
     addGuideline: (draft) => mutate((id) => createGuidelineWithRevision(id, draft)),
-    addTask: (draft) => mutate((id) => createTaskWithVersion(id, draft)),
+    addTask: (draft) => mutate(() => resourceCreation.createTask(draft)),
     prepareTrainingData: (draft) => mutate((id) => createTrainingDataset(id, draft)),
     launch: (draft) => mutate((id) => launchTrainingRun(id, draft, data)),
     setModules,

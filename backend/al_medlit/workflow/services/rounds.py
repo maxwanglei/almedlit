@@ -28,6 +28,7 @@ from .common import (
     _validate_task_input,
     _validate_task_output,
 )
+from .holdouts import lock_holdout_policy, validate_annotation_assistance
 from .workspace_training import (
     _workspace_projects_with_modules,
 )
@@ -295,6 +296,20 @@ def create_annotation_round(
 
     if _uses_document_entities(task):
         _validate_document_entity_source(db, task, dataset, selection_set)
+
+    if data.assistance_policy != "blind":
+        lock_holdout_policy(db, data.project_id)
+        source_query = db.query(models.DatasetItem).filter(
+            models.DatasetItem.project_id == data.project_id,
+            models.DatasetItem.dataset_version_id == dataset.id,
+        )
+        if selection_set is not None:
+            selected_ids = {selected["dataset_item_id"] for selected in selection_set.items}
+            source_query = source_query.filter(models.DatasetItem.id.in_(selected_ids))
+        source_items = source_query.all()
+        if selection_set is not None and len(source_items) != len(selected_ids):
+            raise ValidationError("Selected items must belong to the round's pinned source dataset")
+        validate_annotation_assistance(db, source_items, task.id, data.assistance_policy)
 
     sequence = _next_sequence(
         db,
@@ -585,6 +600,12 @@ def list_round_work_items(
         raise ValidationError(
             "Annotation round item lineage does not match its pinned dataset version"
         )
+    validate_annotation_assistance(
+        db,
+        [item for _round_item, item in work_items],
+        annotation_round.task_version_id,
+        annotation_round.assistance_policy,
+    )
     return work_items
 
 
@@ -704,6 +725,8 @@ def transition_annotation_round(
         # Acquire the explicit assignees in canonical order, then refresh and
         # lock the round so an offboarding transaction cannot race this open.
         _lock_and_validate_active_round_annotators(db, candidate_annotator_ids)
+        if candidate.assistance_policy != "blind":
+            lock_holdout_policy(db, project_id)
     annotation_round = (
         db.query(models.AnnotationRound)
         .filter(
@@ -742,6 +765,8 @@ def transition_annotation_round(
         )
         if has_items is None:
             raise ValidationError("An annotation round must contain items before it opens")
+        if annotation_round.assistance_policy != "blind":
+            list_round_work_items(db, project_id, annotation_round.id)
         annotation_round.opened_at = datetime.now(UTC)
     elif status == "closed":
         round_item_ids = {
@@ -788,8 +813,33 @@ def create_annotation_decision(
         data.project_id,
         "Annotation round",
     )
-    if annotation_round.status != "open":
-        raise ConflictError("Annotation decisions may only be added to an open round")
+    is_adjudication = data.decision_kind == "adjudication"
+    if is_adjudication:
+        _require_actor_role(
+            db,
+            project_id=data.project_id,
+            actor=actor,
+            minimum_role="manager",
+        )
+    elif (
+        not annotation_round.open_to_all_annotators
+        and actor.id not in annotation_round.annotator_user_ids
+    ):
+        raise ConflictError("Current user is not assigned to this annotation round")
+    if annotation_round.status != "open" and not (
+        is_adjudication and annotation_round.status == "closed"
+    ):
+        raise ConflictError(
+            "Annotation decisions require an open round; only adjudication may follow closure"
+        )
+    if annotation_round.assistance_policy != "blind":
+        lock_holdout_policy(db, data.project_id)
+        source_item = _scoped(
+            db, models.DatasetItem, item.dataset_item_id, data.project_id, "Source item"
+        )
+        validate_annotation_assistance(
+            db, [source_item], annotation_round.task_version_id, annotation_round.assistance_policy
+        )
     task_version = _scoped(
         db,
         models.TaskVersion,
@@ -809,18 +859,6 @@ def create_annotation_decision(
         if source_item.dataset_version_id != annotation_round.dataset_version_id:
             raise ValidationError("The paper must belong to the round's pinned source dataset")
         _validate_document_entity_output(task_version, source_item, data.output)
-    if (
-        not annotation_round.open_to_all_annotators
-        and actor.id not in annotation_round.annotator_user_ids
-    ):
-        raise ConflictError("Current user is not assigned to this annotation round")
-    if data.decision_kind == "adjudication":
-        _require_actor_role(
-            db,
-            project_id=data.project_id,
-            actor=actor,
-            minimum_role="manager",
-        )
     if data.supersedes_decision_id is not None:
         prior = _scoped(
             db,
@@ -867,13 +905,6 @@ def create_round_submission(
         data.project_id,
         "Annotation round",
     )
-    if annotation_round.status != "open":
-        raise ConflictError("Only open annotation rounds accept submissions")
-    if (
-        not annotation_round.open_to_all_annotators
-        and actor.id not in annotation_round.annotator_user_ids
-    ):
-        raise ConflictError("Current user is not assigned to this annotation round")
     if len(data.decision_ids) != len(set(data.decision_ids)):
         raise ValidationError("decision_ids must be unique")
     decisions = [
@@ -886,8 +917,34 @@ def create_round_submission(
         )
         for decision_id in data.decision_ids
     ]
+    adjudication_only = bool(decisions) and all(
+        decision.decision_kind == "adjudication" for decision in decisions
+    )
+    if any(decision.decision_kind == "adjudication" for decision in decisions):
+        _require_actor_role(
+            db,
+            project_id=data.project_id,
+            actor=actor,
+            minimum_role="manager",
+        )
+    if annotation_round.status != "open" and not (
+        adjudication_only and annotation_round.status == "closed"
+    ):
+        raise ConflictError(
+            "Only open rounds accept annotation submissions; "
+            "closed rounds accept adjudication submissions"
+        )
+    if (
+        not adjudication_only
+        and not annotation_round.open_to_all_annotators
+        and actor.id not in annotation_round.annotator_user_ids
+    ):
+        raise ConflictError("Current user is not assigned to this annotation round")
+    if annotation_round.assistance_policy != "blind":
+        lock_holdout_policy(db, data.project_id)
     if len({decision.round_item_id for decision in decisions}) != len(decisions):
         raise ValidationError("A submission must contain only one current decision per item")
+    assisted_items = []
     for decision in decisions:
         item = _scoped(db, models.RoundItem, decision.round_item_id, data.project_id, "Round item")
         if (
@@ -904,6 +961,15 @@ def create_round_submission(
         )
         if superseded is not None:
             raise ValidationError("Submissions cannot include a superseded annotation decision")
+        if annotation_round.assistance_policy != "blind":
+            assisted_items.append(
+                _scoped(
+                    db, models.DatasetItem, item.dataset_item_id, data.project_id, "Source item"
+                )
+            )
+    validate_annotation_assistance(
+        db, assisted_items, annotation_round.task_version_id, annotation_round.assistance_policy
+    )
     latest = (
         db.query(func.max(models.RoundSubmission.sequence))
         .filter(

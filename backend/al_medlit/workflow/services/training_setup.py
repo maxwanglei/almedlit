@@ -157,16 +157,17 @@ def ensure_trusted_training_recipe_version(
         .one_or_none()
     )
     if recipe is None:
-        recipe = create_training_recipe(
-            db,
-            schemas.TrainingRecipeCreate(
-                project_id=project_id,
-                key=descriptor.key,
-                name=descriptor.label,
-                description=descriptor.description,
-            ),
-            actor,
+        # Keep the project lock until its first version is committed, so a
+        # concurrent bind cannot race the version's content-hash check.
+        recipe = models.TrainingRecipe(
+            project_id=project_id,
+            key=descriptor.key,
+            name=descriptor.label,
+            description=descriptor.description,
+            created_by_user_id=actor.id,
         )
+        db.add(recipe)
+        db.flush()
 
     version_data = schemas.TrainingRecipeVersionCreate(
         project_id=project_id,

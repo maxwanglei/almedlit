@@ -83,6 +83,22 @@ def _canonical_hash(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _task_output_hash(task: models.TaskVersion, output: Any) -> str:
+    """Compare paper entities without treating their entry order as a label.
+
+    Normalize only the comparison value, preserving immutable decision content.
+    Full entity objects and duplicate counts remain significant, as do arrays
+    in other task outputs or nested entity attributes.
+    """
+    if (
+        task.annotation_ui.get("preset") == "document_entities"
+        and isinstance(output, dict)
+        and isinstance(output.get("entities"), list)
+    ):
+        output = {**output, "entities": sorted(output["entities"], key=_canonical_hash)}
+    return _canonical_hash(output)
+
+
 def _reject_sensitive_training_config(value: Any, *, path: str = "config") -> None:
     if isinstance(value, dict):
         for raw_key, nested in value.items():

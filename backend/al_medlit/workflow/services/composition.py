@@ -25,6 +25,7 @@ from .common import (
 from .holdouts import source_split_constraints, validate_source_split_assignments
 from .labels import (
     _compose_label_sets,
+    _validate_training_label_set,
     create_imported_label_set_from_field,
     create_split_map,
     create_training_dataset_version,
@@ -213,6 +214,7 @@ def compose_training_dataset_version(
             raise ValidationError(
                 "The selected label set must use the selected dataset and task versions"
             )
+        _validate_training_label_set(label_set)
         if not label_set.labels:
             raise ValidationError("The selected label set is empty")
         labeled_items = [item for item in items if item.stable_key in label_set.labels]
@@ -230,14 +232,27 @@ def compose_training_dataset_version(
                 + ", ".join(incomplete_groups[:5])
             )
 
+    from .preparation import _assisted_label_set_keys, _prepared_provenance_items
+
+    split_constraints = source_split_constraints(
+        db, dataset_version, items, data.task_version_id
+    )
+    assisted_keys = _assisted_label_set_keys(db, label_set)[0] if label_set is not None else set()
+    provenance_items = _prepared_provenance_items(db, dataset_version)
+    for item in labeled_items:
+        if (
+            item.stable_key in assisted_keys
+            or provenance_items.get(item.stable_key, {}).get("model_assisted") is True
+        ):
+            split_constraints.setdefault(
+                item.stable_key, {"train", "validation", "test", "pool"},
+            ).discard("test")
     assignments, split_counts, group_count = _deterministic_group_split(
         labeled_items,
         seed=data.seed,
         train_percent=data.train_percent,
         validation_percent=data.validation_percent,
-        split_constraints=source_split_constraints(
-            db, dataset_version, items, data.task_version_id
-        ),
+        split_constraints=split_constraints,
     )
     # Keep complete source governance while leaving unlabeled groups for future rounds.
     assignments.update({

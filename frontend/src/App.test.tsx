@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import type { ReactNode } from "react";
+import { Component, type ReactNode, useSyncExternalStore } from "react";
 import {
   act,
   cleanup,
@@ -12,7 +12,9 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
+import { ApiError } from "@/api/client";
 import { publishSessionChange, subscribeSessionChanges } from "@/auth/session";
+import { clearPreloadError, registerPreloadErrorHandler } from "@/lib/preloadErrorRecovery";
 
 const mocks = vi.hoisted(() => {
   const projectState = {
@@ -42,6 +44,10 @@ const mocks = vi.hoisted(() => {
   const evidenceStore = Object.assign(vi.fn(), {
     getState: vi.fn(() => evidenceState),
   });
+  const platformState: {
+    current: { enabled: boolean; projectId: number; loading: boolean; error: string | null };
+  } = { current: { enabled: false, projectId: 0, loading: false, error: null } };
+  const platformListeners = new Set<() => void>();
   return {
     evidenceState,
     evidenceStore,
@@ -55,10 +61,22 @@ const mocks = vi.hoisted(() => {
     usePlatformProject: vi.fn(),
     projectState,
     projectStore,
+    renderFailures: { projects: false, annotator: false, accountAction: false },
+    uncaughtRenderError: vi.fn(),
+    platformState,
+    platformListeners,
+    platformReload: vi.fn().mockResolvedValue(undefined),
+    platformAddTask: vi.fn().mockResolvedValue(undefined),
+    getPlatformSnapshot: () => platformState.current,
+    subscribePlatform: (listener: () => void) => {
+      platformListeners.add(listener);
+      return () => { platformListeners.delete(listener); };
+    },
   };
 });
 
-vi.mock("@/api/client", () => ({
+vi.mock("@/api/client", async (importOriginal) => ({
+  ...await importOriginal<Record<string, unknown>>(),
   getAnnotationWorkbench: mocks.getAnnotationWorkbench,
   getMe: mocks.getMe,
   getWorkspaceCapabilities: mocks.getWorkspaceCapabilities,
@@ -92,15 +110,16 @@ vi.mock("@/pages/AnnotatorWorkspace", () => ({
     moduleSwitcher?: ReactNode;
     workspaceSwitcher?: ReactNode;
     roundContexts?: Array<{ round: { id: number } }>;
-  }) => (
-    <section
+  }) => {
+    if (mocks.renderFailures.annotator) throw new Error("Annotation screen exploded");
+    return <section
       aria-label="Mock annotator workspace"
       data-round-contexts={roundContexts?.map((item) => item.round.id).join(",")}
     >
       {moduleSwitcher}
       {workspaceSwitcher}
-    </section>
-  ),
+    </section>;
+  },
 }));
 vi.mock("@/pages/ManagerConsole", () => ({
   default: ({
@@ -137,9 +156,10 @@ vi.mock("@/pages/AcceptInvitePage", () => ({
   ),
 }));
 vi.mock("@/pages/AccountActionPage", () => ({
-  default: ({ token }: { token: string }) => (
-    <main aria-label="Mock account action" data-token={token} />
-  ),
+  default: ({ token }: { token: string }) => {
+    if (mocks.renderFailures.accountAction) throw new Error("Account screen exploded");
+    return <main aria-label="Mock account action" data-token={token} />;
+  },
 }));
 vi.mock("@/pages/OnboardingPresetPicker", () => ({
   default: ({ onDone }: { onDone: () => Promise<void> }) => (
@@ -153,10 +173,16 @@ vi.mock("@/platform/ProjectPlatform", () => ({
     project,
     moduleSwitcher,
     onUpdateProject,
+    onDialogChange,
+    dialogContent,
+    onEvidenceChanged,
   }: {
     project: { id: number; name: string };
     moduleSwitcher?: ReactNode;
     onUpdateProject: (payload: { name: string }) => Promise<void>;
+    onDialogChange: (kind: "task") => void;
+    dialogContent?: ReactNode;
+    onEvidenceChanged: () => Promise<void>;
   }) => (
     <section
       aria-label="Mock project platform"
@@ -164,6 +190,9 @@ vi.mock("@/platform/ProjectPlatform", () => ({
     >
       {project.name}
       {moduleSwitcher}
+      <button type="button" onClick={() => onDialogChange("task")}>Define mock task</button>
+      {dialogContent}
+      <button type="button" onClick={() => void onEvidenceChanged()}>Refresh mock evidence</button>
       <button
         type="button"
         onClick={() => void onUpdateProject({ name: `${project.name} updated` })}
@@ -174,11 +203,12 @@ vi.mock("@/platform/ProjectPlatform", () => ({
   ),
 }));
 vi.mock("@/platform/ProjectsWorkspace", () => ({
-  default: () => (
-    <section aria-label="Mock projects directory">
+  default: () => {
+    if (mocks.renderFailures.projects) throw new Error("Projects screen exploded");
+    return <section aria-label="Mock projects directory">
       <h1>Projects</h1>
-    </section>
-  ),
+    </section>;
+  },
 }));
 vi.mock("@/platform/RoundWorkbench", () => ({
   default: ({
@@ -267,10 +297,11 @@ vi.mock("@/platform/usePlatformProject", () => ({
     ...rest: unknown[]
   ) => {
     mocks.usePlatformProject(projectId, ...rest);
+    const snapshot = useSyncExternalStore(mocks.subscribePlatform, mocks.getPlatformSnapshot);
     return {
     data: {
       projectModules: {
-        project_id: projectId ?? 0,
+        project_id: snapshot.enabled ? snapshot.projectId : projectId ?? 0,
         selected: [],
         effective: [],
         workspace_capabilities: [],
@@ -300,15 +331,15 @@ vi.mock("@/platform/usePlatformProject", () => ({
       environments: [],
       storagePolicies: [],
     },
-    loading: false,
+    loading: snapshot.enabled && snapshot.loading,
     busy: false,
-    error: null,
-    reload: vi.fn(),
+    error: snapshot.enabled ? snapshot.error : null,
+    reload: snapshot.enabled ? mocks.platformReload : vi.fn(),
     addDataset: vi.fn(),
     addCycle: vi.fn(),
     addRound: vi.fn(),
     addGuideline: vi.fn(),
-    addTask: vi.fn(),
+    addTask: mocks.platformAddTask,
     prepareTrainingData: vi.fn(),
     launch: vi.fn(),
     enablePlatform: vi.fn(),
@@ -359,10 +390,21 @@ function installStorage(): void {
   });
 }
 
+function setPlatformState(updates: Partial<typeof mocks.platformState.current>): void {
+  mocks.platformState.current = { ...mocks.platformState.current, ...updates };
+  mocks.platformListeners.forEach((listener) => listener());
+}
+
 beforeEach(() => {
   installStorage();
   window.history.replaceState(null, "", "/");
   vi.clearAllMocks();
+  mocks.platformReload.mockReset().mockResolvedValue(undefined);
+  mocks.platformAddTask.mockReset().mockResolvedValue(undefined);
+  setPlatformState({ enabled: false, projectId: 0, loading: false, error: null });
+  mocks.renderFailures.projects = false;
+  mocks.renderFailures.annotator = false;
+  mocks.renderFailures.accountAction = false;
   mocks.getMe.mockResolvedValue(me);
   mocks.logout.mockResolvedValue(undefined);
   mocks.getWorkspaceCapabilities.mockImplementation(async (workspaceId: number) => ({
@@ -436,8 +478,449 @@ beforeEach(() => {
   });
 });
 
+class LastResortBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error): { error: Error } {
+    return { error };
+  }
+
+  componentDidCatch(error: Error): void {
+    mocks.uncaughtRenderError(error.message);
+  }
+
+  render(): ReactNode {
+    return this.state.error
+      ? <main aria-label="Uncontained App error">{this.state.error.message}</main>
+      : this.props.children;
+  }
+}
+
+async function waitForScreenFailure(): Promise<void> {
+  await waitFor(() => expect(
+    screen.queryByRole("heading", { name: "This screen could not be opened" })
+      ?? screen.queryByLabelText("Uncontained App error"),
+  ).toBeTruthy());
+  expect(mocks.uncaughtRenderError).not.toHaveBeenCalled();
+  expect(screen.getByRole("alert")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Reload" })).toBeTruthy();
+}
+
+describe("App screen error recovery", () => {
+  beforeEach(() => {
+    clearPreloadError();
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    clearPreloadError();
+    vi.restoreAllMocks();
+  });
+
+  it("keeps the authenticated shell after a lazy screen crashes and retries without resetting the session", async () => {
+    window.localStorage.setItem("al-medlit.currentAnnotatorId", "alice");
+    const sessionChanged = vi.fn();
+    const unsubscribe = subscribeSessionChanges(sessionChanged);
+    try {
+      render(<LastResortBoundary><App /></LastResortBoundary>);
+      await screen.findByLabelText("Mock annotator workspace");
+      const projectsLink = screen.getByRole("link", { name: "Projects" });
+      const sessionReads = mocks.getMe.mock.calls.length;
+      mocks.renderFailures.projects = true;
+
+      fireEvent.click(projectsLink);
+
+      await waitForScreenFailure();
+      expect(screen.getByRole("link", { name: "Projects" })).toBe(projectsLink);
+      expect(screen.getByRole("link", { name: "My Work" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Sign out" })).toBeTruthy();
+      mocks.renderFailures.projects = false;
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+      expect(await screen.findByLabelText("Mock projects directory")).toBeTruthy();
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(screen.getByRole("link", { name: "Projects" })).toBe(projectsLink);
+      expect(mocks.getMe).toHaveBeenCalledTimes(sessionReads);
+      expect(mocks.projectState.reset).not.toHaveBeenCalled();
+      expect(mocks.evidenceState.reset).not.toHaveBeenCalled();
+      expect(mocks.logout).not.toHaveBeenCalled();
+      expect(sessionChanged).not.toHaveBeenCalled();
+      expect(window.localStorage.getItem("al-medlit.currentAnnotatorId")).toBe("alice");
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it.each([
+    { destination: "/my-work", screenName: "Mock annotator workspace" },
+    { destination: "/projects?status=ready", screenName: "Mock projects directory" },
+    { destination: "/projects#details", screenName: "Mock projects directory" },
+  ])("recovers on navigation to $destination without requiring Retry", async ({ destination, screenName }) => {
+    window.history.replaceState(null, "", "/projects");
+    mocks.renderFailures.projects = true;
+    render(<LastResortBoundary><App /></LastResortBoundary>);
+    await waitForScreenFailure();
+    mocks.renderFailures.projects = false;
+
+    if (destination === "/my-work") {
+      fireEvent.click(screen.getByRole("link", { name: "My Work" }));
+    } else {
+      act(() => {
+        window.history.pushState(null, "", destination);
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      });
+    }
+
+    expect(await screen.findByLabelText(screenName)).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(`${window.location.pathname}${window.location.search}${window.location.hash}`).toBe(destination);
+  });
+
+  it("recovers at the same route after changing workspace", async () => {
+    window.history.replaceState(null, "", "/my-work");
+    mocks.getMe.mockResolvedValue({
+      ...me,
+      memberships: me.memberships.map((membership) => ({ ...membership, role: "admin" })),
+    });
+    mocks.renderFailures.annotator = true;
+    render(<LastResortBoundary><App /></LastResortBoundary>);
+    await waitForScreenFailure();
+    mocks.renderFailures.annotator = false;
+
+    fireEvent.change(screen.getByLabelText("Workspace"), { target: { value: "20" } });
+
+    expect(await screen.findByLabelText("Mock annotator workspace")).toBeTruthy();
+    expect((screen.getByLabelText("Workspace") as HTMLSelectElement).value).toBe("20");
+    expect(window.location.pathname).toBe("/my-work");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("recovers a public lazy account screen while preserving its secure-link URL", async () => {
+    window.history.replaceState(null, "", "/account-actions/reset-token?source=email#reset");
+    mocks.getMe.mockRejectedValue(new ApiError(401, "No active session"));
+    mocks.renderFailures.accountAction = true;
+    render(<LastResortBoundary><App /></LastResortBoundary>);
+    await waitForScreenFailure();
+
+    mocks.renderFailures.accountAction = false;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect((await screen.findByLabelText("Mock account action")).getAttribute("data-token")).toBe("reset-token");
+    expect(window.location.pathname).toBe("/account-actions/reset-token");
+    expect(window.location.search).toBe("?source=email");
+    expect(window.location.hash).toBe("#reset");
+    expect(screen.queryByRole("button", { name: "Register mock user" })).toBeNull();
+  });
+
+  it("offers preload recovery without replacing a healthy screen or resetting its session", async () => {
+    const unregister = registerPreloadErrorHandler();
+    try {
+      render(<LastResortBoundary><App /></LastResortBoundary>);
+      const workspace = await screen.findByLabelText("Mock annotator workspace");
+      const projectsLink = screen.getByRole("link", { name: "Projects" });
+      const sessionReads = mocks.getMe.mock.calls.length;
+      const preloadFailure = new Event("vite:preloadError", { cancelable: true });
+      Object.defineProperty(preloadFailure, "payload", { value: new Error("Loading screen chunk failed") });
+
+      act(() => { window.dispatchEvent(preloadFailure); });
+
+      expect(preloadFailure.defaultPrevented).toBe(true);
+      expect(await screen.findByText("A screen update could not be loaded")).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Reload" })).toBeTruthy();
+      expect(screen.getByLabelText("Mock annotator workspace")).toBe(workspace);
+      expect(screen.getByRole("link", { name: "Projects" })).toBe(projectsLink);
+      fireEvent.click(screen.getByRole("button", { name: "Keep working" }));
+
+      expect(screen.queryByText("A screen update could not be loaded")).toBeNull();
+      expect(screen.getByLabelText("Mock annotator workspace")).toBe(workspace);
+      expect(mocks.getMe).toHaveBeenCalledTimes(sessionReads);
+      expect(mocks.projectState.reset).not.toHaveBeenCalled();
+      expect(mocks.evidenceState.reset).not.toHaveBeenCalled();
+      expect(mocks.logout).not.toHaveBeenCalled();
+    } finally {
+      unregister();
+    }
+  });
+});
+
 afterEach(() => {
   cleanup();
+});
+
+describe("App session probe recovery", () => {
+  const deepLink = "/projects?folder=screening#evidence";
+
+  it.each([
+    { label: "getMe 502", stage: "getMe", error: new ApiError(502, "Bad gateway") },
+    { label: "getMe network error", stage: "getMe", error: new TypeError("Failed to fetch") },
+    { label: "capabilities 502", stage: "capabilities", error: new ApiError(502, "Bad gateway") },
+    { label: "capabilities 403", stage: "capabilities", error: new ApiError(403, "Forbidden") },
+  ])("preserves the session and deep link after $label, then retries successfully", async ({ stage, error }) => {
+    window.history.replaceState(null, "", deepLink);
+    window.localStorage.setItem("al-medlit.currentAnnotatorId", "alice");
+    const probe = stage === "getMe" ? mocks.getMe : mocks.getWorkspaceCapabilities;
+    probe.mockRejectedValueOnce(error);
+    const sessionChanged = vi.fn();
+    const unsubscribe = subscribeSessionChanges(sessionChanged);
+    try {
+      render(<App />);
+      await waitFor(() => expect(
+        screen.queryByRole("heading", { name: "Cannot reach server" })
+          ?? screen.queryByRole("button", { name: "Register mock user" }),
+      ).toBeTruthy());
+
+      expect(sessionChanged).not.toHaveBeenCalled();
+      expect(screen.getByRole("heading", { name: "Cannot reach server" })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Register mock user" })).toBeNull();
+      expect(window.localStorage.getItem("al-medlit.currentAnnotatorId")).toBe("alice");
+      expect(window.localStorage.getItem("al_medlit_session_event")).toBeNull();
+      expect(`${window.location.pathname}${window.location.search}${window.location.hash}`).toBe(deepLink);
+      expect(mocks.projectState.reset).not.toHaveBeenCalled();
+      expect(mocks.evidenceState.reset).not.toHaveBeenCalled();
+      expect(mocks.projectState.loadProjects).not.toHaveBeenCalled();
+      expect(mocks.projectState.loadProjectData).not.toHaveBeenCalled();
+      expect(mocks.usePlatformProject.mock.calls.some(([, , enabled]) => enabled === true)).toBe(false);
+      expect(mocks.getRoundWorkContext).not.toHaveBeenCalled();
+      expect(mocks.listWorkspaceRoundWorkContexts).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+      expect(await screen.findByLabelText("Mock projects directory")).toBeTruthy();
+      expect(screen.queryByRole("heading", { name: "Cannot reach server" })).toBeNull();
+      expect(`${window.location.pathname}${window.location.search}${window.location.hash}`).toBe(deepLink);
+      expect(window.localStorage.getItem("al-medlit.currentAnnotatorId")).toBe("alice");
+      expect(sessionChanged).not.toHaveBeenCalled();
+      expect(mocks.projectState.reset).not.toHaveBeenCalled();
+      expect(mocks.evidenceState.reset).not.toHaveBeenCalled();
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it.each(["getMe", "capabilities"])("adopts a confirmed 401 logout from %s without rebroadcasting it", async (stage) => {
+    window.history.replaceState(null, "", deepLink);
+    const probe = stage === "getMe" ? mocks.getMe : mocks.getWorkspaceCapabilities;
+    probe.mockImplementationOnce(async () => {
+      publishSessionChange(false);
+      throw new ApiError(401, "Session expired");
+    });
+    const sessionChanged = vi.fn();
+    const unsubscribe = subscribeSessionChanges(sessionChanged);
+    try {
+      render(<App />);
+
+      expect(await screen.findByRole("button", { name: "Register mock user" })).toBeTruthy();
+      expect(sessionChanged).toHaveBeenCalledExactlyOnceWith(false);
+      expect(mocks.projectState.reset).toHaveBeenCalledTimes(1);
+      expect(mocks.evidenceState.reset).toHaveBeenCalledTimes(1);
+      expect(screen.queryByRole("heading", { name: "Cannot reach server" })).toBeNull();
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it("keeps an invite's signed-in state unresolved after a 503 and retries without losing its token", async () => {
+    const inviteUrl = "/invites/recovery-token?source=email#accept";
+    window.history.replaceState(null, "", inviteUrl);
+    mocks.getMe.mockRejectedValueOnce(new ApiError(503, "Service unavailable"));
+    const sessionChanged = vi.fn();
+    const unsubscribe = subscribeSessionChanges(sessionChanged);
+    try {
+      render(<App />);
+      await waitFor(() => expect(
+        screen.queryByRole("heading", { name: "Cannot reach server" })
+          ?? screen.queryByLabelText("Mock invite acceptance"),
+      ).toBeTruthy());
+
+      expect(sessionChanged).not.toHaveBeenCalled();
+      expect(screen.getByRole("heading", { name: "Cannot reach server" })).toBeTruthy();
+      expect(screen.queryByLabelText("Mock invite acceptance")).toBeNull();
+      expect(`${window.location.pathname}${window.location.search}${window.location.hash}`).toBe(inviteUrl);
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+      const invitation = await screen.findByLabelText("Mock invite acceptance");
+      expect(invitation.getAttribute("data-token")).toBe("recovery-token");
+      expect(invitation.getAttribute("data-signed-in")).toBe("true");
+      expect(`${window.location.pathname}${window.location.search}${window.location.hash}`).toBe(inviteUrl);
+      expect(sessionChanged).not.toHaveBeenCalled();
+      expect(mocks.projectState.reset).not.toHaveBeenCalled();
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it.each(["resolves", "rejects"])("ignores an old retry that %s after another tab signs out", async (outcome) => {
+    let resolveRetry!: (value: typeof me) => void;
+    let rejectRetry!: (error: Error) => void;
+    const retry = new Promise<typeof me>((resolve, reject) => {
+      resolveRetry = resolve;
+      rejectRetry = reject;
+    });
+    mocks.getMe.mockRejectedValueOnce(new ApiError(502, "Bad gateway"))
+      .mockImplementationOnce(() => retry);
+    const sessionChanged = vi.fn();
+    const unsubscribe = subscribeSessionChanges(sessionChanged);
+    try {
+      render(<App />);
+      await screen.findByRole("heading", { name: "Cannot reach server" });
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      await waitFor(() => expect(mocks.getMe).toHaveBeenCalledTimes(2));
+      act(() => publishSessionChange(false));
+      await screen.findByRole("button", { name: "Register mock user" });
+
+      await act(async () => {
+        if (outcome === "resolves") resolveRetry(me);
+        else rejectRetry(new ApiError(502, "Late bad gateway"));
+        await retry.catch(() => undefined);
+      });
+
+      expect(screen.getByRole("button", { name: "Register mock user" })).toBeTruthy();
+      expect(screen.queryByRole("heading", { name: "Cannot reach server" })).toBeNull();
+      expect(screen.queryByLabelText("Mock annotator workspace")).toBeNull();
+      expect(mocks.getWorkspaceCapabilities).not.toHaveBeenCalled();
+      expect(mocks.projectState.loadProjects).not.toHaveBeenCalled();
+      expect(sessionChanged).toHaveBeenCalledExactlyOnceWith(false);
+      expect(mocks.projectState.reset).toHaveBeenCalledTimes(1);
+    } finally {
+      unsubscribe();
+    }
+  });
+});
+
+describe("App project platform load recovery", () => {
+  const projectUrl = "/projects/81/data?dataset=42#rows";
+
+  beforeEach(() => {
+    window.history.replaceState(null, "", projectUrl);
+    window.localStorage.setItem("al-medlit.currentAnnotatorId", "alice");
+    Object.assign(mocks.projectState, {
+      selectedProjectId: 81,
+      projects: [{
+        id: 81,
+        name: "Collection study",
+        description: null,
+        annotation_schema: [],
+        annotation_validation_mode: "relaxed",
+        tasks: [],
+        settings: { modules: ["data", "activity"] },
+        workspace_id: 10,
+      }],
+    });
+    mocks.projectState.loadProjects.mockResolvedValue(81);
+    setPlatformState({ enabled: true, projectId: 0, error: "Dataset collection failed" });
+  });
+
+  async function waitForPlatformRequest(): Promise<void> {
+    await waitFor(() => expect(mocks.usePlatformProject.mock.calls.some(
+      ([projectId, , enabled]) => projectId === 81 && enabled === true,
+    )).toBe(true));
+  }
+
+  it("closes a saved task dialog even when refreshing the project list fails", async () => {
+    setPlatformState({ projectId: 81, loading: false, error: null });
+    render(<App />);
+    await screen.findByLabelText("Mock project platform");
+    await waitForPlatformRequest();
+    fireEvent.click(screen.getByRole("button", { name: "Define mock task" }));
+    const dialog = await screen.findByRole("dialog", { name: "Define NLP task" });
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Clinical entities" } });
+    fireEvent.change(screen.getByLabelText("Stable key"), { target: { value: "clinical_entities" } });
+    mocks.projectState.loadProjects.mockRejectedValueOnce(new Error("Project list unavailable"));
+    fireEvent.submit(dialog.querySelector("form")!);
+
+    await waitFor(() => expect(mocks.platformAddTask).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Define NLP task" })).toBeNull());
+    expect(mocks.projectState.loadProjects).toHaveBeenLastCalledWith(81, true, 10);
+  });
+
+  it("refreshes assignments and task configuration after evidence setup changes", async () => {
+    setPlatformState({ projectId: 81, loading: false, error: null });
+    render(<App />);
+    await screen.findByLabelText("Mock project platform");
+    fireEvent.click(screen.getByRole("button", { name: "Refresh mock evidence" }));
+
+    await waitFor(() => expect(mocks.projectState.loadProjectData).toHaveBeenCalledWith(81, true, "all"));
+    await waitFor(() => expect(mocks.projectState.loadProjects).toHaveBeenLastCalledWith(81, true, 10));
+  });
+
+  it("shows the failed collection and retries the current project without losing its route or session", async () => {
+    let finishReload!: () => void;
+    const pending = new Promise<void>((resolve) => { finishReload = resolve; });
+    mocks.platformReload.mockImplementationOnce(async () => {
+      setPlatformState({ loading: true, error: null });
+      await pending;
+      setPlatformState({ loading: false, error: null, projectId: 81 });
+    });
+    render(<App />);
+    await waitForPlatformRequest();
+
+    expect(screen.queryByText("Loading project…")).toBeNull();
+    expect(screen.getByRole("heading", { name: "Project could not be loaded" })).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain("Dataset collection failed");
+    const projectsLink = screen.getByRole("link", { name: "Projects" });
+    const sessionReads = mocks.getMe.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(mocks.platformReload).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Loading project…")).toBeTruthy();
+    expect(screen.queryByText("Dataset collection failed")).toBeNull();
+    const retry = screen.queryByRole("button", { name: "Retry" }) as HTMLButtonElement | null;
+    expect(retry === null || retry.disabled).toBe(true);
+    if (retry) fireEvent.click(retry);
+    expect(mocks.platformReload).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      finishReload();
+      await pending;
+    });
+
+    expect((await screen.findByLabelText("Mock project platform")).getAttribute("data-project-id")).toBe("81");
+    expect(`${window.location.pathname}${window.location.search}${window.location.hash}`).toBe(projectUrl);
+    expect(screen.getByRole("link", { name: "Projects" })).toBe(projectsLink);
+    expect(mocks.projectState.selectedProjectId).toBe(81);
+    expect(mocks.getMe).toHaveBeenCalledTimes(sessionReads);
+    expect(mocks.projectState.reset).not.toHaveBeenCalled();
+    expect(mocks.evidenceState.reset).not.toHaveBeenCalled();
+    expect(window.localStorage.getItem("al-medlit.currentAnnotatorId")).toBe("alice");
+  });
+
+  it("shows a failed retry and keeps another retry available", async () => {
+    mocks.platformReload.mockImplementationOnce(async () => {
+      setPlatformState({ loading: true, error: null });
+      await Promise.resolve();
+      setPlatformState({ loading: false, error: "Collection is still unavailable" });
+    }).mockImplementationOnce(async () => {
+      setPlatformState({ loading: false, error: null, projectId: 81 });
+    });
+    render(<App />);
+    await waitForPlatformRequest();
+
+    expect(screen.queryByText("Loading project…")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("Collection is still unavailable")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Project could not be loaded" })).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Retry" }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(await screen.findByLabelText("Mock project platform")).toBeTruthy();
+    expect(mocks.platformReload).toHaveBeenCalledTimes(2);
+    expect(`${window.location.pathname}${window.location.search}${window.location.hash}`).toBe(projectUrl);
+  });
+
+  it("shows active loading before a stale collection error, then exposes the settled failure", async () => {
+    setPlatformState({ loading: true });
+    render(<App />);
+    await waitForPlatformRequest();
+
+    expect(screen.getByText("Loading project…")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Project could not be loaded" })).toBeNull();
+    expect(screen.queryByText("Dataset collection failed")).toBeNull();
+    act(() => setPlatformState({ loading: false }));
+
+    expect(screen.queryByText("Loading project…")).toBeNull();
+    expect(screen.getByRole("heading", { name: "Project could not be loaded" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+  });
 });
 
 describe("App workspace selection", () => {
@@ -495,7 +978,7 @@ describe("App workspace selection", () => {
 
   it("finishes onboarding with the refreshed capability snapshot", async () => {
     mocks.getMe
-      .mockRejectedValueOnce(new Error("No active session"))
+      .mockRejectedValueOnce(new ApiError(401, "No active session"))
       .mockResolvedValue({
       ...me,
       memberships: [
@@ -1204,7 +1687,7 @@ describe("App workspace selection", () => {
 
   it("preserves an invite URL when a stored session token is stale", async () => {
     window.history.replaceState(null, "", "/invites/invite-token?source=test#accept");
-    mocks.getMe.mockRejectedValueOnce(new Error("Invalid bearer token"));
+    mocks.getMe.mockRejectedValueOnce(new ApiError(401, "Invalid bearer token"));
 
     render(<App />);
 
@@ -1218,7 +1701,7 @@ describe("App workspace selection", () => {
 
   it("preserves an account-action URL when a stored session token is stale", async () => {
     window.history.replaceState(null, "", "/account-actions/reset-token");
-    mocks.getMe.mockRejectedValueOnce(new Error("Invalid bearer token"));
+    mocks.getMe.mockRejectedValueOnce(new ApiError(401, "Invalid bearer token"));
 
     render(<App />);
 

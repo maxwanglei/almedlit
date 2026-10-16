@@ -192,6 +192,7 @@ def create_team_workspace(db: Session, user: User, name: str) -> Workspace:
 
 
 def ensure_default_workspace(db: Session) -> Workspace:
+    """Create the default workspace without changing an existing capability policy."""
     ws = (
         db.query(Workspace)
         .filter(Workspace.name == "Default", Workspace.kind == "team")
@@ -199,10 +200,6 @@ def ensure_default_workspace(db: Session) -> Workspace:
         .first()
     )
     if ws is not None:
-        if ws.capability_preset != "full":
-            ws.capability_preset = "full"
-            ws.capability_overrides = []
-            db.flush()
         return ws
 
     ws = Workspace(

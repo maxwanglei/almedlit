@@ -24,6 +24,7 @@ from .common import (
     _optional_package,
     _persist,
     _scoped,
+    _task_output_hash,
     _validate_task_input,
     _validate_task_output,
 )
@@ -334,6 +335,9 @@ def resolve_round_labels(
             f"No submitted {data.source_kind} decisions are available for composition"
         )
 
+    task_version = _scoped(
+        db, models.TaskVersion, annotation_round.task_version_id, data.project_id, "Task version"
+    )
     output_by_key: dict[str, list[tuple[str, Any]]] = {}
     for decision in selected_decisions:
         round_item = _scoped(
@@ -353,7 +357,7 @@ def resolve_round_labels(
             "Dataset item",
         )
         output_by_key.setdefault(dataset_item.stable_key, []).append(
-            (_canonical_hash(decision.output), decision.output)
+            (_task_output_hash(task_version, decision.output), decision.output)
         )
 
     labels: dict[str, Any] = {}
@@ -522,6 +526,12 @@ def create_split_map(
     return split_map
 
 
+def _validate_training_label_set(label_set: models.LabelSetVersion) -> None:
+    """Keep exclusion masks from supplying targets, including historical sets."""
+    if label_set.source_kind == "derived" or label_set.composition_policy == "exclude":
+        raise ValidationError("Exclusion-only label sets cannot supply training labels")
+
+
 def _compose_label_sets(
     label_sets: list[models.LabelSetVersion],
     composition: list[dict],
@@ -578,6 +588,8 @@ def _compose_label_sets(
     for step in normalized:
         label_set = by_id[step["label_set_version_id"]]
         policy = step["policy"]
+        if policy != "exclude":
+            _validate_training_label_set(label_set)
         if policy == "replace":
             composed.update(label_set.labels)
         elif policy == "inherit":

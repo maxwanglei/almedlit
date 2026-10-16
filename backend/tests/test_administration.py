@@ -677,6 +677,96 @@ def test_deactivation_preserves_membership_and_history_but_withdraws_mutable_wor
     assert db.get(AnnotationRound, draft_round.id).annotator_user_ids == []
 
 
+@pytest.mark.parametrize("personal", [False, True])
+def test_reactivated_user_can_receive_same_assignment_with_history_preserved(client, db, personal):
+    from al_medlit.corpus import service as corpus_service
+    from al_medlit.corpus.schemas import DocumentCreate
+    from al_medlit.project import service as project_service
+    from al_medlit.project.models import TaskAssignment
+    from al_medlit.project.schemas import ProjectCreate, ProjectTaskCreate, TaskAssignmentCreate
+    from al_medlit.workspace import service as workspace_service
+
+    admin = _create_admin(db)
+    target = _make_user(db, "reassignment-target")
+    if personal:
+        workspace = workspace_service.create_personal_workspace(db, target)
+    else:
+        workspace = workspace_service.create_team_workspace(db, admin, "Reassignment Team")
+        workspace_service.add_member(db, workspace.id, target.id, role="annotator")
+    project = project_service.create_project(
+        db,
+        ProjectCreate(
+            name="Reassignment Project",
+            workspace_id=workspace.id,
+            tasks=[ProjectTaskCreate(annotation_type="entity")],
+        ),
+    )
+    task_id = project.tasks[0].id
+    document = corpus_service.create_document(
+        db, DocumentCreate(project_id=project.id, text="Alpha beta.")
+    )
+    original = project_service.create_task_assignment(
+        db,
+        project.id,
+        TaskAssignmentCreate(
+            task_id=task_id,
+            document_id=document.id,
+            assignee_user_id=target.id,
+            metadata_={"audit_seed": "preserved"},
+        ),
+        assigned_by_user=admin,
+    )
+    original_id = original.id
+    original_scope = original.assignment_scope_key
+    for is_active in (False, True):
+        response = client.patch(
+            f"/api/admin/users/{target.id}/status",
+            json={"is_active": is_active},
+            headers=_headers(admin),
+        )
+        assert response.status_code == 200, response.text
+    db.expire_all()
+    db.refresh(target)
+    db.refresh(original)
+    original_metadata = original.metadata_
+    assert original.status == "withdrawn"
+
+    for attempt in range(2):
+        if personal:
+            response = client.patch(
+                f"/api/projects/{project.id}/tasks/{task_id}",
+                json={"enabled": True},
+                headers=_headers(target),
+            )
+            assert response.status_code == 200, response.text
+        else:
+            response = client.post(
+                f"/api/projects/{project.id}/assignments",
+                json={
+                    "task_id": task_id,
+                    "document_id": document.id,
+                    "assignee_user_id": target.id,
+                },
+                headers=_headers(admin),
+            )
+            assert response.status_code == (200 if attempt == 0 else 409), response.text
+
+    db.expire_all()
+    assignments = (
+        db.query(TaskAssignment)
+        .filter(TaskAssignment.task_id == task_id, TaskAssignment.document_id == document.id)
+        .order_by(TaskAssignment.id)
+        .all()
+    )
+    assert len(assignments) == 2
+    assert assignments[0].id == original_id
+    assert assignments[0].status == "withdrawn"
+    assert assignments[0].assignment_scope_key == original_scope
+    assert assignments[0].metadata_ == original_metadata
+    assert assignments[1].status == "assigned"
+    assert assignments[1].assignment_scope_key == original_scope
+
+
 def test_superuser_cannot_deactivate_self(client, db):
     admin = _create_admin(db)
     response = client.patch(
