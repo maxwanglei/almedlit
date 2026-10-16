@@ -182,7 +182,9 @@ def heartbeat_training_run(
         owner_type="training_run",
         owner_id=run.id,
     )
-    if reservation is None or reservation.status != "active":
+    # Publishing the candidate before protected evaluation commits the
+    # reservation while the run keeps working toward promotion.
+    if reservation is None or reservation.status not in {"active", "committed"}:
         db.rollback()
         return False
     heartbeat_at = now or datetime.now(UTC)

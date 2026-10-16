@@ -309,6 +309,7 @@ def persist_decoder_result(
     result: DecoderResult,
     source_window_ids: list[int],
     diagnostics_artifact_id: int | None = None,
+    commit: bool = True,
 ) -> list[EvidenceCandidatePrediction]:
     run = get_inference_run(db, run_id)
     if target_version_id not in run.target_version_ids:
@@ -396,7 +397,8 @@ def persist_decoder_result(
         candidates.append(candidate)
     db.flush()
     candidate_ids = [candidate.id for candidate in candidates]
-    db.commit()
+    if commit:
+        db.commit()
     if not candidate_ids:
         return []
     persisted = (
@@ -416,6 +418,7 @@ def store_inference_diagnostics(
     run_id: int,
     diagnostics: dict,
     actor_user_id: int | None,
+    commit: bool = True,
 ) -> int:
     run = get_inference_run(db, run_id)
     compressed = gzip.compress(canonical_json_bytes(diagnostics), mtime=0)
@@ -454,7 +457,10 @@ def store_inference_diagnostics(
         relationship_type="inferred_over",
     )
     run.diagnostics_artifact_id = artifact.id
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return artifact.id
 
 
@@ -519,11 +525,13 @@ def cancel_inference_run_with_backend(
     run = lock_inference_run(db, run_id)
     if run.status not in OPEN_RUN_STATUSES:
         return run
-    state = (
-        backend.cancel(run.external_job_id)
-        if run.external_job_id is not None
-        else JobState(status="cancelled", raw_state="CANCELLED_BEFORE_SUBMIT")
-    )
+    if run.external_job_id is None:
+        state = JobState(status="cancelled", raw_state="CANCELLED_BEFORE_SUBMIT")
+    elif run.compute_profile.backend == "local":
+        # Local runs execute in process; the claim's job id names no backend job.
+        state = JobState(status="cancelled", raw_state="CANCELLED_LOCAL_RUN")
+    else:
+        state = backend.cancel(run.external_job_id)
     _apply_run_state(run, state)
     db.commit()
     db.refresh(run)

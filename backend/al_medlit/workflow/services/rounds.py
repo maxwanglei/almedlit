@@ -85,6 +85,17 @@ def _lock_and_validate_active_round_annotators(
         raise ValidationError("All round annotators must be active users")
 
 
+def _share_lock_round(db: Session, annotation_round_id: int) -> models.AnnotationRound:
+    # FOR SHARE lets annotators work concurrently while a transition's FOR UPDATE waits.
+    return (
+        db.query(models.AnnotationRound)
+        .filter(models.AnnotationRound.id == annotation_round_id)
+        .populate_existing()
+        .with_for_update(read=True)
+        .one()
+    )
+
+
 def _uses_document_entities(task: models.TaskVersion) -> bool:
     return task.annotation_ui.get("preset") == "document_entities"
 
@@ -813,6 +824,14 @@ def create_annotation_decision(
         data.project_id,
         "Annotation round",
     )
+    if annotation_round.assistance_policy != "blind":
+        lock_holdout_policy(db, data.project_id)
+    # The decision's foreign key locks this item; take it before the round, as
+    # feedback reveal does, so the two cannot deadlock.
+    db.query(models.RoundItem.id).filter(models.RoundItem.id == item.id).with_for_update(
+        read=True
+    ).one()
+    annotation_round = _share_lock_round(db, annotation_round.id)
     is_adjudication = data.decision_kind == "adjudication"
     if is_adjudication:
         _require_actor_role(
@@ -833,7 +852,6 @@ def create_annotation_decision(
             "Annotation decisions require an open round; only adjudication may follow closure"
         )
     if annotation_round.assistance_policy != "blind":
-        lock_holdout_policy(db, data.project_id)
         source_item = _scoped(
             db, models.DatasetItem, item.dataset_item_id, data.project_id, "Source item"
         )
@@ -905,6 +923,9 @@ def create_round_submission(
         data.project_id,
         "Annotation round",
     )
+    if annotation_round.assistance_policy != "blind":
+        lock_holdout_policy(db, data.project_id)
+    annotation_round = _share_lock_round(db, annotation_round.id)
     if len(data.decision_ids) != len(set(data.decision_ids)):
         raise ValidationError("decision_ids must be unique")
     decisions = [
@@ -940,8 +961,6 @@ def create_round_submission(
         and actor.id not in annotation_round.annotator_user_ids
     ):
         raise ConflictError("Current user is not assigned to this annotation round")
-    if annotation_round.assistance_policy != "blind":
-        lock_holdout_policy(db, data.project_id)
     if len({decision.round_item_id for decision in decisions}) != len(decisions):
         raise ValidationError("A submission must contain only one current decision per item")
     assisted_items = []

@@ -75,6 +75,7 @@ def _locked_quota(db: Session, workspace_id: int) -> WorkspaceArtifactQuota:
     quota = (
         db.query(WorkspaceArtifactQuota)
         .filter(WorkspaceArtifactQuota.workspace_id == workspace_id)
+        .populate_existing()
         .with_for_update()
         .one_or_none()
     )
@@ -97,6 +98,7 @@ def _locked_quota(db: Session, workspace_id: int) -> WorkspaceArtifactQuota:
         return (
             db.query(WorkspaceArtifactQuota)
             .filter(WorkspaceArtifactQuota.workspace_id == workspace_id)
+            .populate_existing()
             .with_for_update()
             .one()
         )
@@ -207,16 +209,17 @@ def reserve_artifact_bytes(
     workspace_id = _project_workspace_id(db, project_id)
     quota = _locked_quota(db, workspace_id)
     effective_now = now or datetime.now(UTC)
-    _expire_locked(db, quota, now=effective_now)
     existing = (
         db.query(ArtifactStorageReservation)
         .filter(
             ArtifactStorageReservation.workspace_id == workspace_id,
             ArtifactStorageReservation.idempotency_key == normalized_key,
         )
+        .populate_existing()
         .with_for_update()
         .one_or_none()
     )
+    _expire_locked(db, quota, now=effective_now)
     if existing is not None:
         if (
             existing.project_id != project_id
@@ -227,6 +230,7 @@ def reserve_artifact_bytes(
             raise ConflictError(
                 "Artifact reservation idempotency key was reused with different inputs"
             )
+        db.flush()
         return existing
 
     projected = quota.used_bytes + quota.reserved_bytes + amount
@@ -263,9 +267,12 @@ def _locked_reservation(
     if reservation is None:
         raise NotFoundError("Artifact storage reservation not found")
     quota = _locked_quota(db, reservation.workspace_id)
+    # The unlocked read above may predate a transition that committed before
+    # this transaction acquired the quota lock.
     reservation = (
         db.query(ArtifactStorageReservation)
         .filter(ArtifactStorageReservation.id == reservation_id)
+        .populate_existing()
         .with_for_update()
         .one()
     )
@@ -387,7 +394,8 @@ def admit_artifact_publication(
     sizes = _candidate_sizes(candidates)
     quota = _locked_quota(db, workspace_id)
     effective_now = datetime.now(UTC)
-    _expire_locked(db, quota, now=effective_now)
+    # Blobs read earlier in this transaction, such as a staged base model's,
+    # may since have been purged by GC.
     existing_by_checksum = {
         blob.checksum_sha256: blob
         for blob in db.query(ArtifactBlob)
@@ -395,6 +403,7 @@ def admit_artifact_publication(
             ArtifactBlob.workspace_id == workspace_id,
             ArtifactBlob.checksum_sha256.in_(sizes),
         )
+        .populate_existing()
         .with_for_update()
         .all()
     }
@@ -412,6 +421,7 @@ def admit_artifact_publication(
         reservation = (
             db.query(ArtifactStorageReservation)
             .filter(ArtifactStorageReservation.id == reservation_id)
+            .populate_existing()
             .with_for_update()
             .one_or_none()
         )
@@ -421,7 +431,10 @@ def admit_artifact_publication(
             or reservation.project_id != project_id
         ):
             raise NotFoundError("Artifact storage reservation not found for publication")
+    _expire_locked(db, quota, now=effective_now)
+    if reservation is not None:
         if reservation.status == "committed" and physical_delta == 0:
+            db.flush()
             return 0
         if reservation.status != _ACTIVE_STATUS:
             raise ConflictError(
@@ -470,6 +483,7 @@ def link_reservation_artifact_package(
     reservation = (
         db.query(ArtifactStorageReservation)
         .filter(ArtifactStorageReservation.id == reservation_id)
+        .populate_existing()
         .with_for_update()
         .one_or_none()
     )
@@ -501,9 +515,11 @@ def complete_owner_artifact_reservation(
         )
         .one_or_none()
     )
-    if reservation is None or reservation.status != _ACTIVE_STATUS:
-        return reservation
+    if reservation is None:
+        return None
     quota, reservation = _locked_reservation(db, reservation.id)
+    if reservation.status != _ACTIVE_STATUS:
+        return reservation
     if reservation.reserved_bytes > quota.reserved_bytes:
         raise ConflictError("Workspace artifact reservation accounting is inconsistent")
     quota.reserved_bytes -= reservation.reserved_bytes

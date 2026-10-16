@@ -163,6 +163,13 @@ def transition_learning_cycle(
     data: schemas.CycleTransition,
 ) -> models.LearningCycle:
     cycle = _scoped(db, models.LearningCycle, cycle_id, project_id, "Learning cycle")
+    cycle = (
+        db.query(models.LearningCycle)
+        .filter(models.LearningCycle.id == cycle.id)
+        .populate_existing()
+        .with_for_update()
+        .one()
+    )
     if data.status != cycle.status and data.status not in _CYCLE_TRANSITIONS.get(
         cycle.status, set()
     ):
