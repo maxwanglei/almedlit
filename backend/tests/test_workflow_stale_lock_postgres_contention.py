@@ -14,7 +14,8 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import Query, Session, sessionmaker
 from test_system_administration_postgres_contention import (
     _LOCK_TIMEOUT_SECONDS,
     _THREAD_TIMEOUT_SECONDS,
@@ -29,7 +30,7 @@ from al_medlit.auth.models import User
 from al_medlit.core.exceptions import ConflictError, ValidationError
 from al_medlit.project.models import Project
 from al_medlit.workflow import models, schemas
-from al_medlit.workflow.services import cycles, guidelines, rounds, selection
+from al_medlit.workflow.services import cycles, feedback, guidelines, rounds, selection
 from al_medlit.workspace import service as workspace_service
 
 postgres_session_factory = _shared_postgres_session_factory
@@ -132,6 +133,9 @@ def _attempt(
         except (ConflictError, ValidationError) as exc:
             db.rollback()
             return (type(exc).__name__, str(exc))
+        except OperationalError as exc:
+            db.rollback()
+            return ("OperationalError", exc.orig.pgcode)
 
 
 def _pause_after_load(
@@ -574,3 +578,115 @@ def test_round_close_rejects_annotation_work_that_read_the_round_open(
             .count()
         )
     assert (late_decisions, late_submissions) == (1, 0)
+
+
+def test_feedback_reveal_and_annotation_decision_lock_the_item_before_its_round(
+    postgres_session_factory: sessionmaker[Session],
+    monkeypatch,
+) -> None:
+    with postgres_session_factory() as db:
+        scope = _scope(db)
+        feedback_run = models.FeedbackRun(
+            project_id=scope.project_id,
+            dataset_version_id=scope.dataset_version_id,
+            task_version_id=scope.task_version_id,
+            producer_type="external_llm",
+            status="completed",
+        )
+        db.add(feedback_run)
+        db.flush()
+        feedback_set = models.FeedbackSetVersion(
+            project_id=scope.project_id,
+            feedback_run_id=feedback_run.id,
+            dataset_version_id=scope.dataset_version_id,
+            task_version_id=scope.task_version_id,
+            candidate_count=1,
+            content_hash=uuid4().hex,
+        )
+        db.add(feedback_set)
+        db.flush()
+        db.add(
+            models.FeedbackCandidate(
+                project_id=scope.project_id,
+                feedback_set_version_id=feedback_set.id,
+                dataset_item_id=scope.dataset_item_id,
+                output={"label": "suggested"},
+                content_hash=uuid4().hex,
+            )
+        )
+        annotation_round = _round(
+            db,
+            scope,
+            assistance_policy="immediate_suggestions",
+            feedback_set_version_id=feedback_set.id,
+            status="open",
+        )
+        item = models.RoundItem(
+            project_id=scope.project_id,
+            annotation_round_id=annotation_round.id,
+            dataset_item_id=scope.dataset_item_id,
+            selection_reason={"strategy": "all"},
+            metadata_={},
+        )
+        db.add(item)
+        db.commit()
+        round_id, item_id = annotation_round.id, item.id
+
+    item_locked = threading.Event()
+    release = threading.Event()
+    decision_finished = threading.Event()
+    pids: dict[str, int] = {}
+    original_one_or_none = Query.one_or_none
+
+    def paused_one_or_none(query):
+        result = original_one_or_none(query)
+        if query.column_descriptions[0]["entity"] is models.RoundItem and query.session.info.pop(
+            "pause_after_item_lock", False
+        ):
+            item_locked.set()
+            assert release.wait(timeout=_LOCK_TIMEOUT_SECONDS)
+        return result
+
+    monkeypatch.setattr(Query, "one_or_none", paused_one_or_none)
+
+    def reveal(db: Session) -> int:
+        db.info["pause_after_item_lock"] = True
+        pids["holder"] = db.scalar(text("SELECT pg_backend_pid()"))
+        exposure, _ = feedback.reveal_round_feedback(
+            db,
+            project_id=scope.project_id,
+            annotation_round_id=round_id,
+            round_item_id=item_id,
+            candidate_key="primary",
+            context={},
+            actor=db.get(User, scope.annotator_ids[0]),
+        )
+        return exposure.round_item_id
+
+    def decide(db: Session) -> int:
+        pids["waiter"] = db.scalar(text("SELECT pg_backend_pid()"))
+        try:
+            return rounds.create_annotation_decision(
+                db,
+                schemas.AnnotationDecisionCreate(
+                    project_id=scope.project_id, round_item_id=item_id, output={"label": "own"}
+                ),
+                db.get(User, scope.annotator_ids[1]),
+            ).round_item_id
+        finally:
+            decision_finished.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        reveal_future = executor.submit(_attempt, postgres_session_factory, reveal)
+        try:
+            assert item_locked.wait(timeout=_LOCK_TIMEOUT_SECONDS), "The reveal never locked"
+            decision_future = executor.submit(_attempt, postgres_session_factory, decide)
+            _wait_until_finished_or_blocked(postgres_session_factory, pids, decision_finished)
+        finally:
+            release.set()
+        results = (
+            reveal_future.result(timeout=_THREAD_TIMEOUT_SECONDS),
+            decision_future.result(timeout=_THREAD_TIMEOUT_SECONDS),
+        )
+
+    assert results == (("ok", item_id), ("ok", item_id))

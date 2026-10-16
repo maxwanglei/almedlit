@@ -986,7 +986,13 @@ def create_selection_set(
 ) -> models.SelectionSetVersion:
     run = _scoped(db, models.SelectionRun, data.selection_run_id, data.project_id, "Selection run")
     lock_holdout_policy(db, data.project_id)
-    db.query(models.SelectionRun).filter(models.SelectionRun.id == run.id).with_for_update().one()
+    run = (
+        db.query(models.SelectionRun)
+        .filter(models.SelectionRun.id == run.id)
+        .populate_existing()
+        .with_for_update()
+        .one()
+    )
     if run.status == "completed":
         raise ConflictError("A completed selection run cannot be rewritten")
     item_ids = [item.dataset_item_id for item in data.items]

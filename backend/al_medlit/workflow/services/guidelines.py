@@ -167,6 +167,11 @@ def transition_guideline_revision(
         project_id,
         "Guideline revision",
     )
+    # Activation retires sibling revisions, so every transition serializes on the guideline.
+    db.query(models.Guideline).filter(
+        models.Guideline.id == revision.guideline_id
+    ).with_for_update().one()
+    db.refresh(revision)
     allowed = {
         "draft": {"pilot", "retired"},
         "pilot": {"active", "retired"},
