@@ -1,4 +1,4 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from al_medlit.annotation.models import Annotation
 from al_medlit.annotation.types import REGISTRY
@@ -220,8 +220,12 @@ def compute_iaa(
             Annotation.project_id == project_id,
             Document.project_id == project_id,
             Annotation.annotation_type == annotation_type,
+            Annotation.source == "human",
+            Annotation.status.in_(("draft", "accepted")),
         )
     )
+    if annotation_type == "relation":
+        query = query.options(joinedload(Annotation.head), joinedload(Annotation.tail))
     if document_id is not None:
         query = query.filter(Annotation.document_id == document_id)
     if filter_structure_version or structure_version_id is not None:
@@ -259,7 +263,10 @@ def compute_iaa(
                 "structure_version_id"
             )
 
-    annotators, items, spans_by_annotator = alignment.build_rating_matrix(annotations)
+    try:
+        annotators, items, spans_by_annotator = alignment.build_rating_matrix(annotations)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
 
     report = IaaReport(
         project_id=project_id,

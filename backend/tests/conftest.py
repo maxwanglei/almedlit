@@ -321,3 +321,38 @@ def fixture_auth_client(client, auth_user):
         {"Authorization": f"Bearer {auth_user['access_token']}"},
     )
     return client
+
+
+class NCBIClock:
+    def __init__(self) -> None:
+        import threading
+
+        self._lock = threading.Lock()
+        self.elapsed = 0.0
+        self.wall_time = 1_760_000_000.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        with self._lock:
+            return self.elapsed
+
+    def time(self) -> float:
+        with self._lock:
+            return self.wall_time + self.elapsed
+
+    def sleep(self, delay: float) -> None:
+        with self._lock:
+            self.sleeps.append(delay)
+            self.elapsed += delay
+
+
+@pytest.fixture(autouse=True)
+def ncbi_clock(monkeypatch):
+    from al_medlit.importers import pubmed
+
+    clock = NCBIClock()
+    monkeypatch.setattr(pubmed, "time", clock, raising=False)
+    gate_type = getattr(pubmed, "_NCBIRequestGate", None)
+    if gate_type is not None:
+        monkeypatch.setattr(pubmed, "_request_gate", gate_type())
+    return clock

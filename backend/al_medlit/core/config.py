@@ -89,8 +89,8 @@ class Settings(BaseSettings):
     error_pattern_min_examples: int = 3
     confident_disagreement_threshold: float = 0.85
 
-    # NCBI E-utilities access for the PubMed/PMC importer. All optional: the
-    # importer works without a key (3 req/s); a key raises the limit to 10 req/s.
+    # NCBI credentials are optional. Importer requests share a conservative
+    # process-local limit of 3 req/s, including the PMC ID Converter.
     ncbi_api_key: str = ""
     ncbi_email: str = ""
     ncbi_tool: str = "al-medlit"

@@ -2,11 +2,13 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+MAX_PMIDS_PER_REQUEST = 1000
+
 ImportStatus = Literal["full_text", "abstract_only", "not_found", "error"]
 
 
 class ImportPreviewRequest(BaseModel):
-    pmids: list[str] = Field(default_factory=list)
+    pmids: list[str] = Field(default_factory=list, max_length=MAX_PMIDS_PER_REQUEST)
 
 
 class ImportPreviewItem(BaseModel):
@@ -25,7 +27,7 @@ class ImportPreviewResponse(BaseModel):
 
 
 class ImportRequest(BaseModel):
-    pmids: list[str] = Field(default_factory=list)
+    pmids: list[str] = Field(default_factory=list, max_length=MAX_PMIDS_PER_REQUEST)
     include_abstract_only: bool = False
 
 

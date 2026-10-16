@@ -371,6 +371,7 @@ def _derive_frozen_annotation_contents(
             .all()
         )
         source_ids = adjudication.get("source_annotation_ids") or []
+        solo_gold = adjudication.get("solo_gold", not source_ids)
         items.append(
             AnnotationSetItemCreate(
                 source_annotation_id=annotation.id,
@@ -387,7 +388,7 @@ def _derive_frozen_annotation_contents(
                 block_text=document.text[annotation.start_offset : annotation.end_offset],
                 section_paths=[list(sentence.section.path or []) for sentence in sentences],
                 labels=list(block.labels or []),
-                source="adjudicated" if source_ids else "solo_gold",
+                source="solo_gold" if solo_gold else "adjudicated",
                 metadata_={
                     "adjudication": adjudication,
                     "note": block.note,

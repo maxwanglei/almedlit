@@ -8,8 +8,14 @@ live NCBI calls.
 from __future__ import annotations
 
 import hashlib
+import math
+import threading
+import time
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC
+from email.utils import parsedate_to_datetime
 from itertools import batched
 from xml.etree import ElementTree as ET
 
@@ -301,6 +307,58 @@ def parse_idconv_json(data: object) -> dict[str, str]:
 # The converter rejects more than 200 IDs; keep EFetch GET URLs bounded too.
 # https://pmc.ncbi.nlm.nih.gov/tools/id-converter-api/
 NCBI_BATCH_SIZE = 200
+NCBI_REQUEST_INTERVAL = 1 / 3
+NCBI_MAX_ATTEMPTS = 3
+NCBI_MAX_RETRY_DELAY = 30.0
+_RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+
+
+class _NCBIRequestGate:
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._next_request_at = 0.0
+
+    @contextmanager
+    def request(self) -> Iterator[None]:
+        with self._lock:
+            delay = self._next_request_at - time.monotonic()
+            if delay > NCBI_MAX_RETRY_DELAY:
+                raise ImporterFetchError(
+                    "NCBI asked us to wait before sending more requests. Please try again later."
+                )
+            if delay > 0:
+                time.sleep(delay)
+            self._next_request_at = time.monotonic() + NCBI_REQUEST_INTERVAL
+            yield
+
+    def defer(self, delay: float) -> None:
+        with self._lock:
+            self._next_request_at = max(self._next_request_at, time.monotonic() + delay)
+
+
+# E-utilities allow 3 requests/s without a key. The converter documents no
+# higher allowance, so all NCBI calls and retries share this process-local gate.
+_request_gate = _NCBIRequestGate()
+
+
+def _retry_delay(response: httpx.Response, attempt: int) -> float:
+    fallback = float(2 ** attempt)
+    value = response.headers.get("Retry-After")
+    if value is None:
+        return fallback
+    try:
+        delay = float(value)
+        if not math.isfinite(delay) or delay < 0:
+            return fallback
+    except ValueError:
+        try:
+            deadline = parsedate_to_datetime(value)
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=UTC)
+            delay = max(0.0, deadline.timestamp() - time.time())
+        except (OverflowError, TypeError, ValueError):
+            return fallback
+    return delay
 
 
 def _auth_params() -> dict[str, str]:
@@ -313,24 +371,41 @@ def _auth_params() -> dict[str, str]:
 
 
 def _get(client: httpx.Client, url: str, params: dict[str, str]) -> httpx.Response:
-    try:
-        response = client.get(url, params=params, timeout=settings.ncbi_request_timeout)
-        response.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        # HTTPX's exception includes the full URL (IDs and possibly API keys).
-        status = exc.response.status_code
-        if status == 429:
-            message = "NCBI is receiving too many requests. Wait a moment and try again."
-        elif status >= 500:
-            message = f"NCBI is temporarily unavailable (HTTP {status}). Please try again."
-        else:
-            message = f"NCBI rejected the article request (HTTP {status}). Please try again."
-        raise ImporterFetchError(message) from exc
-    except httpx.TimeoutException as exc:
-        raise ImporterFetchError("NCBI took too long to respond. Please try again.") from exc
-    except httpx.HTTPError as exc:
-        raise ImporterFetchError("Could not connect to NCBI. Please try again.") from exc
-    return response
+    for attempt in range(NCBI_MAX_ATTEMPTS):
+        with _request_gate.request():
+            try:
+                response = client.get(url, params=params, timeout=settings.ncbi_request_timeout)
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if status in _RETRYABLE_STATUSES:
+                    delay = _retry_delay(exc.response, attempt)
+                    _request_gate.defer(delay)
+                    if attempt < NCBI_MAX_ATTEMPTS - 1 and delay <= NCBI_MAX_RETRY_DELAY:
+                        continue
+                # HTTPX's exception includes the full URL and possibly API keys.
+                if status == 429:
+                    message = "NCBI is receiving too many requests. Wait a moment and try again."
+                elif status >= 500:
+                    message = f"NCBI is temporarily unavailable (HTTP {status}). Please try again."
+                else:
+                    message = (
+                        f"NCBI rejected the article request (HTTP {status}). Please try again."
+                    )
+                raise ImporterFetchError(message) from exc
+            except httpx.TransportError as exc:
+                if attempt < NCBI_MAX_ATTEMPTS - 1:
+                    _request_gate.defer(float(2 ** attempt))
+                    continue
+                if isinstance(exc, httpx.TimeoutException):
+                    message = "NCBI took too long to respond. Please try again."
+                else:
+                    message = "Could not connect to NCBI. Please try again."
+                raise ImporterFetchError(message) from exc
+            except httpx.HTTPError as exc:
+                raise ImporterFetchError("Could not connect to NCBI. Please try again.") from exc
+        return response
+    raise AssertionError("NCBI retry loop exhausted without a result")
 
 
 def fetch_pubmed_metadata(

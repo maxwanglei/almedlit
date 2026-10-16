@@ -153,7 +153,7 @@ class EvidenceAdjudicationCreate(BaseModel):
     source_annotation_ids: list[int] = Field(default_factory=list)
     start_sentence_id: int | None = None
     end_sentence_id: int | None = None
-    labels: list[str] = Field(default_factory=list)
+    labels: list[str] | None = None
     note: str | None = None
     solo_gold: bool = False
 

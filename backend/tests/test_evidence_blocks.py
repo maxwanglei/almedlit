@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from al_medlit.annotation.models import Annotation
@@ -1076,6 +1078,149 @@ def test_team_adjudication_requires_two_matching_reviewed_annotators(client):
     ]
 
 
+def _setup_reviewed_adjudication_labels(client):
+    ctx = _setup_evidence_project(client, "evidence-adjudication-labels")
+    project_id = ctx["project"]["id"]
+    document_id = ctx["document"]["id"]
+    sentences = ctx["structure"]["sentences"]
+    scope = {
+        "target_version_id": ctx["version"]["id"],
+        "structure_version_id": ctx["structure"]["structure_version"]["id"],
+        "guideline_version_id": ctx["guideline"]["id"],
+    }
+    source_ids = []
+    for username, start, end, labels in (
+        ("alice", 0, 1, ["shared", "alice"]),
+        ("bob", 1, 2, ["bob", "shared"]),
+    ):
+        assignment = client.post(
+            f"/api/projects/{project_id}/assignments",
+            json={
+                "task_id": ctx["task"]["id"],
+                "document_id": document_id,
+                "annotator_id": username,
+                "target_version_id": scope["target_version_id"],
+                "guideline_version_id": scope["guideline_version_id"],
+            },
+        )
+        assert assignment.status_code == 200, assignment.text
+        payload = _block_payload(ctx, start, end, annotator_id=username)
+        payload["evidence_block"]["labels"] = labels
+        created = client.post("/api/annotations", json=payload)
+        assert created.status_code == 200, created.text
+        source_ids.append(created.json()["id"])
+        reviewed = client.post(
+            f"/api/projects/{project_id}/documents/{document_id}"
+            "/evidence-review-coverage/mark-reviewed",
+            json={
+                **scope,
+                "start_sentence_id": sentences[0]["id"],
+                "end_sentence_id": sentences[-1]["id"],
+            },
+            headers={"Authorization": f"Bearer {client._token_for(username)}"},
+        )
+        assert reviewed.status_code == 200, reviewed.text
+        finalized = client.patch(
+            f"/api/projects/{project_id}/assignments/{assignment.json()['id']}",
+            json={"status": "submitted"},
+        )
+        assert finalized.status_code == 200, finalized.text
+    return ctx, {
+        **scope,
+        "source_annotation_ids": list(reversed(source_ids)),
+    }
+
+
+@pytest.mark.parametrize(
+    ("strategy", "label_override", "expected_labels"),
+    [
+        ("a", {}, ["bob", "shared"]),
+        ("b", {}, ["shared", "alice"]),
+        ("union", {}, ["bob", "shared", "alice"]),
+        ("intersection", {}, ["bob", "shared", "alice"]),
+        ("custom", {}, ["bob", "shared", "alice"]),
+        ("union", {"labels": None}, ["bob", "shared", "alice"]),
+        ("union", {"labels": []}, []),
+        ("union", {"labels": ["resolved"]}, ["resolved"]),
+    ],
+)
+def test_adjudication_inherits_source_labels_unless_explicitly_overridden(
+    client, strategy, label_override, expected_labels
+):
+    ctx, payload = _setup_reviewed_adjudication_labels(client)
+    sentences = ctx["structure"]["sentences"]
+    response = client.post(
+        f"/api/projects/{ctx['project']['id']}/documents/{ctx['document']['id']}"
+        "/evidence-adjudication",
+        json={
+            **payload,
+            "strategy": strategy,
+            "start_sentence_id": sentences[1]["id"],
+            "end_sentence_id": sentences[1]["id"],
+            **label_override,
+        },
+    )
+    assert response.status_code == 201, response.text
+    gold = response.json()
+    assert gold["status"] == "gold"
+    assert gold["evidence_block"]["labels"] == expected_labels
+    persisted = client.get(f"/api/annotations/{gold['id']}")
+    assert persisted.status_code == 200, persisted.text
+    assert persisted.json()["evidence_block"]["labels"] == expected_labels
+
+
+def test_adjudication_source_labels_survive_frozen_evidence_export(client):
+    ctx, payload = _setup_reviewed_adjudication_labels(client)
+    project_id = ctx["project"]["id"]
+    response = client.post(
+        f"/api/projects/{project_id}/documents/{ctx['document']['id']}/evidence-adjudication",
+        json={**payload, "strategy": "union"},
+    )
+    assert response.status_code == 201, response.text
+    gold = response.json()
+    structure = ctx["structure"]["structure_version"]
+    snapshot = client.post(
+        f"/api/projects/{project_id}/corpus-snapshots",
+        json={
+            "name": "Adjudicated labels",
+            "documents": [
+                {
+                    "document_id": ctx["document"]["id"],
+                    "structure_version_id": structure["id"],
+                    "source_hash": structure["source_hash"],
+                    "group_key": "evidence-document",
+                }
+            ],
+        },
+    )
+    assert snapshot.status_code == 200, snapshot.text
+    annotation_set = client.post(
+        f"/api/projects/{project_id}/annotation-sets",
+        json={
+            "name": "Gold evidence labels",
+            "corpus_snapshot_id": snapshot.json()["id"],
+            "target_version_ids": [ctx["version"]["id"]],
+            "guideline_version_ids": [ctx["guideline"]["id"]],
+        },
+    )
+    assert annotation_set.status_code == 200, annotation_set.text
+    assert annotation_set.json()["block_count"] == 1
+    exported = client.post(
+        f"/api/projects/{project_id}/exports",
+        json={
+            "format_key": "evidence-blocks-v1",
+            "annotation_set_id": annotation_set.json()["id"],
+        },
+    )
+    assert exported.status_code == 200, exported.text
+    downloaded = client.get(f"/api/exports/{exported.json()['id']}/download")
+    assert downloaded.status_code == 200, downloaded.text
+    rows = [json.loads(line) for line in downloaded.text.splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["provenance"]["annotation_id"] == gold["id"]
+    assert rows[0]["block"]["labels"] == ["bob", "shared", "alice"]
+
+
 def test_adjudication_comparison_requires_complete_version_scope(client):
     ctx = _setup_evidence_project(client, "evidence-comparison-scope")
     response = client.get(
@@ -1142,6 +1287,7 @@ def test_individual_solo_custom_gold_requires_explicit_reviewed_coverage(client,
         },
     )
     assert inside_review.status_code == 201, inside_review.text
+    assert inside_review.json()["evidence_block"]["labels"] == []
     assert inside_review.json()["attributes"]["adjudication"] == {
         "strategy": "custom",
         "source_annotation_ids": [],

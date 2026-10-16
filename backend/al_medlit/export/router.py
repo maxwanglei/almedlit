@@ -1,3 +1,6 @@
+from unicodedata import category
+from urllib.parse import quote
+
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
@@ -14,6 +17,20 @@ from al_medlit.lineage.schemas import ExportArtifactRead
 from al_medlit.workspace.capability_dependencies import enforce_capability
 
 router = APIRouter(tags=["exports"])
+
+
+def _download_content_disposition(file_name: str) -> str:
+    leaf = file_name.replace("\\", "/").rsplit("/", 1)[-1]
+    leaf = "".join("_" if category(char) in {"Cc", "Cs"} else char for char in leaf)
+    if not leaf.strip() or leaf in {".", ".."}:
+        leaf = "export"
+    fallback = "".join(
+        char if " " <= char <= "~" and char not in {'"', "%"} else "_" for char in leaf
+    )
+    return (
+        f'attachment; filename="{fallback}"; '
+        f"filename*=UTF-8''{quote(leaf, safe='')}"
+    )
 
 
 @router.get("/export-formats", response_model=list[ExportFormatRead])
@@ -86,7 +103,7 @@ def download_export(
         storage.iter_bytes(export.artifact.storage_key),
         media_type=export.artifact.content_type,
         headers={
-            "Content-Disposition": f'attachment; filename="{export.file_name}"',
+            "Content-Disposition": _download_content_disposition(export.file_name),
             "X-Checksum-SHA256": export.artifact.content_hash,
         },
     )

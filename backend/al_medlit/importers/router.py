@@ -16,7 +16,6 @@ from al_medlit.importers.schemas import (
     ImportRequest,
     ImportResponse,
 )
-from al_medlit.project import service as project_service
 
 router = APIRouter(prefix="/projects/{project_id}/import", tags=["import"])
 
@@ -32,17 +31,19 @@ def preview_pubmed_import(
     project_id: int,
     payload: ImportPreviewRequest,
     _member=Depends(require_project_access(min_role="manager")),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     client: httpx.Client = Depends(get_ncbi_client),
 ) -> ImportPreviewResponse:
-    service.ensure_project(db, project_id)
+    actor = service.ImportActor(current_user.id, current_user.session_version)
+    normalized = service.normalize_pmids(payload.pmids)
+    existing = service.project_documents_by_pmid(db, project_id, normalized)
+    db.rollback()
     try:
-        items = service.preview_import(
-            client, payload.pmids,
-            existing=service.project_documents_by_pmid(db, project_id),
-        )
+        items = service.preview_import(client, normalized, existing=existing)
     except ImporterFetchError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    service.revalidate_import_actor(db, project_id, actor)
     return ImportPreviewResponse(items=items)
 
 
@@ -55,24 +56,19 @@ def run_pubmed_import(
     db: Session = Depends(get_db),
     client: httpx.Client = Depends(get_ncbi_client),
 ) -> ImportResponse:
-    service.ensure_project(db, project_id)
+    actor = service.ImportActor(current_user.id, current_user.session_version)
+    normalized = service.normalize_pmids(payload.pmids)
+    existing = service.project_documents_by_pmid(db, project_id, normalized)
+    db.rollback()
     try:
-        response = service.run_import(
-            db,
-            client,
-            project_id,
-            payload.pmids,
-            include_abstract_only=payload.include_abstract_only,
-        )
+        fetched = service.fetch_import(client, normalized, existing=existing)
     except ImporterFetchError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    project_service.ensure_personal_project_self_assignments(
-        db,
-        project_id,
-        current_user,
-        document_ids=[
-            item.document_id for item in response.created if item.document_id is not None
-        ],
-        assigned_by_user=current_user,
-    )
-    return response
+    with db.begin():
+        return service.run_import(
+            db,
+            project_id,
+            fetched,
+            include_abstract_only=payload.include_abstract_only,
+            actor=actor,
+        )

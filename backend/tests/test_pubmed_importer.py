@@ -257,6 +257,28 @@ def _make_project(db) -> Project:
     return project
 
 
+
+def _run_import(db, client, project_id, pmids, *, include_abstract_only):
+    from al_medlit.auth.models import User
+
+    user = db.query(User).filter(User.username == "import-service-manager").first()
+    if user is None:
+        user = User(username="import-service-manager", password_hash="test-hash", is_active=True)
+        db.add(user)
+        db.flush()
+        project = db.get(Project, project_id)
+        workspace_service.add_member(db, project.workspace_id, user.id, role="admin")
+        db.commit()
+    actor = importer_service.ImportActor(user.id, user.session_version)
+    normalized = importer_service.normalize_pmids(pmids)
+    existing = importer_service.project_documents_by_pmid(db, project_id, normalized)
+    db.rollback()
+    fetched = importer_service.fetch_import(client, normalized, existing=existing)
+    with db.begin():
+        return importer_service.run_import(
+            db, project_id, fetched, include_abstract_only, actor=actor,
+        )
+
 def test_preview_import_classifies_each_pmid():
     with _fake_ncbi_client() as client:
         items = importer_service.preview_import(client, ["11111", "33333", "44444"])
@@ -284,7 +306,7 @@ def test_preview_import_treats_pmcid_type_article_as_full_text():
 def test_run_import_creates_full_text_document(db):
     project = _make_project(db)
     with _fake_ncbi_client() as client:
-        result = importer_service.run_import(
+        result = _run_import(
             db, client, project.id, ["11111"], include_abstract_only=False
         )
 
@@ -303,7 +325,7 @@ def test_run_import_creates_full_text_document(db):
 def test_run_import_skips_abstract_only_when_not_included(db):
     project = _make_project(db)
     with _fake_ncbi_client() as client:
-        result = importer_service.run_import(
+        result = _run_import(
             db, client, project.id, ["33333"], include_abstract_only=False
         )
 
@@ -315,7 +337,7 @@ def test_run_import_skips_abstract_only_when_not_included(db):
 def test_run_import_creates_abstract_document_when_included(db):
     project = _make_project(db)
     with _fake_ncbi_client() as client:
-        result = importer_service.run_import(
+        result = _run_import(
             db, client, project.id, ["33333"], include_abstract_only=True
         )
 
@@ -333,10 +355,10 @@ def test_run_import_skips_duplicate_external_id(db):
 
     project = _make_project(db)
     with _fake_ncbi_client() as client:
-        importer_service.run_import(
+        _run_import(
             db, client, project.id, ["11111"], include_abstract_only=False
         )
-        result = importer_service.run_import(
+        result = _run_import(
             db, client, project.id, ["11111"], include_abstract_only=False
         )
 
@@ -350,7 +372,7 @@ def test_run_import_skips_duplicate_external_id(db):
 def test_existing_project_papers_preview_and_reuse_without_network(db, monkeypatch):
     project = _make_project(db)
     with _fake_ncbi_client() as client:
-        initial = importer_service.run_import(
+        initial = _run_import(
             db, client, project.id, ["11111"], include_abstract_only=False
         )
 
@@ -360,9 +382,9 @@ def test_existing_project_papers_preview_and_reuse_without_network(db, monkeypat
         monkeypatch.setattr(importer_service, "_gather", unexpected_fetch)
         preview = importer_service.preview_import(
             client, ["11111"],
-            existing=importer_service.project_documents_by_pmid(db, project.id),
+            existing=importer_service.project_documents_by_pmid(db, project.id, ["11111"]),
         )
-        reused = importer_service.run_import(
+        reused = _run_import(
             db, client, project.id, ["11111"], include_abstract_only=False
         )
     assert preview[0].status == "full_text"
@@ -593,3 +615,24 @@ def test_preview_endpoint_unknown_project_returns_404(api_client):
         json={"pmids": ["11111"]},
     )
     assert response.status_code == 404
+
+
+@pytest.mark.parametrize("suffix", ["/preview", ""])
+def test_pubmed_request_limit_returns_422_before_network(api_client, suffix):
+    project_id = _create_project_via_api(api_client)
+    requests = []
+
+    def override_get_ncbi_client():
+        with _fake_ncbi_client() as client:
+            client.event_hooks["request"].append(requests.append)
+            yield client
+
+    api_client.app.dependency_overrides[get_ncbi_client] = override_get_ncbi_client
+    response = api_client.post(
+        f"/api/projects/{project_id}/import/pubmed{suffix}",
+        json={"pmids": ["11111"] * 1001},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["type"] == "too_long"
+    assert requests == []

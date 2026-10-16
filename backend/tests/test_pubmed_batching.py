@@ -173,9 +173,7 @@ def test_later_batch_failure_does_not_import_partial_documents(db, failing_opera
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         with pytest.raises(pubmed.ImporterFetchError):
-            importer_service.run_import(
-                db, client, project.id, _pmids(300), include_abstract_only=True,
-            )
+            importer_service.fetch_import(client, _pmids(300), existing={})
 
     assert calls[failing_operation] == 2
     db.flush()

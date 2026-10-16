@@ -66,7 +66,7 @@ def create_export(
 
     token = uuid4().hex
     file_name = data.file_name or f"{plugin.key}-{token[:8]}.{plugin.extension}"
-    storage_key = f"projects/{project_id}/exports/{token}/{file_name}"
+    storage_key = f"projects/{project_id}/exports/{token}/data.{plugin.extension}"
     stored = storage.put_stream(
         storage_key,
         IterableBytesReader(chunks()),

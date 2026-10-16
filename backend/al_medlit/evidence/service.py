@@ -2054,12 +2054,25 @@ def adjudicate(
                 f"source annotator; uncovered user ids: {uncovered_reviewers}"
             )
 
+    labels = data.labels
+    if labels is None:
+        if data.strategy in {"a", "b"}:
+            labels = list(chosen.evidence_block.labels or [])
+        else:
+            labels = list(
+                dict.fromkeys(
+                    label
+                    for source in sources
+                    for label in (source.evidence_block.labels or [])
+                )
+            )
+
     payload = EvidenceBlockPayloadV1(
         structure_version_id=data.structure_version_id,
         target_version_id=data.target_version_id,
         start_sentence_id=start_sentence_id,
         end_sentence_id=end_sentence_id,
-        labels=data.labels,
+        labels=labels,
         note=data.note,
     )
     annotation = _create_block_internal(
