@@ -298,6 +298,8 @@ def _new_error_pattern_scope(
 def _new_inference_scope(
     db: Session,
     prefix: str,
+    *,
+    backend: str = "local",
 ) -> tuple[int, int, int, int, int, int]:
     suffix = uuid4().hex
     creator = _new_user(db, f"{prefix}-creator")
@@ -392,8 +394,8 @@ def _new_inference_scope(
     )
     profile = ComputeProfile(
         project_id=project.id,
-        name="contention-local",
-        backend="local",
+        name=f"contention-{backend}",
+        backend=backend,
         config={},
         status="active",
         created_by_user_id=creator.id,
@@ -616,9 +618,9 @@ def test_inference_launch_returns_existing_run_under_contention(
         assert len(runs) == 1
 
 
-def _new_queued_inference_run(db: Session, prefix: str) -> int:
+def _new_queued_inference_run(db: Session, prefix: str, *, backend: str = "local") -> int:
     project_id, creator_id, snapshot_id, checkpoint_id, profile_id, target_id = (
-        _new_inference_scope(db, prefix)
+        _new_inference_scope(db, prefix, backend=backend)
     )
     return inference_service.launch_inference_run(
         db,
@@ -675,7 +677,8 @@ def test_inference_cancel_waits_for_submission_and_cancels_its_job(
     tmp_path,
 ) -> None:
     with postgres_session_factory() as db:
-        run_id = _new_queued_inference_run(db, "inference-cancel-contention")
+        # Only remote inference submits a backend job; local runs execute in process.
+        run_id = _new_queued_inference_run(db, "inference-cancel-contention", backend="ssh_slurm")
     submitting = threading.Event()
     cancelling = threading.Event()
     cancelled_jobs = []

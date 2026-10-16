@@ -37,7 +37,7 @@ from al_medlit.lineage.models import (
     LineageArtifact,
 )
 from al_medlit.project.models import Project, ProjectTask
-from al_medlit.training.compute.base import JobState
+from al_medlit.training.compute_profiles import build_compute_backend
 from al_medlit.training.models import (
     ComputeProfile,
     ModelCheckpoint,
@@ -63,6 +63,7 @@ def _synthetic_run(
     storage: MemoryObjectStorage,
     *,
     status: str,
+    profile_config: dict | None = None,
 ) -> tuple[int, int, dict]:
     """Create a one-document synthetic run plus the remote result its runner would emit."""
 
@@ -185,7 +186,7 @@ def _synthetic_run(
         project_id=project.id,
         name="claim-local",
         backend="local",
-        config={},
+        config=profile_config or {},
         status="active",
         created_by_user_id=creator.id,
     )
@@ -394,7 +395,12 @@ def test_cancel_during_local_execution_is_not_overwritten(
 ) -> None:
     storage = MemoryObjectStorage()
     with postgres_session_factory() as db:
-        run_id, _, _ = _synthetic_run(db, storage, status="queued")
+        run_id, _, _ = _synthetic_run(
+            db,
+            storage,
+            status="queued",
+            profile_config={"runtime_root": str(tmp_path / "attempts")},
+        )
 
     storing_diagnostics = threading.Event()
     cancel_committed = threading.Event()
@@ -407,10 +413,6 @@ def test_cancel_during_local_execution_is_not_overwritten(
 
     monkeypatch.setattr(service, "store_inference_diagnostics", paused_store)
 
-    class Backend:
-        def cancel(self, external_job_id: str) -> JobState:
-            return JobState(status="cancelled", raw_state="CANCELLED")
-
     def execute(db: Session) -> str:
         return execution.execute_local_inference(
             db,
@@ -420,10 +422,11 @@ def test_cancel_during_local_execution_is_not_overwritten(
         ).status
 
     def cancel(db: Session) -> str:
+        run = service.get_inference_run(db, run_id)
         return service.cancel_inference_run_with_backend(
             db,
-            run_id=run_id,
-            backend=Backend(),
+            run_id=run.id,
+            backend=build_compute_backend(run.compute_profile),
         ).status
 
     worker = _Worker(postgres_session_factory)

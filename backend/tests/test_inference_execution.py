@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 from test_inference_candidate_queries import _inference_scope
 
+from al_medlit.auth.security import create_access_token
 from al_medlit.core.exceptions import ValidationError
 from al_medlit.evidence.models import EvidenceTargetVersion
 from al_medlit.inference import execution, service
@@ -17,6 +18,7 @@ from al_medlit.lineage.models import LineageArtifact
 from al_medlit.training.model_types.catalog import builtin_model_descriptors
 from al_medlit.training.model_types.evidence_conventional import model as conventional
 from al_medlit.training.runner import RESULT_SCHEMA_VERSION
+from al_medlit.workspace.models import Workspace, WorkspaceMember
 
 DECODER_CONFIG = {
     "version": "evidence-block-decoder-v1",
@@ -358,6 +360,62 @@ def test_local_inference_failure_after_claim_marks_run_failed(
     assert scope.run.status == "failed"
     assert scope.run.failure_reason == "diagnostics storage unavailable"
     assert scope.run.completed_at is not None
+
+
+def test_cancel_route_releases_a_local_run_whose_executor_died_after_claim(
+    client,
+    db,
+    object_storage,
+    tmp_path,
+    monkeypatch,
+):
+    archive = tmp_path / "checkpoint.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("checkpoint/model.json", "{}")
+    scope = _inference_scope(
+        db,
+        checkpoint_object=object_storage.put_file(
+            "checkpoints/synthetic.zip",
+            archive,
+            content_type="application/zip",
+        ),
+        window_config=WINDOW_CONFIG,
+        decoder_config=DECODER_CONFIG,
+        run_status="queued",
+        with_window=False,
+    )
+    scope.run.compute_profile.config = {"runtime_root": str(tmp_path / "attempts")}
+    db.get(Workspace, scope.project.workspace_id).capability_preset = "full"
+    db.query(WorkspaceMember).filter(WorkspaceMember.user_id == scope.user.id).update(
+        {"role": "trainer"}
+    )
+    db.commit()
+
+    def executor_process_dies(*args, **kwargs):
+        raise SystemExit("executor process terminated")
+
+    monkeypatch.setattr(service, "store_inference_diagnostics", executor_process_dies)
+    with pytest.raises(SystemExit):
+        execution.execute_local_inference(
+            db,
+            object_storage,
+            run_id=scope.run.id,
+            work_root=tmp_path / "work",
+        )
+    db.rollback()
+    db.expire(scope.run)
+    assert scope.run.status == "running"
+
+    headers = {"Authorization": f"Bearer {create_access_token(scope.user.id)}"}
+    cancelled = client.post(f"/api/inference/runs/{scope.run.id}/cancel", headers=headers)
+    assert cancelled.status_code == 200, cancelled.text
+    assert cancelled.json()["status"] == "cancelled"
+    assert cancelled.json()["completed_at"] is not None
+
+    retried = client.post(f"/api/inference/runs/{scope.run.id}/execute", headers=headers)
+    assert retried.status_code == 409, retried.text
+    db.expire(scope.run)
+    assert scope.run.status == "cancelled"
 
 
 def test_inference_window_validation_leaves_no_partial_windows_for_earlier_targets(db):
