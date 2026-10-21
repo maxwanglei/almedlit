@@ -735,6 +735,11 @@ export default function AnnotatorWorkspace({
     [activeWorkbench, selectedProject],
   );
 
+  const requestedTask = tasks.find((task) =>
+    task.id === Number(searchParams.get("task")) && task.project_id === selectedProjectId && task.enabled,
+  );
+  const requestedTaskType = requestedTask?.annotation_type;
+
   const tasksByType = useMemo(
     () => new Map<AnnotationType, AnnotationWorkbenchTask>(tasks.map((task) => [task.annotation_type, task])),
     [tasks],
@@ -1057,14 +1062,19 @@ export default function AnnotatorWorkspace({
     if (requestedDocumentId !== selectedDocumentId) return;
     const requestedAssignmentId = Number(searchParams.get("assignment"));
     const requestedAssignment = currentDocumentAssignments.find((assignment) => assignment.id === requestedAssignmentId);
+    const taskAssignmentId = requestedTask ? preferredAssignmentId(
+      currentDocumentAssignments.filter((assignment) => assignment.task_id === requestedTask.id),
+      null,
+    ) : null;
     const nextAssignmentId = preferredAssignmentId(
       currentDocumentAssignments,
-      requestedAssignment?.id ?? submissionAssignmentId,
+      requestedAssignment?.id ?? taskAssignmentId ?? submissionAssignmentId,
     );
     setSubmissionAssignmentId(nextAssignmentId);
     updateSearch({ assignment: nextAssignmentId }, "replace");
   }, [
     currentDocumentAssignments,
+    requestedTask,
     searchParams,
     selectedDocumentId,
     submissionAssignmentId,
@@ -1444,6 +1454,13 @@ export default function AnnotatorWorkspace({
     );
   }, [spanTasks]);
 
+  const requestedSpanType = spanTasks.find((task) => task.id === requestedTask?.id)?.annotation_type;
+  useEffect(() => {
+    if (requestedSpanType) setActiveSpanType(requestedSpanType);
+    if (requestedTaskType === "sentence_label") setInspectorTab("sentence");
+    if (requestedTaskType === "relation") setInspectorTab("relations");
+  }, [requestedSpanType, requestedTaskType]);
+
   useEffect(() => {
     if (new URLSearchParams(window.location.search).toString() !== searchParams.toString()) return;
     if (Number(searchParams.get("document")) !== selectedDocumentId) return;
@@ -1489,12 +1506,14 @@ export default function AnnotatorWorkspace({
     }
   }, [activeSpanTask, displayLabelsForTask, strictLabelsOnly]);
 
+  const mutationInFlight = useRef(false);
   const runMutation = useCallback(
     async (
       operation: () => Promise<void>,
       failureMessage: string,
       taskId?: number | null,
     ): Promise<void> => {
+      if (busy || mutationInFlight.current) return;
       if (!annotationEditable) {
         setError("This annotation round is read-only because it has already been submitted or closed.");
         return;
@@ -1503,6 +1522,7 @@ export default function AnnotatorWorkspace({
         setError("Select an open assignment for this annotation task before editing it.");
         return;
       }
+      mutationInFlight.current = true;
       setBusy(true);
       setSaveStatus("saving");
       setError(null);
@@ -1513,10 +1533,11 @@ export default function AnnotatorWorkspace({
         setSaveStatus("error");
         setError(error instanceof Error ? error.message : failureMessage);
       } finally {
+        mutationInFlight.current = false;
         setBusy(false);
       }
     },
-    [annotationEditable, isTaskEditable, setBusy, setError],
+    [annotationEditable, busy, isTaskEditable, setBusy, setError],
   );
 
   const patchWorkbenchAnnotation = useCallback(
@@ -1844,7 +1865,7 @@ export default function AnnotatorWorkspace({
     }, "Unable to create relation", activeRelationTask?.id ?? null);
   }, [createAnnotationRecord, activeRelationTask, activeWorkbench, addWorkbenchAnnotation, annotationGuidelineVersionId, annotationStructureVersionId, relationChoice, runMutation, selectedAnnotatorId, setError, spanById]);
 
-  async function setDocumentLabel(labelName: string): Promise<void> {
+  const setDocumentLabel = useCallback(async (labelName: string): Promise<void> => {
     if (!activeWorkbench || !docLabelTask) {
       return;
     }
@@ -1869,9 +1890,11 @@ export default function AnnotatorWorkspace({
         return;
       }
 
-      const previous = docLabelAnnotations.map((annotation) => annotation.id);
-      for (const annotationId of previous) {
-        await deleteAnnotationRecord(annotationId);
+      const previous = docLabelAnnotations[0];
+      if (previous) {
+        const updated = await updateAnnotationRecord(previous.id, { label: labelName });
+        patchWorkbenchAnnotation(updated);
+        return;
       }
       const created = await createAnnotationRecord({
         project_id: activeWorkbench.project.id,
@@ -1890,15 +1913,15 @@ export default function AnnotatorWorkspace({
               ...current,
               annotations: [
                 created,
-                ...current.annotations.filter((annotation) => !previous.includes(annotation.id)),
+                ...current.annotations,
               ],
             }
           : current,
       );
     }, "Unable to update document label", docLabelTask.id);
-  }
+  }, [activeWorkbench, docLabelTask, selectedAnnotatorId, setError, docLabelAnnotations, runMutation, annotationApi, setWorkbench, deleteAnnotationRecord, removeWorkbenchAnnotations, updateAnnotationRecord, patchWorkbenchAnnotation, createAnnotationRecord, annotationGuidelineVersionId, annotationStructureVersionId]);
 
-  async function setSentenceLabel(range: SentenceRange, labelName: string | null): Promise<void> {
+  const setSentenceLabel = useCallback(async (range: SentenceRange, labelName: string | null): Promise<void> => {
     if (!activeWorkbench || !sentenceTask) {
       return;
     }
@@ -1907,19 +1930,23 @@ export default function AnnotatorWorkspace({
       return;
     }
 
-    const existing = sentenceAnnotation(range);
+    const existing = sentenceLabelsByRange.get(`${range.start}:${range.end}`);
     await runMutation(async () => {
-      if (existing) {
-        await deleteAnnotationRecord(existing.id);
-      }
       if (labelName === null) {
         if (existing) {
+          await deleteAnnotationRecord(existing.id);
           removeWorkbenchAnnotations([existing.id]);
         }
         setSentenceMenu(null);
         return;
       }
 
+      if (existing) {
+        const updated = await updateAnnotationRecord(existing.id, { label: labelName });
+        patchWorkbenchAnnotation(updated);
+        setSentenceMenu(null);
+        return;
+      }
       const created = await createAnnotationRecord({
         project_id: activeWorkbench.project.id,
         document_id: activeWorkbench.document.id,
@@ -1940,14 +1967,14 @@ export default function AnnotatorWorkspace({
               ...current,
               annotations: [
                 created,
-                ...current.annotations.filter((annotation) => annotation.id !== existing?.id),
+                ...current.annotations,
               ],
             }
           : current,
       );
       setSentenceMenu(null);
     }, "Unable to update sentence label", sentenceTask.id);
-  }
+  }, [activeWorkbench, sentenceTask, selectedAnnotatorId, setError, sentenceLabelsByRange, runMutation, deleteAnnotationRecord, removeWorkbenchAnnotations, updateAnnotationRecord, patchWorkbenchAnnotation, createAnnotationRecord, annotationGuidelineVersionId, annotationStructureVersionId, setWorkbench]);
 
   async function submitCurrentDocument(): Promise<void> {
     if (!activeWorkbench || selectedProjectId === null) {
@@ -2339,23 +2366,48 @@ export default function AnnotatorWorkspace({
 
   useEffect(() => {
     function onKeyDown(event: KeyboardEvent): void {
-      if (submissionDialogOpen || reopenDialogOpen) {
+      if (
+        busy || mutationInFlight.current || event.defaultPrevented || event.ctrlKey || event.metaKey ||
+        submissionDialogOpen || reopenDialogOpen || document.querySelector('[role="dialog"], dialog[open]')
+      ) {
         return;
       }
       const activeElement = document.activeElement;
       const tagName = activeElement?.tagName ?? "";
       const inTextInput = tagName === "INPUT" || tagName === "TEXTAREA" || tagName === "SELECT";
-      if (inTextInput) {
+      if (inTextInput || (activeElement instanceof HTMLElement && activeElement.isContentEditable)) {
         return;
       }
       const selectedSpan =
         selectedAnnotationId !== null ? spanById.get(selectedAnnotationId) ?? null : null;
 
-      if (event.key === "1" && !pendingSelection && !relationChoice) {
+      const digit = /^Digit([1-9])$/.exec(event.code)?.[1] ?? (/^[1-9]$/.test(event.key) ? event.key : null);
+      const labelIndex = digit === null ? null : Number(digit) - 1;
+      if (event.altKey) {
+        if (!event.shiftKey && activeTab === "annotate" && labelIndex !== null && docLabelTask && isTaskEditable(docLabelTask.id)) {
+          const label = displayLabelsForTask(docLabelTask)[labelIndex];
+          if (label) {
+            event.preventDefault();
+            void setDocumentLabel(label.name);
+          }
+        }
+        return;
+      }
+      if (sentenceMenu && sentenceTask && isTaskEditable(sentenceTask.id) && labelIndex !== null && !event.shiftKey) {
+        const range = sentenceRanges.find((item) => item.index === sentenceMenu.sentenceIndex);
+        const label = displayLabelsForTask(sentenceTask)[labelIndex];
+        if (range && label) {
+          event.preventDefault();
+          void setSentenceLabel(range, label.name);
+        }
+        return;
+      }
+
+      if (!annotationApi && event.key === "1" && !pendingSelection && !relationChoice) {
         changeView("annotate");
         return;
       }
-      if (event.key === "2" && !pendingSelection && !relationChoice) {
+      if (!annotationApi && event.key === "2" && !pendingSelection && !relationChoice) {
         changeView("progress");
         return;
       }
@@ -2426,6 +2478,15 @@ export default function AnnotatorWorkspace({
   }, [
     activeRelationTask,
     activeSpanTask,
+    activeTab,
+    annotationApi,
+    busy,
+    docLabelTask,
+    sentenceMenu,
+    sentenceTask,
+    sentenceRanges,
+    setDocumentLabel,
+    setSentenceLabel,
     changeView,
     createRelation,
     createSpan,
@@ -2612,7 +2673,7 @@ export default function AnnotatorWorkspace({
                       const tool = task?.annotation_type === "evidence_block" ? "evidence" : "legacy";
                       setSubmissionAssignmentId(assignmentId);
                       setAnnotationTool(tool);
-                      updateSearch({ assignment: assignmentId, tool }, "replace");
+                      updateSearch({ assignment: assignmentId, task: task?.id ?? null, tool }, "replace");
                     }}
                     disabled={busy}
                   >
@@ -3131,7 +3192,7 @@ export default function AnnotatorWorkspace({
                         type="button"
                         aria-pressed={activeDocLabel?.label === label.name}
                         onClick={() => void setDocumentLabel(label.name)}
-                        disabled={!isTaskEditable(task.id)}
+                        disabled={busy || saveStatus === "saving" || !isTaskEditable(task.id)}
                       >
                         <i style={{ backgroundColor: labelColor(label, index) }} />
                         <span>{label.name}</span>
@@ -3695,6 +3756,7 @@ export default function AnnotatorWorkspace({
                     className={cx(currentSpanMenuAnnotation.label === label.name && "current")}
                     key={label.name}
                     type="button"
+                    disabled={busy || saveStatus === "saving"}
                     onClick={() => void relabelSpan(currentSpanMenuAnnotation.id, label.name)}
                   >
                     <i style={{ backgroundColor: labelColor(label, index) }} />
@@ -3800,6 +3862,7 @@ export default function AnnotatorWorkspace({
                     className={cx(relationMenuAnnotation.label === label.name && "current")}
                     key={label.name}
                     type="button"
+                    disabled={busy || saveStatus === "saving"}
                     onClick={() => void relabelRelation(relationMenuAnnotation.id, label.name)}
                   >
                     <i style={{ backgroundColor: labelColor(label, index) }} />
@@ -3850,6 +3913,7 @@ export default function AnnotatorWorkspace({
                       key={label.name}
                       type="button"
                       onClick={() => void setSentenceLabel(sentenceMenuRange, label.name)}
+                      disabled={busy || saveStatus === "saving"}
                     >
                       <i style={{ backgroundColor: labelColor(label, index) }} />
                       {label.name}
@@ -3858,7 +3922,7 @@ export default function AnnotatorWorkspace({
                   );
                 })}
                 <hr />
-                <button type="button" onClick={() => void setSentenceLabel(sentenceMenuRange, null)}>
+                <button type="button" disabled={busy || saveStatus === "saving"} onClick={() => void setSentenceLabel(sentenceMenuRange, null)}>
                   Clear label
                 </button>
               </div>

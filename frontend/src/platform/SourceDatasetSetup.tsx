@@ -74,7 +74,7 @@ export default function SourceDatasetSetup({ projectId, projectName, data, curre
   const availableTasks = latestTasks.filter(supportsPaperAnnotation);
   if (selectedTask && !availableTasks.some((item) => item.id === selectedTask.id)) availableTasks.push(selectedTask);
   const existingRound = selectedTask && version && currentUserId !== null ? data.rounds
-    .filter((round) => round.status === "open" && round.dataset_version_id === version.id && round.task_version_id === selectedTask.id &&
+    .filter((round) => round.status === "open" && data.datasetVersions.some((source) => source.id === round.dataset_version_id && source.dataset_id === version.dataset_id) && round.task_version_id === selectedTask.id &&
       (round.open_to_all_annotators || round.annotator_user_ids.includes(currentUserId)))
     .sort((a, b) => b.id - a.id)[0] : undefined;
   const explicitTaskRoute = useRef(initialTaskVersionId);
@@ -227,8 +227,8 @@ export default function SourceDatasetSetup({ projectId, projectName, data, curre
       const round = await createRound(projectId, {
         name: `${name} · ${data.taskDefinitions.find((item) => item.id === task.task_definition_id)?.name ?? taskName.trim()}`, datasetVersionId: version.id, taskVersionId: task.id,
         cycleId: null, splitMapId: null, guidelineRevisionId: null, feedbackSetVersionId: null,
-        assistancePolicy: "blind", reannotationMode: "full_dataset", selectionStrategy: "all", selectionLimit: version.item_count,
-        annotatorUserIds: [currentUserId], openToAllAnnotators: false, reason: "Initial annotation",
+        assistancePolicy: "blind", reannotationMode: "unassigned", selectionStrategy: "all", selectionLimit: version.item_count,
+        annotatorUserIds: [currentUserId], openToAllAnnotators: false, reason: "Annotate unassigned source records",
       }, (created) => {
         savedRoundId.current = created.id;
         savedRoundTaskVersionId.current = task.id;
@@ -301,7 +301,7 @@ export default function SourceDatasetSetup({ projectId, projectName, data, curre
             <Button label={busy ? "Enabling NER…" : "Enable NER for these papers"} variant="secondary" isDisabled={busy} onClick={() => void enablePaperEntities()} />
           </> : null}
         </div> : null}
-        <p>{existingRound ? `Continue your open round: ${existingRound.name}.` : "This starts a blind annotation round assigned to you. Predictions are not shown."}</p>
+        <p>{existingRound ? `Continue your open round: ${existingRound.name}.` : "This starts a blind round for source records not already assigned to this task. Earlier rounds and their work are preserved."}</p>
         <Button label={busy ? "Starting annotation…" : existingRound ? "Continue annotation" : "Start annotating"} variant="primary" isDisabled={busy || !version.item_count || currentUserId === null || Boolean(taskId && !compatibility?.supported) || (!taskId && (!taskName.trim() || labelValues.length < (taskMode === "entities" ? 1 : 2)))} onClick={() => void startAnnotation()} />
       </div> : null}
       {canInfer ? <p><PlatformRouteLink href={`/projects/${projectId}/inference?datasetVersionId=${version.id}`} onNavigate={() => onNavigate(`/projects/${projectId}/inference?datasetVersionId=${version.id}`)}>Run predictions on this source</PlatformRouteLink></p> : null}

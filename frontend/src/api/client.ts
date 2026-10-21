@@ -189,7 +189,13 @@ async function responseErrorMessage(response: Response): Promise<string> {
   }
 }
 
-async function requestResponse(path: string, init?: RequestInit): Promise<Response> {
+type AuthenticationFailure = "invalidate-session" | "reject-credentials";
+
+async function requestResponse(
+  path: string,
+  init?: RequestInit,
+  authenticationFailure: AuthenticationFailure = "invalidate-session",
+): Promise<Response> {
   const requestGeneration = getSessionGeneration();
   const method = (init?.method ?? "GET").toUpperCase();
   const csrfToken = SAFE_METHODS.has(method) ? null : cookieValue(CSRF_COOKIE_NAME);
@@ -208,6 +214,7 @@ async function requestResponse(path: string, init?: RequestInit): Promise<Respon
     const message = await responseErrorMessage(response);
     if (
       response.status === 401 &&
+      authenticationFailure === "invalidate-session" &&
       getSessionGeneration() === requestGeneration
     ) {
       publishSessionChange(false);
@@ -218,8 +225,12 @@ async function requestResponse(path: string, init?: RequestInit): Promise<Respon
   return response;
 }
 
-export async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await requestResponse(path, init);
+export async function request<T>(
+  path: string,
+  init?: RequestInit,
+  authenticationFailure: AuthenticationFailure = "invalidate-session",
+): Promise<T> {
+  const response = await requestResponse(path, init, authenticationFailure);
 
   if (response.status === 204) {
     return undefined as T;
@@ -576,6 +587,7 @@ export function splitEvidenceBlock(
 export function listEvidenceCommands(
   projectId: number,
   filters: {
+    mineOnly?: boolean;
     documentId?: number;
     targetVersionId?: number;
     structureVersionId?: number;
@@ -583,6 +595,9 @@ export function listEvidenceCommands(
   } = {},
 ): Promise<EvidenceCommandSummary[]> {
   const params = new URLSearchParams({ project_id: String(projectId) });
+  if (filters.mineOnly !== undefined) {
+    params.set("mine_only", String(filters.mineOnly));
+  }
   if (filters.documentId !== undefined) {
     params.set("document_id", String(filters.documentId));
   }
@@ -1156,6 +1171,9 @@ export async function acceptInvite(
       method: "POST",
       body: JSON.stringify(payload),
     },
+    payload.username && payload.password
+      ? "reject-credentials"
+      : "invalidate-session",
   );
   publishSessionChange(true);
 }
@@ -1182,7 +1200,7 @@ export async function login(username: string, password: string): Promise<void> {
   await request<{ authenticated: boolean }>("/auth/login", {
     method: "POST",
     body: JSON.stringify({ username, password }),
-  });
+  }, "reject-credentials");
   publishSessionChange(true);
 }
 
@@ -1213,7 +1231,7 @@ export async function register(
       workspace_kind: options.workspaceKind,
       workspace_name: options.workspaceName,
     }),
-  });
+  }, "reject-credentials");
   publishSessionChange(true);
 }
 

@@ -308,7 +308,7 @@ export default function OverviewScreen({
   } : openRound && onContinueAnnotation ? {
     href: `/my-work/rounds/${openRound.id}`, label: roundTaskName(openRound.task_version_id) ? `Continue ${roundTaskName(openRound.task_version_id)}` : "Continue annotation", onNavigate: () => onContinueAnnotation(openRound.id),
   } : onlyDocumentTask && onOpenDocumentTask ? {
-    href: `/my-work?project=${projectId}&view=annotate&task=${onlyDocumentTask.id}`, label: `Open ${onlyDocumentTask.display_name}`, onNavigate: () => onOpenDocumentTask(onlyDocumentTask),
+    href: `/my-work?project=${projectId}&view=annotate&task=${onlyDocumentTask.id}&tool=${onlyDocumentTask.annotation_type === "evidence_block" ? "evidence" : "legacy"}`, label: `Open ${onlyDocumentTask.display_name}`, onNavigate: () => onOpenDocumentTask(onlyDocumentTask),
   } : onlySetupTask && onSetupTask ? {
     href: `/projects/${projectId}/data?tab=source&taskVersionId=${latestTasks.get(onlySetupTask.id)!.id}`, label: `Set up ${onlySetupTask.name}`, onNavigate: () => onSetupTask(latestTasks.get(onlySetupTask.id)!.id),
   } : sourceCount && onSetupAnnotation ? {
@@ -350,7 +350,7 @@ export default function OverviewScreen({
       ? {
           label: "Open work",
           value:
-            data.rounds.filter((round) => !["closed", "completed"].includes(round.status))
+            data.rounds.filter((round) => round.status === "open")
               .length || assignments.filter((item) => item.status !== "completed").length,
           detail: `${data.rounds.length} annotation rounds`,
         }
@@ -410,7 +410,7 @@ export default function OverviewScreen({
                   {projectTasks.map((task) => <tr key={`document-task:${task.id}`}>
                     <td data-label="Task" data-priority="identity"><strong>{task.display_name}</strong><span>{task.annotation_type === "entity" ? "Named entity recognition" : task.annotation_type.replace(/_/g, " ")}</span></td>
                     <td data-label="Annotation work">{!task.enabled ? "Disabled" : documents.length ? `${documents.length} project papers · document editor` : "Import papers to start"}</td>
-                    <td data-label="Actions" data-priority="action">{task.enabled && documents.length && onOpenDocumentTask ? <PlatformRouteLink href={`/my-work?project=${projectId}&view=annotate&task=${task.id}`} onNavigate={() => onOpenDocumentTask(task)}>Open {task.display_name}</PlatformRouteLink> : null}</td>
+                    <td data-label="Actions" data-priority="action">{task.enabled && documents.length && onOpenDocumentTask ? <PlatformRouteLink href={`/my-work?project=${projectId}&view=annotate&task=${task.id}&tool=${task.annotation_type === "evidence_block" ? "evidence" : "legacy"}`} onNavigate={() => onOpenDocumentTask(task)}>Open {task.display_name}</PlatformRouteLink> : null}</td>
                   </tr>)}
                 </tbody>
               </table>

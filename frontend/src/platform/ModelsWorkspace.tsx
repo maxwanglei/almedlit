@@ -178,6 +178,7 @@ function ModelRegistry({
     projectId: initialProjectId ?? undefined,
     limit: 50,
   });
+  const appliedFilters = useRef(filters);
   const [page, setPage] = useState<WorkspacePage<WorkspaceModel>>({
     items: [],
     next_cursor: null,
@@ -201,6 +202,7 @@ function ModelRegistry({
           projects,
         );
         if (requestId !== loadRequestIdRef.current) return;
+        appliedFilters.current = nextFilters;
         setPage((current) => ({
           items: append ? [...current.items, ...result.items] : result.items,
           next_cursor: result.next_cursor,
@@ -478,7 +480,7 @@ function ModelRegistry({
               isDisabled={loading}
               onClick={() =>
                 void load(
-                  { ...filters, cursor: page.next_cursor ?? undefined },
+                  { ...appliedFilters.current, cursor: page.next_cursor ?? undefined },
                   true,
                 )
               }

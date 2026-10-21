@@ -311,3 +311,18 @@ test("paper deep links retain the second paper through loading and reload", asyn
   await expect(page.getByRole("button", { name: /^Relevant/ })).toHaveAttribute("aria-pressed", "true");
   expect(state.decisions).toHaveLength(1);
 });
+
+test("paper annotation shortcuts label the paper and stay inside the editor", async ({ page }) => {
+  const state = await installPaperAnnotationMock(page);
+  await page.goto("/my-work/rounds/1");
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Tucatinib study");
+  await page.keyboard.press("2");
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Tucatinib study");
+  await page.keyboard.press("Alt+2");
+  await expect.poll(() => state.decisions.find((decision) => decision.round_item_id === 1001)?.output).toBe("Not relevant");
+  await expect(page.getByRole("button", { name: /^Not relevant/ })).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "Submit task for this paper", exact: true }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.keyboard.press("Alt+1");
+  expect(state.decisions.find((decision) => decision.round_item_id === 1001)?.output).toBe("Not relevant");
+});

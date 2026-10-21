@@ -108,7 +108,7 @@ export default function WorkspaceSettings({
   const [invites, setInvites] = useState<WorkspaceInviteSummary[]>([]);
   const [capabilities, setCapabilities] =
     useState<WorkspaceCapabilities | null>(null);
-  const [preset, setPreset] = useState("annotate");
+  const [preset, setPreset] = useState<string | null>(null);
   const [inviteRole, setInviteRole] = useState<WorkspaceRole>("annotator");
   const [inviteExpiry, setInviteExpiry] = useState("default");
   const [createdInvite, setCreatedInvite] = useState<{
@@ -137,6 +137,8 @@ export default function WorkspaceSettings({
       requestId === loadRequestIdRef.current &&
       contextKey === contextKeyRef.current;
     setLoading(true);
+    setCapabilities(null);
+    setPreset(null);
     setError(null);
     try {
       const [nextMembers, nextRequests, nextCapabilities, nextGovernance, nextInvites] = await Promise.all([
@@ -228,6 +230,7 @@ export default function WorkspaceSettings({
   }
 
   async function saveCapabilities(): Promise<void> {
+    if (loading || busy || capabilities === null || preset === null || preset === "custom") return;
     await run(async (isCurrentRequest) => {
       const updated = await setWorkspaceCapability(workspaceId, preset);
       if (!isCurrentRequest()) return;
@@ -400,10 +403,12 @@ export default function WorkspaceSettings({
                 <label>
                   <span>Capability preset</span>
                   <select
-                    value={preset}
-                    disabled={busy}
+                    value={preset ?? ""}
+                    disabled={loading || busy || capabilities === null}
                     onChange={(event) => setPreset(event.target.value)}
                   >
+                    {preset === null ? <option value="">Capabilities unavailable</option> : null}
+                    {capabilities?.preset === "custom" ? <option value="custom" disabled>Custom</option> : null}
                     {CAPABILITY_PRESETS.map((option) => (
                       <option key={option.value} value={option.value}>
                         {option.label}
@@ -418,7 +423,7 @@ export default function WorkspaceSettings({
                 <Button
                   label={busy ? "Saving…" : "Save capabilities"}
                   variant="primary"
-                  isDisabled={busy || preset === capabilities?.preset}
+                  isDisabled={loading || busy || capabilities === null || preset === null || preset === capabilities.preset}
                   onClick={() => void saveCapabilities()}
                 />
               </div>

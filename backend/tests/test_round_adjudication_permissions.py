@@ -122,7 +122,32 @@ def test_unassigned_manager_can_adjudicate_finalize_and_publish_actual_disagreem
     assert list(published.json()["labels"].values()) == ["relevant"]
     assert published.json()["source_submission_ids"] == [finalized.json()["id"]]
     assert published.json()["source_decision_ids"] == [adjudication.json()["id"]]
-    assert db.query(models.RoundAnnotationDecision).count() == 5
+    repeated = client.post(
+        f"/api/rounds/{annotation_round['id']}/label-sets", json={
+            **publication, "source_kind": "adjudicated",
+            "submission_ids": [*submissions, finalized.json()["id"]],
+        }, headers=_headers(scope.manager),
+    )
+    assert repeated.status_code == 201, repeated.text
+    assert repeated.json()["id"] == published.json()["id"]
+    revised_decision = _decision(
+        client, scope, scope.manager, items[0], kind="adjudication", output="irrelevant",
+    )
+    assert revised_decision.status_code == 201, revised_decision.text
+    revised_submission = _submit(
+        client, scope, scope.manager, annotation_round, [revised_decision.json()["id"]],
+    )
+    assert revised_submission.status_code == 201, revised_submission.text
+    revised = client.post(
+        f"/api/rounds/{annotation_round['id']}/label-sets", json={
+            **publication, "source_kind": "adjudicated",
+            "submission_ids": [*submissions, revised_submission.json()["id"]],
+        }, headers=_headers(scope.manager),
+    )
+    assert revised.status_code == 201, revised.text
+    assert revised.json()["id"] != published.json()["id"]
+    assert list(revised.json()["labels"].values()) == ["irrelevant"]
+    assert db.query(models.RoundAnnotationDecision).count() == 6
     db.expire_all()
     assert db.get(models.AnnotationRound, annotation_round["id"]).status == (
         "closed" if publication_mode == "closed_round" else "open"

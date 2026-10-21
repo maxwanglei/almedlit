@@ -6,6 +6,8 @@ import {
   createCycle,
   createGuidelineWithRevision,
   createRound,
+  getAnnotationRound,
+  transitionRound,
   createTrainingDataset,
   launchTrainingRun,
   loadPlatformProject,
@@ -19,6 +21,7 @@ import {
   type RoundDraft,
   type TaskDraft,
   type TrainingDataDraft,
+  type TrainingLaunchAttempt,
 } from "./api";
 import type { TrainingLaunchDraft } from "./TrainingScreen";
 import { useResourceCreation } from "./useResourceCreation";
@@ -63,6 +66,8 @@ export function usePlatformProject(
   } | null>(null);
   const loadRequestIdRef = useRef(0);
   const mutationRequestIdRef = useRef(0);
+  const launchAttempt = useRef<{ signature: string; attempt: TrainingLaunchAttempt } | null>(null);
+  const roundCreation = useRef<{ contextKey: string; requestKey: string; roundId: number } | null>(null);
   const rolesKey = effectiveRoles?.join(",") ?? "";
   const contextKey = `${enabled}:${workspaceId ?? "none"}:${projectId ?? "none"}:${scope}:${rolesKey}`;
   const contextKeyRef = useRef(contextKey);
@@ -203,12 +208,37 @@ export function usePlatformProject(
     reload,
     addDataset: (draft) => mutate(() => resourceCreation.createDataset(draft)),
     addCycle: (draft) => mutate((id) => createCycle(id, draft)),
-    addRound: (draft) => mutate((id) => createRound(id, draft)),
+    addRound: (draft) => mutate(async (id) => {
+      const requestKey = JSON.stringify(draft);
+      const previous = roundCreation.current;
+      try {
+        if (previous?.contextKey === contextKey && previous.requestKey === requestKey) {
+          const saved = await getAnnotationRound(previous.roundId);
+          if (saved.status === "draft") await transitionRound(id, saved.id, "open");
+          else if (saved.status !== "open") throw new Error("This saved round is no longer a draft. Review it in Team & Rounds.");
+        } else {
+          await createRound(id, draft, (round) => {
+            roundCreation.current = { contextKey, requestKey, roundId: round.id };
+          });
+        }
+        roundCreation.current = null;
+      } catch (caught) {
+        if (roundCreation.current?.contextKey === contextKey) await reload();
+        throw caught;
+      }
+    }),
     scoreFeedback: (draft) => mutate((id) => scoreFeedbackRun(id, draft)),
     addGuideline: (draft) => mutate((id) => createGuidelineWithRevision(id, draft)),
     addTask: (draft) => mutate(() => resourceCreation.createTask(draft)),
     prepareTrainingData: (draft) => mutate((id) => createTrainingDataset(id, draft)),
-    launch: (draft) => mutate((id) => launchTrainingRun(id, draft, data)),
+    launch: async (draft) => {
+      const signature = JSON.stringify({ projectId, draft });
+      if (launchAttempt.current?.signature !== signature) {
+        launchAttempt.current = { signature, attempt: { key: crypto.randomUUID(), modelId: null, recipeVersionId: null } };
+      }
+      const attempt = launchAttempt.current.attempt;
+      await mutate((id) => launchTrainingRun(id, draft, data, attempt)).catch(() => undefined);
+    },
     setModules,
   };
 }

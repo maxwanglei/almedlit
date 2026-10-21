@@ -91,6 +91,16 @@ beforeEach(() => {
 });
 
 describe("platform API orchestration", () => {
+  it("loads task continuation and source setup context on Tasks", async () => {
+    mocks.request.mockImplementation(async (path: string) => {
+      if (path === "/projects/7/modules") return { project_id: 7, selected: ["data", "annotate"], effective: ["data", "annotate"], workspace_capabilities: ["annotation"] };
+      return [];
+    });
+    await loadPlatformProject(7, "tasks", 5, ["manager"]);
+    expect(mocks.request).toHaveBeenCalledWith("/rounds?project_id=7");
+    expect(mocks.request).toHaveBeenCalledWith("/datasets?project_id=7");
+  });
+
   it("uses project-scoped administrator contracts for runtime and storage setup", async () => {
     mocks.request
       .mockResolvedValueOnce({ id: 131 })
@@ -1267,6 +1277,7 @@ describe("platform API orchestration", () => {
       if (path === "/training-recipes/trusted/tfidf_logreg?project_id=7") {
         return { id: 122 };
       }
+      if (path === "/models?project_id=7") return [];
       if (path === "/models") return { id: 81 };
       if (path === "/training-runs") return { id: 151 };
       throw new Error(`Unexpected request: ${path}`);
@@ -1287,15 +1298,17 @@ describe("platform API orchestration", () => {
         evaluationPlan: { splits: ["test"] },
       },
       data,
+      { key: crypto.randomUUID(), modelId: null, recipeVersionId: null },
     );
 
     expect(mocks.request.mock.calls.map(([path]) => path)).toEqual([
       "/training/recipes/tfidf_logreg/validate-configuration",
       "/training-recipes/trusted/tfidf_logreg?project_id=7",
+      "/models?project_id=7",
       "/models",
       "/training-runs",
     ]);
-    expect(bodyOf(mocks.request.mock.calls[3])).toMatchObject({
+    expect(bodyOf(mocks.request.mock.calls[4])).toMatchObject({
       project_id: 7,
       registered_model_id: 81,
       recipe_version_id: 122,
@@ -1305,5 +1318,89 @@ describe("platform API orchestration", () => {
       evaluation_plan: { splits: ["test"] },
       idempotency_key: "00000000-0000-4000-8000-000000000000",
     });
+  });
+  it.each(["model", "run"])("retries an ambiguous %s response with the same model and idempotency key", async (lostResponse) => {
+    const descriptor: TrainingRecipeDescriptor = {
+      schema_version: "training-recipe-descriptor-v1",
+      key: "tfidf_logreg",
+      version: "1.0.0",
+      label: "TF-IDF logistic regression",
+      description: "Linear baseline",
+      model_family: "conventional_ml",
+      architecture_family: "linear_classifier",
+      parameterization: "full",
+      supported_task_kinds: ["classification"],
+      trainer_key: "sklearn_tfidf_logreg",
+      implementation_status: "implemented",
+      environment: {
+        runtime_class: "classical-cpu",
+        packages: ["scikit-learn"],
+        devices: ["cpu"],
+        minimum_memory_gb: 4,
+        requires_verified_environment: true,
+        setup_hint: "Use verified CPU.",
+      },
+      config_schema: {},
+      artifact_formats: ["joblib"],
+    };
+    const data: PlatformProjectData = {
+      ...EMPTY_PLATFORM_PROJECT_DATA,
+      recipes: [descriptor],
+    };
+    vi.spyOn(crypto, "randomUUID").mockReturnValue(
+      "00000000-0000-4000-8000-000000000000",
+    );
+    let modelCreated = false;
+    let launchCount = 0;
+    mocks.request.mockImplementation(async (path: string) => {
+      if (path.includes("/validate-configuration")) {
+        return {
+          valid: true,
+          normalized_config: { max_features: 1000 },
+          errors: [],
+        };
+      }
+      if (path === "/training-recipes/trusted/tfidf_logreg?project_id=7") {
+        return { id: 122 };
+      }
+      if (path === "/models?project_id=7") return modelCreated ? [{ id: 81, project_id: 7, name: "Relevance baseline" }] : [{ id: 999, project_id: 8, name: "Relevance baseline" }];
+      if (path === "/models") {
+        if (modelCreated) throw new Error("Model already exists");
+        modelCreated = true;
+        if (lostResponse === "model") throw new Error("Response lost");
+        return { id: 81, project_id: 7, name: "Relevance baseline" };
+      }
+      if (path === "/training-runs") {
+        if (++launchCount === 1 && lostResponse === "run") throw new Error("Response lost");
+        return { id: 151 };
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    });
+
+    const attempt = { key: "unchanged-draft", modelId: null, recipeVersionId: null };
+    const launch = () => launchTrainingRun(
+      7,
+      {
+        modelName: "Relevance baseline",
+        taskVersionId: 12,
+        trainingDatasetVersionId: 51,
+        recipeKey: "tfidf_logreg",
+        recipeVersionId: null,
+        environmentId: 131,
+        storagePolicyId: 141,
+        seed: 73,
+        config: { max_features: 999 },
+        evaluationPlan: { splits: ["test"] },
+      },
+      data,
+      attempt,
+    );
+    await expect(launch()).rejects.toThrow("Response lost");
+    await expect(launch()).resolves.toMatchObject({ id: 151 });
+    const runs = mocks.request.mock.calls.filter(([path]) => path === "/training-runs");
+    expect(runs).toHaveLength(lostResponse === "run" ? 2 : 1);
+    if (lostResponse === "run") expect(bodyOf(runs[0])).toEqual(bodyOf(runs[1]));
+    expect(bodyOf(runs[0])).toMatchObject({ registered_model_id: 81, idempotency_key: "unchanged-draft" });
+    expect(mocks.request.mock.calls.filter(([path]) => path === "/models")).toHaveLength(1);
   });
 });

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render as testingRender, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -18,6 +18,17 @@ import type {
 } from "@/types/api";
 
 import EvidenceBlockCanvas from "./EvidenceBlockCanvas";
+import { AccessProvider, createAccessSnapshot } from "@/navigation/AccessContext";
+
+const inferenceAccess = createAccessSnapshot({ workspaceId: 1, workspaceKind: "team", membershipRole: "annotator", effectiveCapabilities: ["annotation", "inference"] });
+function InferenceAccess({ children }: { children: React.ReactNode }): React.ReactElement {
+  return <AccessProvider value={inferenceAccess}>{children}</AccessProvider>;
+}
+
+
+function render(ui: React.ReactElement) {
+  return testingRender(ui, { wrapper: InferenceAccess });
+}
 
 const api = vi.hoisted(() => ({
   createAnnotation: vi.fn(),
@@ -349,6 +360,46 @@ afterEach(() => {
 });
 
 describe("EvidenceBlockCanvas", () => {
+  it("keeps annotation usable without requesting inference in an annotate workspace", async () => {
+    api.listInferenceRuns.mockRejectedValue(new Error("Capability 'inference' is not enabled"));
+    const setError = vi.fn();
+    const annotateAccess = createAccessSnapshot({ workspaceId: 1, workspaceKind: "team", membershipRole: "annotator", effectiveCapabilities: ["annotation"] });
+    render(<AccessProvider value={annotateAccess}><EvidenceBlockCanvas
+      projectId={1} document={DOCUMENT} task={TASK} assignments={[ASSIGNMENT]}
+      annotations={[]} annotatorId="alice" busy={false} setBusy={vi.fn()} setError={setError}
+      onAnnotationsChanged={vi.fn()} onRefreshAnnotations={async () => undefined}
+    /></AccessProvider>);
+    await screen.findByLabelText("Note");
+    expect(api.listInferenceRuns).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Capability 'inference'/)).toBeNull();
+    const user = userEvent.setup();
+    await waitFor(() => expect(api.getDocumentStructure).toHaveBeenCalled());
+    await act(async () => undefined);
+    expect(setError.mock.calls.filter(([message]) => typeof message === "string")).toEqual([]);
+    await user.click(await screen.findByRole("button", { name: /Sentence 1, unreviewed/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Create block" }));
+    await waitFor(() => expect(api.createAnnotation).toHaveBeenCalled());
+  });
+
+  it("requests only the current actor's history and ignores undo while busy", async () => {
+    api.listEvidenceCommands.mockResolvedValue([{
+      command_group_key: "own-command", operation: "update", status: "applied",
+      project_id: 1, document_id: 41, target_version_id: 101, structure_version_id: 201,
+      guideline_version_id: 301, actor_user_id: 2, created_at: "2026-07-15T12:00:00Z",
+    }]);
+    render(<EvidenceBlockCanvas
+      projectId={1} document={DOCUMENT} task={TASK} assignments={[ASSIGNMENT]}
+      annotations={[]} annotatorId="alice" busy setBusy={vi.fn()} setError={vi.fn()}
+      onAnnotationsChanged={vi.fn()} onRefreshAnnotations={async () => undefined}
+    />);
+    await screen.findByLabelText("Note");
+    await waitFor(() => expect(api.listEvidenceCommands).toHaveBeenCalled());
+    expect(api.listEvidenceCommands).toHaveBeenCalledWith(1, expect.objectContaining({ mineOnly: true }));
+    await screen.findByTitle("Undo update");
+    fireEvent.keyDown(window, { key: "z", ctrlKey: true });
+    expect(api.undoEvidenceCommand).not.toHaveBeenCalled();
+  });
+
   it("preserves run discovery errors after prediction refresh effects settle", async () => {
     let rejectRuns!: (error: Error) => void;
     api.listInferenceRuns.mockImplementationOnce(

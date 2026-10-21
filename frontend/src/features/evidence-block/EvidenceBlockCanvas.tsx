@@ -54,6 +54,7 @@ import {
   rangesAreAdjacent,
   rangesOverlap,
 } from "./evidenceBlockSelection";
+import { hasEffectiveCapability, useAccess } from "@/navigation/AccessContext";
 import { nextRedoCommand, nextUndoCommand } from "./evidenceCommandHistory";
 import { useEvidenceBlockStore } from "./evidenceBlockStore";
 import EvidencePredictionPanel from "./EvidencePredictionPanel";
@@ -339,6 +340,8 @@ export default function EvidenceBlockCanvas({
   onActiveAssignmentChange,
   onSaveStatusChange,
 }: EvidenceBlockCanvasProps): React.ReactElement {
+  const access = useAccess();
+  const inferenceEnabled = access.ready && hasEffectiveCapability(access, "inference");
   const settings = useMemo(() => asSettings(task), [task]);
   const [targets, setTargets] = useState<EvidenceTarget[]>([]);
   const [targetVersionId, setSelectedTargetVersionId] = useState<number | null>(null);
@@ -417,6 +420,8 @@ export default function EvidenceBlockCanvas({
   useEffect(() => {
     let active = true;
     setInferenceRunsError(null);
+    setInferenceRuns([]);
+    if (!inferenceEnabled) return;
     void listInferenceRuns(projectId)
       .then((items) => {
         if (active) {
@@ -434,7 +439,7 @@ export default function EvidenceBlockCanvas({
     return () => {
       active = false;
     };
-  }, [projectId]);
+  }, [inferenceEnabled, projectId]);
 
   useEffect(() => {
     setSelectedTargetVersionId((current) =>
@@ -479,12 +484,12 @@ export default function EvidenceBlockCanvas({
 
   const compatibleInferenceRuns = useMemo(
     () =>
-      inferenceRuns.filter((run) =>
+      (inferenceEnabled ? inferenceRuns : []).filter((run) =>
         run.project_id !== projectId || selectedTargetVersionId === null
           ? false
           : run.target_version_ids.includes(selectedTargetVersionId),
       ),
-    [inferenceRuns, projectId, selectedTargetVersionId],
+    [inferenceEnabled, inferenceRuns, projectId, selectedTargetVersionId],
   );
 
   useEffect(() => {
@@ -571,6 +576,7 @@ export default function EvidenceBlockCanvas({
     setCommandLoading(true);
     try {
       const items = await listEvidenceCommands(projectId, {
+        mineOnly: true,
         documentId: document.id,
         targetVersionId: selectedTargetVersionId,
         structureVersionId,
@@ -769,7 +775,7 @@ export default function EvidenceBlockCanvas({
   const executeHistoryCommand = useCallback(
     async (action: "undo" | "redo"): Promise<void> => {
       const command = action === "undo" ? commandToUndo : commandToRedo;
-      if (!command || selectedTargetVersionId === null || structureVersionId === null) {
+      if (busy || commandLoading || !assignmentEditable || !command || selectedTargetVersionId === null || structureVersionId === null) {
         return;
       }
       await mutate(async () => {
@@ -793,6 +799,9 @@ export default function EvidenceBlockCanvas({
       });
     },
     [
+      assignmentEditable,
+      busy,
+      commandLoading,
       clearSelection,
       commandToRedo,
       commandToUndo,
@@ -809,6 +818,7 @@ export default function EvidenceBlockCanvas({
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
+      if (busy || commandLoading || window.document.querySelector('[role="dialog"][aria-modal="true"], dialog[open]')) return;
       if (eventShortcut(event) === settings.keyboard_shortcuts.cancel) {
         clearSelection();
         selectAnnotation(null);
@@ -836,7 +846,7 @@ export default function EvidenceBlockCanvas({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [clearSelection, executeHistoryCommand, selectAnnotation, settings.keyboard_shortcuts.cancel]);
+  }, [busy, commandLoading, clearSelection, executeHistoryCommand, selectAnnotation, settings.keyboard_shortcuts.cancel]);
 
   function adjustSelection(
     action: "expand-start" | "expand-end" | "contract-start" | "contract-end",
@@ -1311,7 +1321,7 @@ export default function EvidenceBlockCanvas({
               : `${selectedAssignment?.status ?? "closed"} assignment · read-only`}
           </span>
         ) : null}
-        {inferenceRunsError || predictionMessage ? (
+        {inferenceEnabled && (inferenceRunsError || predictionMessage) ? (
           <span className="eb-prediction-message" role="status">
             {inferenceRunsError ?? predictionMessage}
           </span>

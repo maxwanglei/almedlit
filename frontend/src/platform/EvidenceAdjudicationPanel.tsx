@@ -4,6 +4,7 @@ import { Button } from "@astryxdesign/core/Button";
 import {
   adjudicateEvidence,
   getEvidenceAdjudication,
+  getDocumentStructure,
 } from "@/api/client";
 import type {
   Document,
@@ -182,16 +183,20 @@ export default function EvidenceAdjudicationPanel({
       setError("This boundary strategy requires two source blocks.");
       return;
     }
-    const startSentenceId = Number(customStart);
-    const endSentenceId = Number(customEnd);
+    const startOrdinal = Number(customStart);
+    const endOrdinal = Number(customEnd);
     if (
       effectiveStrategy === "custom" &&
       (
-        !Number.isInteger(startSentenceId) ||
-        !Number.isInteger(endSentenceId)
+        customStart.trim() === "" ||
+        customEnd.trim() === "" ||
+        !Number.isSafeInteger(startOrdinal) ||
+        !Number.isSafeInteger(endOrdinal) ||
+        startOrdinal < 0 ||
+        endOrdinal < startOrdinal
       )
     ) {
-      setError("Enter valid start and end sentence IDs.");
+      setError("Enter valid start and end sentence ordinals in ascending order.");
       return;
     }
 
@@ -199,6 +204,29 @@ export default function EvidenceAdjudicationPanel({
     setError(null);
     setStatus(null);
     try {
+      let startSentenceId: number | null = null;
+      let endSentenceId: number | null = null;
+      if (effectiveStrategy === "custom") {
+        const [startPage, endPage] = await Promise.all([
+          getDocumentStructure(selectedScope.documentId, {
+            versionId: selectedScope.structureVersionId,
+            sentenceStart: startOrdinal,
+            sentenceLimit: 1,
+          }),
+          getDocumentStructure(selectedScope.documentId, {
+            versionId: selectedScope.structureVersionId,
+            sentenceStart: endOrdinal,
+            sentenceLimit: 1,
+          }),
+        ]);
+        const start = startPage.sentences.find((sentence) => sentence.ordinal === startOrdinal);
+        const end = endPage.sentences.find((sentence) => sentence.ordinal === endOrdinal);
+        if (!start || !end) {
+          throw new Error("Choose sentence ordinals within this document's pinned structure.");
+        }
+        startSentenceId = start.id;
+        endSentenceId = end.id;
+      }
       const created = await adjudicateEvidence(
         projectId,
         selectedScope.documentId,
@@ -357,7 +385,7 @@ export default function EvidenceAdjudicationPanel({
                 {allowSoloGold || strategy === "custom" ? (
                   <>
                     <label>
-                      <span>Start sentence ID</span>
+                      <span>Start sentence ordinal</span>
                       <input
                         inputMode="numeric"
                         value={customStart}
@@ -365,7 +393,7 @@ export default function EvidenceAdjudicationPanel({
                       />
                     </label>
                     <label>
-                      <span>End sentence ID</span>
+                      <span>End sentence ordinal</span>
                       <input
                         inputMode="numeric"
                         value={customEnd}

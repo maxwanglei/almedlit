@@ -7,6 +7,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Project } from "@/types/api";
@@ -334,4 +335,15 @@ describe("ModelsWorkspace", () => {
     expect(screen.getByText("Creator")).toBeTruthy();
     expect(screen.getByText("Vera Version")).toBeTruthy();
   });
+});
+
+it("loads the next models page with applied filters while edits remain unapplied", async () => {
+  const user = userEvent.setup();
+  mocks.listWorkspaceModels.mockResolvedValueOnce({ items: [modelSummary], next_cursor: 81 }).mockResolvedValue({ items: [], next_cursor: null });
+  render(<ModelsWorkspace workspaceId={5} projects={[project]} view="registry" onNavigate={vi.fn()} />);
+  await screen.findByText("Relevance baseline");
+  await user.selectOptions(screen.getByLabelText("Lifecycle status"), "archived");
+  await user.click(screen.getByRole("button", { name: "Load more" }));
+  await waitFor(() => expect(mocks.listWorkspaceModels).toHaveBeenLastCalledWith(5,
+    { projectId: undefined, limit: 50, cursor: 81 }, [project]));
 });

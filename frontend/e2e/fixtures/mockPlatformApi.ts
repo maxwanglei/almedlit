@@ -1900,6 +1900,7 @@ export async function installPlatformApiMock(
         },
       ],
       ["/api/tasks", taskDefinitions],
+      ["/api/projects/1/tasks", platformProject.tasks],
       ["/api/tasks/versions", taskVersions],
       ["/api/datasets", datasets],
       ["/api/datasets/versions", datasetVersions],

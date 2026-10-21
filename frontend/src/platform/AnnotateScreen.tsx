@@ -1,3 +1,8 @@
+import { useState } from "react";
+
+import type { ProjectTask } from "@/types/api";
+
+import { transitionRound } from "./api";
 import {
   PlatformEmpty,
   PlatformPageHeader,
@@ -13,6 +18,8 @@ export default function AnnotateScreen({
   onCreateRound,
   onCreateTask,
   onSetupTask,
+  projectTasks = [],
+  onOpenDocumentTask,
   onOpenRound,
   currentUserId,
   canManage,
@@ -25,6 +32,8 @@ export default function AnnotateScreen({
   data: PlatformProjectData;
   onCreateRound: () => void;
   onCreateTask: () => void;
+  projectTasks?: ProjectTask[];
+  onOpenDocumentTask?: (task: ProjectTask) => void;
   onSetupTask?: (taskVersionId: number) => void;
   onOpenRound: (roundId: number) => void;
   currentUserId: number | null;
@@ -34,6 +43,20 @@ export default function AnnotateScreen({
   onCreateScore?: () => void;
   onRefresh?: () => Promise<void>;
 }): React.ReactElement {
+  const [pendingRound, setPendingRound] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  async function recoverRound(roundId: number, status: "open" | "cancelled"): Promise<void> {
+    setPendingRound(roundId);
+    setError(null);
+    try {
+      await transitionRound(projectId, roundId, status);
+      await onRefresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Round update failed.");
+    } finally {
+      setPendingRound(null);
+    }
+  }
   const showingTasks = view === "tasks";
 
   return (
@@ -50,7 +73,7 @@ export default function AnnotateScreen({
         }
         actionDisabled={
           !showingTasks &&
-          (!data.datasetVersions.length || !data.taskVersions.length)
+          (!data.datasetVersions.some((version) => version.item_count > 0) || !data.taskVersions.length)
         }
         onAction={
           canManage
@@ -61,6 +84,21 @@ export default function AnnotateScreen({
         }
       />
 
+      {error ? <p role="alert">{error}</p> : null}
+      {showingTasks && projectTasks.length ? (
+        <PlatformSection title="Document tasks" description="Annotation tasks for documents in this project.">
+          {projectTasks.map((task) => (
+            <p key={task.id}>
+              <strong>{task.display_name}</strong>
+              {task.enabled && onOpenDocumentTask ? (
+                <button type="button" className="platform-text-action" onClick={() => onOpenDocumentTask(task)}>
+                  Open {task.display_name}
+                </button>
+              ) : <span>{task.enabled ? "Annotation access required" : "Disabled"}</span>}
+            </p>
+          ))}
+        </PlatformSection>
+      ) : null}
       {showingTasks ? <PlatformSection
         title="Annotation tasks"
         description="Choose a task and collection to start annotation. Earlier task versions and submitted work remain available."
@@ -163,6 +201,16 @@ export default function AnnotateScreen({
                       </td>
                       <td data-label="Reason">{round.reason ?? "Initial annotation"}</td>
                       <td data-label="Action" data-priority="action">
+                        {canManage && round.status === "draft" ? (
+                          <>
+                            <button type="button" disabled={pendingRound !== null} onClick={() => void recoverRound(round.id, "open")}>
+                              Open draft {round.name}
+                            </button>
+                            <button type="button" disabled={pendingRound !== null} onClick={() => void recoverRound(round.id, "cancelled")}>
+                              Cancel draft {round.name}
+                            </button>
+                          </>
+                        ) : null}
                         <button
                           type="button"
                           className="platform-text-action"

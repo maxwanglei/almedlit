@@ -123,6 +123,47 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("RoundWorkbench", () => {
+  it("rejects blank regression but accepts explicit zero", async () => {
+    mocks.loadRoundWork.mockResolvedValue(roundWork(41, "Numeric source"));
+    mocks.addRoundDecision.mockResolvedValue({ ...decision(410, 501, "annotation"), output: 0 });
+    render(<RoundWorkbench round={round(41, "Regression")} task={{ ...task, task_kind: "regression", output_schema: { type: "number" } }} currentUserId={12} canManage onClose={vi.fn()} onRefresh={vi.fn()} />);
+    await screen.findByRole("spinbutton", { name: "Value" });
+    fireEvent.click(screen.getByRole("button", { name: "Save decision" }));
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Enter a valid numeric value.");
+    expect(mocks.addRoundDecision).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Value" }), { target: { value: "0" } });
+    mocks.addRoundDecision.mockResolvedValue({ ...decision(410, 501, "annotation"), output: 0 });
+    fireEvent.click(screen.getByRole("button", { name: "Save decision" }));
+    await waitFor(() => expect(mocks.addRoundDecision).toHaveBeenCalledWith(7, expect.objectContaining({ output: 0 })));
+  });
+
+  it("round-trips plain classification text and retains save confirmation", async () => {
+    const saved = decision(410, 501, "annotation");
+    mocks.loadRoundWork.mockResolvedValue({ ...roundWork(41, "Text source"), decisions: [saved] });
+    mocks.addRoundDecision.mockResolvedValue({ ...saved, id: 502, supersedes_decision_id: 501 });
+    render(<RoundWorkbench round={round(41, "Classification")} task={{ ...task, output_schema: { type: "string" } }} currentUserId={12} canManage onClose={vi.fn()} onRefresh={vi.fn()} />);
+    await screen.findByDisplayValue("Relevant");
+    fireEvent.click(screen.getByRole("button", { name: "Save decision" }));
+    await waitFor(() => expect(mocks.addRoundDecision).toHaveBeenCalledWith(7, expect.objectContaining({ output: "Relevant", supersedesDecisionId: 501 })));
+    expect(await screen.findByText("Decision saved.")).toBeTruthy();
+  });
+
+  it("keeps publication confirmation through refresh and prevents duplicates", async () => {
+    const work = { ...roundWork(41, "Published source"), submissions: [{ id: 601, project_id: 7, annotation_round_id: 41, annotator_user_id: 12, sequence: 1, decision_ids: [501], content_hash: "submission" }] };
+    mocks.loadRoundWork.mockImplementation(async () => structuredClone(work));
+    mocks.publishRoundLabelSet.mockResolvedValue({ name: "Published labels", version_number: 1 });
+    const closed = { ...round(41, "Closed"), status: "closed" };
+    const onRefresh = vi.fn(async () => { rendered.rerender(<RoundWorkbench round={{ ...closed }} task={{ ...task }} currentUserId={12} canManage onClose={vi.fn()} onRefresh={onRefresh} />); });
+    const rendered = render(<RoundWorkbench round={closed} task={task} currentUserId={12} canManage onClose={vi.fn()} onRefresh={onRefresh} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Publish label set" }));
+    await waitFor(() => expect(onRefresh).toHaveBeenCalledOnce());
+    await waitFor(() => expect(mocks.loadRoundWork).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("Published labels v1 published.")).toBeTruthy();
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Publish label set" }).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Publish label set" }));
+    expect(mocks.publishRoundLabelSet).toHaveBeenCalledOnce();
+  });
+
   it("lets a manager adjudicate, finalize, and publish a closed round", async () => {
     const closedRound = {
       ...round(41, "Closed disagreement"),

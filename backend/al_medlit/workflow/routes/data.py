@@ -1,6 +1,8 @@
 """HTTP routes for the canonical learning workflow."""
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile, status
+from fastapi.exceptions import RequestValidationError
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.orm import Session
 
 from al_medlit.auth.dependencies import get_current_user
@@ -266,15 +268,20 @@ def materialize_public_dataset_snapshot(
         min_role="trainer",
         module="data",
     )
-    registry = schemas.PublicRegistryDatasetVersionCreate(
-        provider="hugging_face",
-        registry_dataset_id=registry_dataset_id,
-        exact_revision=exact_revision,
-        config_name=config_name,
-        source_format=source_format,
-        expected_content_sha256=expected_content_sha256,
-        license_info=({"identifier": license_identifier} if license_identifier else {}),
-    )
+    try:
+        registry = schemas.PublicRegistryDatasetVersionCreate(
+            provider="hugging_face",
+            registry_dataset_id=registry_dataset_id,
+            exact_revision=exact_revision,
+            config_name=config_name,
+            source_format=source_format,
+            expected_content_sha256=expected_content_sha256,
+            license_info=({"identifier": license_identifier} if license_identifier else {}),
+        )
+    except PydanticValidationError as exc:
+        raise RequestValidationError([
+            {**error, "loc": ("body", *error["loc"])} for error in exc.errors()
+        ]) from exc
     return service.create_public_registry_dataset_version_from_snapshot(
         db,
         project_id=project_id,

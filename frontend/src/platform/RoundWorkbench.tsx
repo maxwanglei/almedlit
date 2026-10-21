@@ -112,10 +112,11 @@ function editorValue(task: TaskVersion, output: unknown): string {
 function parsedOutput(task: TaskVersion, value: string): unknown {
   if (task.task_kind === "regression") {
     const number = Number(value);
-    if (!Number.isFinite(number)) throw new Error("Enter a valid numeric value.");
+    if (!value.trim() || !Number.isFinite(number)) throw new Error("Enter a valid numeric value.");
     return number;
   }
-  if (task.task_kind === "classification" && enumValues(task).length) {
+  if (task.task_kind === "classification") {
+    if (!value.trim()) throw new Error("Enter a label.");
     return task.output_schema.type === "object" ? { label: value } : value;
   }
   if (task.task_kind === "multilabel_classification") {
@@ -175,6 +176,7 @@ function AnnotationEditor({
     );
   }
   const naturalText = [
+    "classification",
     "multilabel_classification",
     "generation",
     "instruction_tuning",
@@ -182,11 +184,13 @@ function AnnotationEditor({
   return (
     <label className="platform-workbench-field">
       <span>
-        {task.task_kind === "multilabel_classification"
-          ? "Labels, one per line"
-          : naturalText
-            ? "Response"
-            : "Structured annotation"}
+        {task.task_kind === "classification"
+          ? "Label"
+          : task.task_kind === "multilabel_classification"
+            ? "Labels, one per line"
+            : naturalText
+              ? "Response"
+              : "Structured annotation"}
       </span>
       <textarea
         rows={naturalText ? 7 : 10}
@@ -244,6 +248,13 @@ export default function RoundWorkbench({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [publishedSnapshots, setPublishedSnapshots] = useState<string[]>([]);
+  const publicationKey = JSON.stringify([
+    round.project_id,
+    round.id,
+    labelSourceKind,
+    work?.submissions.map((submission) => submission.id).sort((a, b) => a - b),
+  ]);
   const autoRevealStarted = useRef(new Set<number>());
   const reloadRequestIdRef = useRef(0);
   const roundIdentity = `${round.project_id}:${round.id}`;
@@ -313,6 +324,8 @@ export default function RoundWorkbench({
     }
   }, [round, roundIdentity]);
 
+  useEffect(() => { setMessage(null); }, [roundIdentity]);
+
   useEffect(() => {
     setWork(null);
     setItemIndex(0);
@@ -328,7 +341,6 @@ export default function RoundWorkbench({
     setEditorText(editorValue(task, currentDecision?.output));
     setRationale(currentDecision?.rationale ?? "");
     setFeedbackDisposition("");
-    setMessage(null);
     setError(null);
   }, [currentDecision, currentRoundItem?.id, task]);
 
@@ -479,7 +491,7 @@ export default function RoundWorkbench({
   }
 
   async function publishLabels(): Promise<void> {
-    if (!work?.submissions.length) return;
+    if (!work?.submissions.length || busy || publishedSnapshots.includes(publicationKey)) return;
     setBusy(true);
     setError(null);
     try {
@@ -488,6 +500,7 @@ export default function RoundWorkbench({
         sourceKind: labelSourceKind,
         submissionIds: work.submissions.map((submission) => submission.id),
       });
+      setPublishedSnapshots((current) => [...current, publicationKey]);
       await onRefresh();
       setMessage(`${labelSet.name} v${labelSet.version_number} published.`);
     } catch (caught) {
@@ -715,7 +728,7 @@ export default function RoundWorkbench({
                   <button
                     type="button"
                     onClick={() => void publishLabels()}
-                    disabled={busy || !work.submissions.length}
+                    disabled={busy || !work.submissions.length || publishedSnapshots.includes(publicationKey)}
                   >
                     Publish label set
                   </button>

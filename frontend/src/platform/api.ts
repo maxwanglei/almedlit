@@ -138,7 +138,8 @@ function collectionPlan(
   }
 
   if (scope === "tasks" && enabled.has("data")) {
-    add("tasks", "taskVersions");
+    add("tasks", "taskVersions", "datasets", "datasetVersions");
+    if (enabled.has("annotate")) add("rounds");
     return plan;
   }
 
@@ -1512,10 +1513,17 @@ async function ensureRecipeVersion(
   );
 }
 
+export interface TrainingLaunchAttempt {
+  key: string;
+  modelId: number | null;
+  recipeVersionId: number | null;
+}
+
 export async function launchTrainingRun(
   projectId: number,
   draft: TrainingLaunchDraft,
   data: PlatformProjectData,
+  attempt: TrainingLaunchAttempt,
 ): Promise<TrainingRun> {
   const descriptor = data.recipes.find((item) => item.key === draft.recipeKey);
   if (!descriptor) throw new Error("The selected training recipe is no longer available.");
@@ -1530,28 +1538,32 @@ export async function launchTrainingRun(
     throw new Error(validation.errors.join("; ") || "The recipe configuration is invalid.");
   }
 
-  const recipeVersion = await ensureRecipeVersion(projectId, descriptor);
-
-  let model = data.models.find(
-    (item) => item.name.localeCompare(draft.modelName, undefined, { sensitivity: "accent" }) === 0,
-  );
-  if (!model) {
-    model = await post<RegisteredModel>("/models", {
+  if (attempt.recipeVersionId === null) {
+    attempt.recipeVersionId = (await ensureRecipeVersion(projectId, descriptor)).id;
+  }
+  if (attempt.modelId === null) {
+    const matches = (item: RegisteredModel): boolean => item.project_id === projectId &&
+      item.name.localeCompare(draft.modelName, undefined, { sensitivity: "accent" }) === 0;
+    const models = data.models.some(matches)
+      ? data.models
+      : await request<RegisteredModel[]>(`/models?${projectQuery(projectId)}`);
+    const model = models.find(matches) ?? await post<RegisteredModel>("/models", {
       project_id: projectId,
       name: draft.modelName,
       description: null,
     });
+    attempt.modelId = model.id;
   }
 
   return post<TrainingRun>("/training-runs", {
     project_id: projectId,
-    registered_model_id: model.id,
+    registered_model_id: attempt.modelId,
     task_version_id: draft.taskVersionId,
     training_dataset_version_id: draft.trainingDatasetVersionId,
-    recipe_version_id: recipeVersion.id,
+    recipe_version_id: attempt.recipeVersionId,
     environment_id: draft.environmentId,
     storage_policy_id: draft.storagePolicyId,
-    idempotency_key: crypto.randomUUID(),
+    idempotency_key: attempt.key,
     parent_model_version_id: null,
     evaluation_plan: draft.evaluationPlan,
     config: validation.normalized_config ?? draft.config,

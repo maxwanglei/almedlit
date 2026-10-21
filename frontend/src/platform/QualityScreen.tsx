@@ -32,10 +32,10 @@ export default function QualityScreen({
   onSetupEvidence?: () => void;
 }): React.ReactElement {
   const finalRounds = data.rounds.filter((round) =>
-    ["closed", "completed"].includes(round.status),
+    round.status === "closed",
   );
   const reviewableRounds = data.rounds.filter((round) =>
-    ["submitted", "adjudication_ready", "adjudicated"].includes(round.status),
+    round.status === "closed",
   );
 
   return (
@@ -50,12 +50,12 @@ export default function QualityScreen({
           {
             label: "Reviewable rounds",
             value: reviewableRounds.length,
-            detail: "Submitted or awaiting adjudication",
+            detail: "Closed and available for adjudication",
           },
           {
             label: "Final rounds",
             value: finalRounds.length,
-            detail: "Closed or completed",
+            detail: "Closed rounds",
           },
           {
             label: "Task contracts",

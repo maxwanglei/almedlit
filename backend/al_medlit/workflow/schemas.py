@@ -579,7 +579,7 @@ class AnnotationRoundCreate(InputModel):
     selection_set_version_id: int | None = None
     feedback_set_version_id: int | None = None
     assistance_policy: AssistancePolicy = "reveal_after_first_pass"
-    reannotation_mode: Literal["targeted_subset", "full_dataset"] = "targeted_subset"
+    reannotation_mode: Literal["targeted_subset", "full_dataset", "unassigned"] = "targeted_subset"
     annotator_user_ids: list[int] = Field(default_factory=list)
     open_to_all_annotators: bool = False
     reason: str | None = None

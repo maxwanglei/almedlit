@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAccessSnapshot } from "@/navigation/AccessContext";
-import type { Project, TaskAssignment } from "@/types/api";
+import type { Project, ProjectTask, TaskAssignment } from "@/types/api";
 
 import ProjectPlatform from "./ProjectPlatform";
 import { EMPTY_PLATFORM_PROJECT_DATA, type PlatformProjectData } from "./types";
@@ -48,6 +48,14 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("live evidence setup", () => {
+  it.each(["/projects/7/tasks", "/projects/7/overview"])("opens the selected legacy document task from %s", async (pathname) => {
+    const task = { id: 41, project_id: 7, annotation_type: "entity", display_name: "Drug entities", description: null, enabled: true, sort_order: 0, labels: [], settings: {} } satisfies ProjectTask;
+    render(<ProjectPlatform {...props} pathname={pathname} project={{ ...project, tasks: [task] }} documents={[{ id: 11, project_id: 7, external_id: null, title: "Paper", text: "Source", source: null, metadata_: {}, sentences: [], active_structure_version_id: null }]} />);
+    const open = await screen.findAllByText("Open Drug entities");
+    fireEvent.click(open[0]);
+    expect(props.onNavigate).toHaveBeenCalledWith("/my-work?project=7&view=annotate&task=41&tool=legacy");
+  });
+
   it("exposes evidence setup on the manager's Tasks route", async () => {
     render(<ProjectPlatform {...props} />);
 

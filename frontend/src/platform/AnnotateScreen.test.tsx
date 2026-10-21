@@ -1,13 +1,18 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+import type { ProjectTask } from "@/types/api";
 
 import AnnotateScreen from "./AnnotateScreen";
 import {
   EMPTY_PLATFORM_PROJECT_DATA,
   type PlatformProjectData,
 } from "./types";
+
+const roundMocks = vi.hoisted(() => ({ transitionRound: vi.fn() }));
+vi.mock("./api", async (original) => ({ ...await original<Record<string, unknown>>(), ...roundMocks }));
 
 afterEach(cleanup);
 
@@ -82,6 +87,27 @@ function projectData(): PlatformProjectData {
 }
 
 describe("AnnotateScreen", () => {
+  it("lists and opens legacy document tasks", () => {
+    const onOpenDocumentTask = vi.fn();
+    const documentTask = { id: 90, project_id: 1, annotation_type: "entity", display_name: "Document entities", description: null, enabled: true, sort_order: 0, labels: [], settings: {} } satisfies ProjectTask;
+    render(<AnnotateScreen view="tasks" data={projectData()} projectTasks={[documentTask]} onOpenDocumentTask={onOpenDocumentTask} onCreateRound={vi.fn()} onCreateTask={vi.fn()} onOpenRound={vi.fn()} currentUserId={7} canManage />);
+    fireEvent.click(screen.getByRole("button", { name: "Open Document entities" }));
+    expect(onOpenDocumentTask).toHaveBeenCalledWith(documentTask);
+  });
+
+  it("recovers a failed draft opening and allows cancellation", async () => {
+    const data = projectData();
+    data.rounds = data.rounds.map((round) => ({ ...round, status: "draft" }));
+    const refresh = vi.fn().mockResolvedValue(undefined);
+    roundMocks.transitionRound.mockRejectedValueOnce(new Error("Opening failed")).mockResolvedValue({});
+    render(<AnnotateScreen view="rounds" data={data} projectId={1} onCreateRound={vi.fn()} onCreateTask={vi.fn()} onOpenRound={vi.fn()} currentUserId={7} canManage onRefresh={refresh} />);
+    fireEvent.click(screen.getByRole("button", { name: "Open draft Initial labels" }));
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Opening failed");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel draft Initial labels" }));
+    await waitFor(() => expect(roundMocks.transitionRound).toHaveBeenLastCalledWith(1, 71, "cancelled"));
+    await waitFor(() => expect(refresh).toHaveBeenCalledOnce());
+  });
+
   it("presents separate task and round administration surfaces", () => {
     const onCreateRound = vi.fn();
     const onCreateTask = vi.fn();

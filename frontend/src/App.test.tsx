@@ -141,9 +141,10 @@ vi.mock("@/pages/LoginPage", () => ({
   }: {
     onAuthed: (justRegistered: boolean) => void;
   }) => (
-    <button type="button" onClick={() => onAuthed(true)}>
-      Register mock user
-    </button>
+    <>
+      <button type="button" onClick={() => onAuthed(true)}>Register mock user</button>
+      <button type="button" onClick={() => onAuthed(false)}>Sign in mock user</button>
+    </>
   ),
 }));
 vi.mock("@/pages/AcceptInvitePage", () => ({
@@ -649,6 +650,39 @@ afterEach(() => {
 });
 
 describe("App session probe recovery", () => {
+  it.each(["cold load", "expired session"])("restores the full deep link after %s and login", async (mode) => {
+    const destination = "/projects?folder=screening#evidence";
+    window.history.replaceState(null, "", destination);
+    if (mode === "cold load") {
+      mocks.getMe.mockRejectedValueOnce(new ApiError(401, "Sign in required"));
+    }
+    render(<App />);
+    if (mode === "expired session") {
+      await screen.findByLabelText("Mock projects directory");
+      act(() => publishSessionChange(false));
+    }
+    const signIn = await screen.findByRole("button", { name: "Sign in mock user" });
+    expect(window.location.pathname + window.location.search + window.location.hash).toBe(destination);
+    fireEvent.click(signIn);
+    await screen.findByLabelText("Mock projects directory");
+    expect(window.location.pathname + window.location.search + window.location.hash).toBe(destination);
+  });
+
+  it("does not adopt a project route outside the workspace project list", async () => {
+    window.history.replaceState(null, "", "/projects/999/overview");
+    Object.assign(mocks.projectState, {
+      selectedProjectId: 81,
+      projects: [{ id: 81, name: "Accessible project", workspace_id: 10,
+        description: null, tasks: [], settings: {}, annotation_schema: [],
+        annotation_validation_mode: "relaxed" }],
+    });
+    render(<App />);
+    await screen.findByText("Project not found.");
+    expect(mocks.projectState.setSelectedProjectId).not.toHaveBeenCalledWith(999);
+    expect(mocks.projectState.loadProjectData).not.toHaveBeenCalledWith(999, false, "all");
+    expect(mocks.projectState.selectedProjectId).toBe(81);
+  });
+
   const deepLink = "/projects?folder=screening#evidence";
 
   it.each([

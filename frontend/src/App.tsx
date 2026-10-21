@@ -651,12 +651,6 @@ function Application(): React.ReactElement {
     setRoundResolutionError(null);
     setPlatformDialog(null);
     pendingWorkspaceSwitchRef.current = false;
-    const publicTokenPath =
-      inviteTokenFromPath(window.location.pathname) !== null ||
-      accountActionTokenFromPath(window.location.pathname) !== null;
-    if (authenticated || !publicTokenPath) {
-      navigatePathRef.current("/", "replace");
-    }
   }, []);
 
   async function refreshWorkspaceConfiguration(
@@ -692,6 +686,7 @@ function Application(): React.ReactElement {
     void logout()
       .then(() => {
         window.localStorage.removeItem("al-medlit.currentAnnotatorId");
+        navigatePathRef.current("/", "replace");
       })
       .catch(() => {
         if (generation === sessionGenerationRef.current) {
@@ -900,6 +895,8 @@ function Application(): React.ReactElement {
     const legacyProjectId = legacyModelsProjectId(pathname);
     if (
       legacyProjectId !== null &&
+      projectsReady &&
+      projects.some((project) => project.id === legacyProjectId) &&
       selectedProjectId !== legacyProjectId
     ) {
       setSelectedProjectId(legacyProjectId);
@@ -928,6 +925,8 @@ function Application(): React.ReactElement {
     sessionReady,
     setSelectedProjectId,
     pathname,
+    projects,
+    projectsReady,
   ]);
 
   useEffect(() => {
@@ -1322,6 +1321,7 @@ function Application(): React.ReactElement {
         (
           canPerform(access, "tasks:manage") &&
           parsedProjectRoute !== null &&
+          policyProject !== null &&
           canOpenProjectRoute
         )
       );
@@ -1367,6 +1367,7 @@ function Application(): React.ReactElement {
     loadProjectData,
     activeProjectContextId,
     parsedProjectRoute,
+    policyProject,
     projectsReady,
     roundRouteId,
     routeRedirect,
@@ -1463,10 +1464,7 @@ function Application(): React.ReactElement {
     );
   }
 
-  // Invite acceptance is resolved before the auth gate below, which otherwise
-  // renders the login page for every unauthenticated path and discards the
-  // URL. An invitee typically has no account yet, so this route has to survive
-  // that gate.
+  // Invitees can provision an account before entering the workspace shell.
   if (inviteToken !== null) {
     if (authed && !sessionReady) {
       if (sessionLoadError) return sessionConnectionFailure;

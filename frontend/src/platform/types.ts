@@ -207,7 +207,7 @@ export interface AnnotationRound extends VersionedResource {
   selection_set_version_id: number | null;
   feedback_set_version_id: number | null;
   assistance_policy: AssistancePolicy;
-  reannotation_mode: "targeted_subset" | "full_dataset";
+  reannotation_mode: "targeted_subset" | "full_dataset" | "unassigned";
   annotator_user_ids: number[];
   open_to_all_annotators: boolean;
   reason: string | null;

@@ -16,7 +16,7 @@ export function inheritedTrainingSource(source: TrainingSource): TrainingSource 
     ...(source.split_map_id ? { split_map_id: source.split_map_id } : {}),
     ...(source.label_set_version_id ? { label_set_version_id: source.label_set_version_id } : source.annotation_round_id ? {
       annotation_round_id: source.annotation_round_id, ...(source.submission_ids ? { submission_ids: source.submission_ids } : {}),
-    } : { label_field: source.label_field ?? "label" }),
+    } : { label_field: source.label_field ?? "" }),
   };
 }
 
@@ -33,18 +33,35 @@ export default function TrainingDatasetBuilder({ projectId, data, initialDataset
   }, [storageKey]);
   const sourceVersions = data.datasetVersions.filter((version) => version.provenance?.ingestion !== "training_preparation_v1");
   const initialVersion = initialDatasetVersionId ?? sourceVersions.filter((version) => !initialDatasetId || version.dataset_id === initialDatasetId).sort((a, b) => b.version_number - a.version_number)[0]?.id ?? 0;
-  const initialTask = parent?.task_version_id ?? initialTaskVersionId ?? data.taskVersions[0]?.id ?? 0;
+  const initialTask = parent?.task_version_id ?? initialTaskVersionId ?? [...data.taskVersions].sort((a, b) => b.id - a.id)[0]?.id ?? 0;
   const [name, setName] = useState(restored?.draft?.name ?? parent?.name ?? "");
   const [taskId, setTaskId] = useState(restored?.draft?.task_version_id ?? initialTask);
+  function importedLabelField(versionId: number): string {
+    const properties = data.datasetVersions.find((version) => version.id === versionId)?.data_schema?.properties;
+    return properties && typeof properties === "object" && "label" in properties ? "label" : "";
+  }
+  function annotationSource(selectedTaskId: number, versionId?: number): TrainingSource[] {
+    const mapping = taskInputMapping(data, selectedTaskId);
+    const eligibleVersion = (id: number): boolean => versionId !== undefined ? id === versionId :
+      initialDatasetVersionId ? id === initialDatasetVersionId :
+      !initialDatasetId || sourceVersions.some((version) => version.id === id && version.dataset_id === initialDatasetId);
+    const layer = data.labelSets.filter((item) => item.task_version_id === selectedTaskId && eligibleVersion(item.dataset_version_id) && item.source_kind !== "imported" && item.composition_policy !== "exclude")
+      .sort((a, b) => b.id - a.id)[0];
+    const round = data.rounds.filter((item) => item.task_version_id === selectedTaskId && eligibleVersion(item.dataset_version_id) && item.status === "closed")
+      .sort((a, b) => b.id - a.id)[0];
+    return layer ? [{ dataset_version_id: layer.dataset_version_id, input_mapping: mapping, label_set_version_id: layer.id }] :
+      round ? [{ dataset_version_id: round.dataset_version_id, input_mapping: mapping, annotation_round_id: round.id }] : [];
+  }
   const [sources, setSources] = useState<TrainingSource[]>(() => {
     if (restored?.draft?.sources) return restored.draft.sources;
     const inherited = parent?.preparation_manifest?.sources;
     if (Array.isArray(inherited) && inherited.length) return (inherited as TrainingSource[]).map(inheritedTrainingSource);
-    const layer = data.labelSets.find((item) => item.id === initialLabelSetVersionId) ?? data.labelSets.find((item) => item.dataset_version_id === initialVersion && item.task_version_id === initialTask);
-    const round = data.rounds.find((item) => item.dataset_version_id === initialVersion && item.task_version_id === initialTask);
-    return [{ dataset_version_id: initialVersion, input_mapping: taskInputMapping(data, initialTask), ...(layer ? { label_set_version_id: layer.id } : round ? { annotation_round_id: round.id } : { label_field: "label" }) }];
+    const layer = data.labelSets.find((item) => item.id === initialLabelSetVersionId && item.dataset_version_id === initialVersion && item.task_version_id === initialTask && item.composition_policy !== "exclude");
+    if (layer) return [{ dataset_version_id: initialVersion, input_mapping: taskInputMapping(data, initialTask), label_set_version_id: layer.id }];
+    const annotations = annotationSource(initialTask, initialVersion);
+    return annotations.length ? annotations : [{ dataset_version_id: initialVersion, input_mapping: taskInputMapping(data, initialTask), label_field: importedLabelField(initialVersion) }];
   });
-  const [startChoice, setStartChoice] = useState<"annotations" | "external" | "combine">(restored?.startChoice ?? (parent ? "combine" : initialLabelSetVersionId || data.rounds.some((round) => round.dataset_version_id === initialVersion) ? "annotations" : "external"));
+  const [startChoice, setStartChoice] = useState<"annotations" | "external" | "combine">(restored?.startChoice ?? (parent ? "combine" : sources.some((source) => source.label_set_version_id || source.annotation_round_id) ? "annotations" : "external"));
   const [trainPercent, setTrainPercent] = useState(restored?.draft?.train_percent ?? 80);
   const [validationPercent, setValidationPercent] = useState(restored?.draft?.validation_percent ?? 10);
   const [preview, setPreview] = useState<TrainingPreview | null>(() => restored?.attempt?.signature === JSON.stringify(restored?.draft) ? restored?.preview ?? null : null);
@@ -81,25 +98,19 @@ export default function TrainingDatasetBuilder({ projectId, data, initialDataset
     setSources((current) => current.map((source, row) => {
       if (row !== index) return source;
       const next: TrainingSource = { dataset_version_id: source.dataset_version_id, input_mapping: source.input_mapping, split_map_id: source.split_map_id };
-      return { ...next, ...(kind === "round" ? { annotation_round_id: Number(value) } : kind === "layer" ? { label_set_version_id: Number(value) } : { label_field: "label" }) };
+      return { ...next, ...(kind === "round" ? { annotation_round_id: Number(value) } : kind === "layer" ? { label_set_version_id: Number(value) } : { label_field: importedLabelField(source.dataset_version_id) }) };
     }));
-  }
-  function annotationSource(selectedTaskId: number): TrainingSource[] {
-    const mapping = taskInputMapping(data, selectedTaskId);
-    const round = data.rounds.find((item) => item.task_version_id === selectedTaskId);
-    const layer = data.labelSets.find((item) => item.task_version_id === selectedTaskId && item.source_kind !== "imported" && item.composition_policy !== "exclude");
-    return round ? [{ dataset_version_id: round.dataset_version_id, input_mapping: mapping, annotation_round_id: round.id }] : layer ? [{ dataset_version_id: layer.dataset_version_id, input_mapping: mapping, label_set_version_id: layer.id }] : [];
   }
   function chooseStart(choice: "annotations" | "external" | "combine"): void {
     setStartChoice(choice);
     const mapping = taskInputMapping(data, taskId);
-    if (choice === "combine") { if (sources.length < 2) setSources((current) => [...current, { dataset_version_id: 0, input_mapping: mapping, label_field: "label" }]); return; }
+    if (choice === "combine") { if (sources.length < 2) setSources((current) => [...current, { dataset_version_id: 0, input_mapping: mapping, label_field: "" }]); return; }
     if (choice === "annotations") {
       setSources(annotationSource(taskId));
       return;
     }
     const external = sourceVersions.find((version) => data.datasets.some((dataset) => dataset.id === version.dataset_id && ["upload", "public_registry"].includes(dataset.source_type)));
-    setSources([{ dataset_version_id: external?.id ?? 0, input_mapping: mapping, label_field: "label" }]);
+    setSources([{ dataset_version_id: external?.id ?? 0, input_mapping: mapping, label_field: importedLabelField(external?.id ?? 0) }]);
     if (!external) onImport();
   }
   async function review(): Promise<void> {
@@ -132,27 +143,27 @@ export default function TrainingDatasetBuilder({ projectId, data, initialDataset
         {([["annotations", "Use project annotations"], ["external", "Import external labeled data"], ["combine", "Combine sources"]] as const).map(([choice, label]) => <label key={choice}><input type="radio" name="training-start" value={choice} checked={startChoice === choice} onChange={() => chooseStart(choice)} /><span>{label}</span></label>)}
       </div></fieldset> : null}
       <label><span>Training dataset name</span><input required value={name} onChange={(event) => setName(event.target.value)} disabled={busy || Boolean(parent)} maxLength={255} /></label>
-      <label><span>Task</span><select required value={taskId} disabled={busy || Boolean(parent)} onChange={(event) => { const id = Number(event.target.value); setTaskId(id); setSources((current) => startChoice === "annotations" ? annotationSource(id) : current.map((source) => ({ dataset_version_id: source.dataset_version_id, input_mapping: taskInputMapping(data, id), label_field: "label" }))); }}>
+      <label><span>Task</span><select required value={taskId} disabled={busy || Boolean(parent)} onChange={(event) => { const id = Number(event.target.value); setTaskId(id); setSources((current) => startChoice === "annotations" ? annotationSource(id) : current.map((source) => ({ dataset_version_id: source.dataset_version_id, input_mapping: taskInputMapping(data, id), label_field: importedLabelField(source.dataset_version_id) }))); }}>
         <option value={0}>Select a task</option>{data.taskVersions.map((item) => <option key={item.id} value={item.id}>{data.taskDefinitions.find((definition) => definition.id === item.task_definition_id)?.name ?? item.task_kind} · v{item.version_number}</option>)}
       </select></label>
       {startChoice === "annotations" && !sources.length ? <p role="status">No submitted project annotations are available for this task. Annotate a source dataset first, or choose external labeled data.</p> : null}
       {sources.map((source, index) => <fieldset className="platform-fieldset" key={index} disabled={busy}>
         <legend>Source {index + 1}</legend>
-        <label><span>Source dataset version</span><select required value={source.dataset_version_id} onChange={(event) => updateSource(index, { dataset_version_id: Number(event.target.value), label_field: "label", label_set_version_id: undefined, annotation_round_id: undefined, submission_ids: undefined, split_map_id: undefined })}>
+        <label><span>Source dataset version</span><select required value={source.dataset_version_id} onChange={(event) => updateSource(index, { dataset_version_id: Number(event.target.value), label_field: importedLabelField(Number(event.target.value)), label_set_version_id: undefined, annotation_round_id: undefined, submission_ids: undefined, split_map_id: undefined })}>
           <option value={0}>Select a source</option>{sourceVersions.filter((version) => version.item_count > 0).map((version) => <option key={version.id} value={version.id}>{data.datasets.find((dataset) => dataset.id === version.dataset_id)?.name ?? "Source"} · v{version.version_number} · {version.item_count} records</option>)}
         </select></label>
         <div className="platform-form-grid">{taskFields.map((field) => <label key={field}><span>Source field for {field}</span><input required value={source.input_mapping[field] ?? field} onChange={(event) => updateSource(index, { input_mapping: { ...source.input_mapping, [field]: event.target.value } })} /></label>)}</div>
         <label><span>Labels from</span><select value={source.annotation_round_id ? `round:${source.annotation_round_id}` : source.label_set_version_id ? `layer:${source.label_set_version_id}` : "field"} onChange={(event) => labelChoice(index, event.target.value)}>
           <option value="field">A field in the imported dataset</option>
           {data.labelSets.filter((layer) => layer.dataset_version_id === source.dataset_version_id && layer.task_version_id === taskId && layer.composition_policy !== "exclude").map((layer) => <option key={`layer:${layer.id}`} value={`layer:${layer.id}`}>{layer.name} · v{layer.version_number} · {layer.source_kind}</option>)}
-          {data.rounds.filter((round) => round.dataset_version_id === source.dataset_version_id && round.task_version_id === taskId).map((round) => <option key={`round:${round.id}`} value={`round:${round.id}`}>Submitted annotations: {round.name}</option>)}
+          {data.rounds.filter((round) => round.dataset_version_id === source.dataset_version_id && round.task_version_id === taskId && (round.status === "open" || round.status === "closed")).map((round) => <option key={`round:${round.id}`} value={`round:${round.id}`}>Submitted annotations: {round.name}</option>)}
         </select></label>
         {source.label_field !== undefined ? <label><span>Label field</span><input required value={source.label_field} onChange={(event) => updateSource(index, { label_field: event.target.value })} /></label> : null}
         {source.annotation_round_id ? <p>Only finalized submissions enter the snapshot. You can continue annotating this source after creating the training dataset.</p> : null}
         <label><span>Existing evaluation splits</span><select value={source.split_map_id ?? 0} onChange={(event) => updateSource(index, { split_map_id: Number(event.target.value) || undefined })}><option value={0}>Use protected splits when present; split new records below</option>{data.splitMaps.filter((split) => split.dataset_version_id === source.dataset_version_id).map((split) => <option key={split.id} value={split.id}>{split.name}</option>)}</select></label>
         {sources.length > 1 ? <Button label={`Remove source ${index + 1}`} variant="ghost" onClick={() => setSources((current) => current.filter((_, row) => row !== index))} /> : null}
       </fieldset>)}
-      <div className="platform-row-actions"><Button label="Add another source" isDisabled={busy} onClick={() => setSources((current) => [...current, { dataset_version_id: 0, input_mapping: taskInputMapping(data, taskId), label_field: "label" }])} /><Button label="Import external data" isDisabled={busy} onClick={onImport} /></div>
+      <div className="platform-row-actions"><Button label="Add another source" isDisabled={busy} onClick={() => setSources((current) => [...current, { dataset_version_id: 0, input_mapping: taskInputMapping(data, taskId), label_field: "" }])} /><Button label="Import external data" isDisabled={busy} onClick={onImport} /></div>
       <div className="platform-form-grid"><label><span>Train percent for new groups</span><input type="number" min={1} max={98} required value={trainPercent} disabled={busy} onChange={(event) => setTrainPercent(Number(event.target.value))} /></label><label><span>Validation percent for new groups</span><input type="number" min={1} max={98} required value={validationPercent} disabled={busy} onChange={(event) => setValidationPercent(Number(event.target.value))} /></label></div>
       <p>Test: {100 - trainPercent - validationPercent}%. Existing protected evaluation groups stay protected. Unsubmitted or unlabeled records are excluded.</p>
       <div className="platform-row-actions"><Button label={busy ? "Checking…" : "Preview training dataset"} type="submit" variant="primary" isDisabled={busy || !taskId || !sources.length || sources.some((source) => !source.dataset_version_id) || trainPercent + validationPercent >= 100} /><Button label="Cancel" isDisabled={busy} onClick={onCancel} /></div>

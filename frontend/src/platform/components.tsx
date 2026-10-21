@@ -11,7 +11,7 @@ export function statusVariant(
   status: string,
 ): "neutral" | "info" | "success" | "warning" | "error" {
   const normalized = status.toLowerCase();
-  if (["active", "available", "completed", "succeeded", "ready"].includes(normalized)) {
+  if (["active", "available", "completed", "succeeded", "ready", "closed"].includes(normalized)) {
     return "success";
   }
   if (["failed", "blocked", "rejected", "unavailable"].includes(normalized)) {
@@ -24,7 +24,7 @@ export function statusVariant(
   ) {
     return "warning";
   }
-  if (["draft", "foundation", "planned", "experimental"].includes(normalized)) {
+  if (["open", "draft", "foundation", "planned", "experimental"].includes(normalized)) {
     return "info";
   }
   return "neutral";

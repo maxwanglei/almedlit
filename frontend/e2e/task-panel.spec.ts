@@ -56,7 +56,7 @@ test("task creation opens above the task list in the current project dialog", as
 
   await expect(page.getByRole("heading", { name: "Tasks", exact: true })).toBeVisible();
   await expect(
-    page.getByRole("region", { name: "Task contracts table" }),
+    page.getByRole("region", { name: "Annotation tasks table" }),
   ).toContainText("Abstract relevance");
 
   const addTaskButton = page.getByRole("button", {
@@ -96,7 +96,7 @@ test("task creation opens above the task list in the current project dialog", as
   }
 
   await expect(
-    page.getByRole("region", { name: "Task contracts table" }),
+    page.getByRole("region", { name: "Annotation tasks table" }),
   ).toBeVisible();
 
   for (const viewport of [
@@ -132,6 +132,9 @@ test("task creation opens above the task list in the current project dialog", as
 });
 
 test("registration workspace selector opens below its field", async ({ page }) => {
+  await page.route("**/api/auth/me", (route) => route.fulfill({
+    status: 401, contentType: "application/json", body: JSON.stringify({ detail: "Sign in required" }),
+  }));
   await page.goto("/login");
   await page.getByRole("button", { name: "Create an account" }).click();
 

@@ -997,3 +997,118 @@ describe("TrainingWorkspace", () => {
     expect(screen.queryByText("Late runtime")).toBeNull();
   });
 });
+
+it("loads the next runs page with the applied filters while edits remain unapplied", async () => {
+  const user = userEvent.setup();
+  mocks.listWorkspaceTrainingRuns.mockResolvedValueOnce({ items: [workspaceRun(151, 7, "Baseline")], next_cursor: 151 }).mockResolvedValue({ items: [], next_cursor: null });
+  render(<TrainingWorkspace {...baseProps} view="runs" />);
+  await screen.findByText("Baseline");
+  await user.selectOptions(screen.getByLabelText("Status"), "failed");
+  await user.click(screen.getByRole("button", { name: "Load more" }));
+  await waitFor(() => expect(mocks.listWorkspaceTrainingRuns).toHaveBeenLastCalledWith(5,
+    { projectId: undefined, limit: 50, cursor: 151 }, baseProps.projects));
+});
+it("navigates the data project picker with a fresh project URL", async () => {
+  const user = userEvent.setup();
+  const nextProject = { ...otherProject, workspace_id: 5 };
+  mocks.listWorkspaceTrainingContexts.mockResolvedValue({ items: [trainingContext(project), trainingContext(nextProject)], next_cursor: null });
+  render(<TrainingWorkspace {...baseProps} view="data" initialProjectId={7} initialDatasetId={999} initialTaskVersionId={71} search="?projectId=7&datasetId=999&taskVersionId=71&flow=prepare" />);
+  await screen.findByRole("option", { name: /Generation benchmark/ });
+  await user.selectOptions(screen.getByLabelText("Project context"), "8");
+  expect(baseProps.onNavigate).toHaveBeenLastCalledWith("/training/data?projectId=8&flow=prepare");
+});
+
+it("preserves the created project when the parent refreshes contexts from an older launch URL", async () => {
+  const user = userEvent.setup();
+  const created = { ...project, id: 19, name: "Created training project" };
+  mocks.listWorkspaceTrainingContexts.mockResolvedValue({ items: [trainingContext(project)], next_cursor: null });
+  mocks.loadPlatformProject.mockResolvedValue(trainingProjectData(7, "Existing training data"));
+  mocks.createTrainingOnlyProject.mockResolvedValue(created);
+  const props = { ...baseProps, view: "new", initialProjectId: 7, canCreateTrainingProject: true } satisfies Parameters<typeof TrainingWorkspace>[0];
+  const mounted = render(<TrainingWorkspace {...props} />);
+  await user.click(await screen.findByRole("button", { name: "Change context" }));
+  await user.click(screen.getByRole("radio", { name: /Training-only project/ }));
+  await user.type(screen.getByLabelText("Project name"), created.name);
+  await user.click(screen.getByRole("button", { name: "Create project" }));
+  await screen.findByText(created.name, { selector: "strong" });
+  mocks.listWorkspaceTrainingContexts.mockResolvedValue({ items: [trainingContext(project), trainingContext(created)], next_cursor: null });
+  mounted.rerender(<TrainingWorkspace {...props} projects={[project, created]} />);
+  await waitFor(() => expect(mocks.listWorkspaceTrainingContexts).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(screen.getByText(/Project context:/).textContent).toContain(created.name));
+});
+it("preserves the builder DOM, draft and focus through a nested task creation", async () => {
+  const user = userEvent.setup();
+  mocks.listWorkspaceTrainingContexts.mockResolvedValue({ items: [trainingContext(project)], next_cursor: null });
+  const sourceData: PlatformProjectData = { ...EMPTY_PLATFORM_PROJECT_DATA,
+    datasets: [{ id: 11, project_id: 7, name: "Corpus", description: null, source_type: "project_corpus" }],
+    datasetVersions: [{ id: 12, project_id: 7, dataset_id: 11, version_number: 1, item_count: 5,
+      source_uri: null, source_revision: "1", source_format: "json", data_schema: {}, provenance: {}, license_info: {}, content_hash: "hash", artifact_package_id: null }],
+  };
+  mocks.loadPlatformProject.mockResolvedValue(sourceData);
+  mocks.createTaskWithVersion.mockResolvedValue({ id: 73 });
+  render(<TrainingWorkspace {...baseProps} view="data" initialProjectId={7} initialDatasetId={11} search="?projectId=7&datasetId=11&flow=prepare" canCreateTask />);
+  const name = await screen.findByLabelText("Training dataset name");
+  await user.type(name, "Keep my draft");
+  const trigger = screen.getByRole("button", { name: "Define task" });
+  await user.click(trigger);
+  await user.type(screen.getByLabelText("Name"), "Topic");
+  await user.type(screen.getByLabelText("Stable key"), "topic");
+  const refresh = deferred<PlatformProjectData>();
+  mocks.loadPlatformProject.mockReturnValue(refresh.promise);
+  await user.click(screen.getByRole("button", { name: "Create" }));
+  await waitFor(() => expect(mocks.loadPlatformProject).toHaveBeenCalledTimes(4));
+  expect(screen.getByLabelText("Training dataset name")).toBe(name);
+  await act(async () => { refresh.resolve(sourceData); await refresh.promise; });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.getByLabelText("Training dataset name")).toBe(name);
+  expect(name).toHaveProperty("value", "Keep my draft");
+  expect(document.activeElement).toBe(trigger);
+});
+
+it("keeps the builder mounted on the first project URL navigation", async () => {
+  const user = userEvent.setup();
+  mocks.listWorkspaceTrainingContexts.mockResolvedValue({ items: [trainingContext(project)], next_cursor: null });
+  const props = { ...baseProps, view: "data", search: "?flow=prepare" } satisfies Parameters<typeof TrainingWorkspace>[0];
+  const mounted = render(<TrainingWorkspace {...props} />);
+  const name = await screen.findByLabelText("Training dataset name");
+  await user.type(name, "Retain draft");
+  mounted.rerender(<TrainingWorkspace {...props} initialProjectId={7} search="?projectId=7&flow=prepare" />);
+  expect(screen.getByLabelText("Training dataset name")).toBe(name);
+  expect(mocks.listWorkspaceTrainingContexts).toHaveBeenCalledTimes(1);
+});
+it("handles failed launch clicks and preserves the attempt identity until the draft changes", async () => {
+  const user = userEvent.setup();
+  const data = trainingProjectData(7, "Ready data");
+  data.taskVersions[0].trainer_compatibility = ["linear"];
+  data.recipes = [{ schema_version: "training-recipe-descriptor-v1", key: "linear", version: "1", label: "Linear",
+    description: "Linear", model_family: "conventional_ml", architecture_family: "linear_classifier", parameterization: "full",
+    supported_task_kinds: ["classification"], trainer_key: "linear", implementation_status: "implemented",
+    environment: { runtime_class: "classical-cpu", packages: [], devices: ["cpu"], minimum_memory_gb: 1,
+      requires_verified_environment: true, setup_hint: "CPU" }, config_schema: {}, artifact_formats: [] }];
+  data.environments = [{ id: 131, project_id: 7, name: "CPU", environment_class: "classical-cpu", image_digest: `sha256:${"a".repeat(64)}`,
+    package_manifest: {}, hardware_constraints: {}, status: "available", verification_report: { passed: true }, verified_at: "2026-01-01" }];
+  data.storagePolicies = [{ id: 141, project_id: 7, name: "Storage", backend: "minio", artifact_prefix: "projects/7",
+    retention_class: "standard", encryption: {}, cache_policy: {}, is_default: true }];
+  mocks.loadPlatformProject.mockResolvedValue(data);
+  mocks.listWorkspaceTrainingContexts.mockResolvedValue({ items: [trainingContext(project)], next_cursor: null });
+  mocks.launchTrainingRun.mockRejectedValue(new Error("Response lost"));
+  render(<TrainingWorkspace {...baseProps} view="new" initialProjectId={7} />);
+  const continueButton = await screen.findByRole("button", { name: "Continue" });
+  await waitFor(() => expect(continueButton).toHaveProperty("disabled", false));
+  await user.click(continueButton);
+  await user.type(screen.getByLabelText("Model name"), "Retry model");
+  for (let step = 0; step < 3; step += 1) await user.click(screen.getByRole("button", { name: "Continue" }));
+  await user.click(screen.getByRole("button", { name: "Launch training" }));
+  await screen.findByRole("alert");
+  await user.click(screen.getByRole("button", { name: "Launch training" }));
+  await waitFor(() => expect(mocks.launchTrainingRun).toHaveBeenCalledTimes(2));
+  const firstAttempt = mocks.launchTrainingRun.mock.calls[0]?.[3];
+  expect(firstAttempt).toMatchObject({ key: expect.any(String) });
+  expect(mocks.launchTrainingRun.mock.calls[1]?.[3]).toBe(firstAttempt);
+  await user.click(screen.getByRole("button", { name: "Model & Recipe" }));
+  await user.type(screen.getByLabelText("Model name"), " changed");
+  await user.click(screen.getByRole("button", { name: "Review & Launch" }));
+  await user.click(screen.getByRole("button", { name: "Launch training" }));
+  await waitFor(() => expect(mocks.launchTrainingRun).toHaveBeenCalledTimes(3));
+  expect(mocks.launchTrainingRun.mock.calls[2]?.[3].key).not.toBe(firstAttempt.key);
+});

@@ -159,6 +159,52 @@ describe("API authentication failures", () => {
     });
   });
 
+  it.each([
+    { name: "login", attempt: () => login("alice", "wrong password") },
+    {
+      name: "invite credentials",
+      attempt: () => acceptInvite("invite-token", {
+        username: "alice", password: "wrong password", create_account: false,
+      }),
+    },
+  ])("preserves the current session after rejected $name", async ({ attempt }) => {
+    publishSessionChange(true);
+    const generation = getSessionGeneration();
+    const storedEvent = window.localStorage.getItem(SESSION_EVENT_STORAGE_KEY);
+    const observed = vi.fn();
+    const unsubscribe = subscribeSessionChanges(observed);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ detail: "Invalid username or password" }),
+      { status: 401, headers: { "Content-Type": "application/json" } },
+    )));
+    try {
+      await expect(attempt()).rejects.toMatchObject({ status: 401 });
+      expect(observed).not.toHaveBeenCalled();
+      expect(getSessionGeneration()).toBe(generation);
+      expect(window.localStorage.getItem(SESSION_EVENT_STORAGE_KEY)).toBe(storedEvent);
+    } finally {
+      unsubscribe();
+    }
+  });
+
+  it.each([{}, { username: "alice" }, { password: "password" }, { username: "", password: "" }])(
+    "invalidates a rejected cookie-session invite with payload %j", async (payload) => {
+      publishSessionChange(true);
+      const observed = vi.fn();
+      const unsubscribe = subscribeSessionChanges(observed);
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(
+        JSON.stringify({ detail: "Session expired" }),
+        { status: 401, headers: { "Content-Type": "application/json" } },
+      )));
+      try {
+        await expect(acceptInvite("invite-token", payload)).rejects.toMatchObject({ status: 401 });
+        expect(observed).toHaveBeenCalledExactlyOnceWith(false);
+      } finally {
+        unsubscribe();
+      }
+    },
+  );
+
   it("does not clear a newer session when an older request returns 401", async () => {
     publishSessionChange(true);
     const observed: boolean[] = [];

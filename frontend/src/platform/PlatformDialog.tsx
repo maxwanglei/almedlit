@@ -959,7 +959,7 @@ function RoundForm({
   const [name, setName] = useState("");
   const [cycleId, setCycleId] = useState(0);
   const [taskVersionId, setTaskVersionId] = useState(defaultTaskVersion);
-  const [datasetVersionId, setDatasetVersionId] = useState(defaultDatasetVersion);
+  const [datasetVersionId, setDatasetVersionId] = useState(data.datasetVersions.find((version) => version.id === defaultDatasetVersion && version.item_count > 0)?.id ?? data.datasetVersions.find((version) => version.item_count > 0)?.id ?? 0);
   const [guidelineRevisionId, setGuidelineRevisionId] = useState(0);
   const [reannotationMode, setReannotationMode] =
     useState<RoundDraft["reannotationMode"]>("full_dataset");
@@ -1031,6 +1031,7 @@ function RoundForm({
   return (
     <form className="platform-dialog-form" onSubmit={(event) => {
       event.preventDefault();
+      if (!selectedDataset?.item_count) return;
       void onSubmit({
         name,
         taskVersionId,
@@ -1078,7 +1079,7 @@ function RoundForm({
         {selectedCycle ? <small>Dataset and task are pinned by this cycle.</small> : null}
       </label>
       <ResourceSelectors
-        data={data}
+        data={{ ...data, datasetVersions: data.datasetVersions.filter((version) => version.item_count > 0) }}
         taskVersionId={taskVersionId}
         datasetVersionId={datasetVersionId}
         disabled={Boolean(selectedCycle)}
@@ -1220,7 +1221,7 @@ function RoundForm({
       <FormActions busy={
         busy ||
         !taskVersionId ||
-        !datasetVersionId ||
+        !selectedDataset?.item_count ||
         (targeted && !splitMapId) ||
         uncertaintyIncomplete ||
         (!openToAllAnnotators && !annotatorUserIds.length)

@@ -90,6 +90,33 @@ afterEach(() => {
 });
 
 describe("WorkspaceSettings", () => {
+  it("cannot overwrite capabilities after their initial load fails", async () => {
+    vi.mocked(getWorkspaceCapabilities).mockRejectedValueOnce(new Error("Connection lost"));
+    render(<WorkspaceSettings workspaceId={4} workspaceName="Research team"
+      workspaceKind="team" currentUserId={7} onManageWorkspaces={vi.fn()}
+      onCapabilitiesChanged={vi.fn()} />);
+    await screen.findByText("Connection lost");
+    const save = screen.getByRole("button", { name: "Save capabilities" });
+    expect(save.hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("combobox", { name: /^Capability preset/ }).hasAttribute("disabled")).toBe(true);
+    await userEvent.setup().click(save);
+    expect(setWorkspaceCapability).not.toHaveBeenCalled();
+  });
+
+  it("shows a custom capability policy as Custom", async () => {
+    vi.mocked(getWorkspaceCapabilities).mockResolvedValueOnce({
+      preset: "custom", overrides: [], effective: ["annotation"], blocked: {},
+    });
+    render(<WorkspaceSettings workspaceId={4} workspaceName="Research team"
+      workspaceKind="team" currentUserId={7} onManageWorkspaces={vi.fn()}
+      onCapabilitiesChanged={vi.fn()} />);
+    await screen.findByRole("heading", { name: "Members" });
+    const preset = screen.getByRole<HTMLSelectElement>("combobox", { name: /^Capability preset/ });
+    expect(preset.value).toBe("custom");
+    expect(preset.selectedOptions[0]?.textContent).toBe("Custom");
+    expect(screen.getByRole("button", { name: "Save capabilities" }).hasAttribute("disabled")).toBe(true);
+  });
+
   it("exposes and saves the independent Train Models capability preset", async () => {
     const user = userEvent.setup();
     const onCapabilitiesChanged = vi.fn();

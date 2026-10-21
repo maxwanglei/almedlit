@@ -19,6 +19,16 @@ beforeEach(() => { vi.clearAllMocks(); });
 afterEach(cleanup);
 
 describe("Source annotation progress", () => {
+  it("retains submitted work and closed rounds when papers create a new source version", async () => {
+    mocks.request.mockResolvedValue([{ dataset_id: 2, dataset_version_id: 22, total: 3, submitted: 3 }, { dataset_id: 2, dataset_version_id: 23, total: 4, submitted: 0 }]);
+    const prior = data.datasetVersions[0];
+    if (!prior) throw new Error("Fixture requires a source version");
+    render(<DataScreen data={{ ...data, datasetVersions: [prior, { ...prior, id: 23, version_number: 2, item_count: 4 }], rounds: [{ id: 71, project_id: 7, cycle_id: null, name: "Prior work", sequence: 1, dataset_version_id: 22, task_version_id: 12, guideline_revision_id: null, selection_set_version_id: null, feedback_set_version_id: null, assistance_policy: "blind", reannotation_mode: "full_dataset", annotator_user_ids: [7], open_to_all_annotators: false, reason: null, status: "closed", opened_at: null, closed_at: null }] }} legacyDocumentCount={0} onCreate={vi.fn()} />);
+    expect(await screen.findByText("v1: 3/3 submitted (preserved)")).toBeTruthy();
+    expect(screen.getByText("0 open · 1 closed rounds")).toBeTruthy();
+    expect(screen.queryByText("Annotation not started")).toBeNull();
+  });
+
   it("shows submitted examples separately from saved labels", async () => {
     mocks.request.mockResolvedValue([{ dataset_id: 2, dataset_version_id: 22, total: 3, submitted: 2 }]);
     render(<DataScreen data={data} legacyDocumentCount={0} onCreate={vi.fn()} />);

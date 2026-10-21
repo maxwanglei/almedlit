@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import AnnotatorWorkspace, { type AnnotationMutationAdapter } from "@/pages/AnnotatorWorkspace";
 import type {
+  Annotation,
   AnnotationWorkbench,
   AnnotationWorkbenchTask,
   Document,
@@ -887,5 +888,106 @@ describe("paper navigation", () => {
     expect(new URLSearchParams(window.location.search).get("document")).toBe("2");
     expect((screen.getByRole("combobox", { name: "Task" }) as HTMLSelectElement).value).toBe(String(resolved));
     expect(new URLSearchParams(window.location.search).get("assignment")).toBe(String(resolved));
+  });
+});
+
+
+const labelChoices = [
+  { name: "Clinical", color: "#4d6e5b", description: null },
+  { name: "Excluded", color: "#4d6e5b", description: null },
+];
+function labelWorkbench(type: "doc_label" | "sentence_label", withAnnotation = true): AnnotationWorkbench {
+  const task: AnnotationWorkbenchTask = { ...classificationTask, annotation_type: type, labels: labelChoices,
+    annotation_type_spec: { ...classificationTask.annotation_type_spec, name: type, requires_span: type === "sentence_label", selection_mode: type === "sentence_label" ? "sentence_range" : "document" } };
+  const annotation: Annotation = {
+    id: 71, project_id: 1, document_id: 1, annotation_type: type, label: "Clinical",
+    start_offset: type === "sentence_label" ? 0 : null, end_offset: type === "sentence_label" ? 12 : null,
+    text_span: type === "sentence_label" ? documentItem.text : null,
+    source: "human", status: "draft", annotator_id: "max", annotator_user_id: 1,
+    confidence: null, model_checkpoint_id: null, guideline_version_id: null, structure_version_id: 1,
+    head_annotation_id: null, tail_annotation_id: null, evidence: {}, attributes: {}, evidence_block: null,
+    created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z",
+  };
+  return { ...workbench, project: { ...project, tasks: [task] }, tasks: [task],
+    annotation_type_specs: [task.annotation_type_spec], annotations: withAnnotation ? [annotation] : [] };
+}
+
+describe("annotation label safety and shortcuts", () => {
+  beforeEach(() => {
+    window.history.replaceState(null, "", "/annotator/workbench?view=annotate&document=1");
+    mocks.createAnnotation.mockResolvedValue(labelWorkbench("doc_label").annotations[0]);
+    mocks.deleteAnnotation.mockResolvedValue(undefined);
+  });
+  it.each(["doc_label", "sentence_label"] satisfies Array<"doc_label" | "sentence_label">)("relabels %s without deleting its record and preserves it if saving fails", async (type) => {
+    const initialWorkbench = labelWorkbench(type);
+    mocks.updateAnnotation.mockRejectedValue(new Error("Save unavailable"));
+    render(<Harness personal initialAssignments={[]} initialWorkbench={initialWorkbench} />);
+    if (type === "sentence_label") fireEvent.click(screen.getByRole("button", { name: "Clinical" }));
+    fireEvent.click(screen.getByRole("button", { name: /Excluded/ }));
+    await waitFor(() => expect(mocks.updateAnnotation).toHaveBeenCalledWith(71, { label: "Excluded" }));
+    expect(mocks.deleteAnnotation).not.toHaveBeenCalled();
+    expect(mocks.createAnnotation).not.toHaveBeenCalled();
+    expect(screen.getAllByText("Clinical").length).toBeGreaterThan(0);
+  });
+
+  it("disables document-label actions while the save is unresolved", async () => {
+    mocks.updateAnnotation.mockImplementation(() => new Promise(() => undefined));
+    render(<Harness personal initialAssignments={[]} initialWorkbench={labelWorkbench("doc_label")} />);
+    fireEvent.click(screen.getByRole("button", { name: /Excluded/ }));
+    expect(screen.getByRole("button", { name: /^Clinical\s*OK$/ }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: /Excluded/ }).hasAttribute("disabled")).toBe(true);
+    fireEvent.keyDown(window, { key: "1", altKey: true });
+    expect(mocks.updateAnnotation).toHaveBeenCalledTimes(1);
+    expect(mocks.deleteAnnotation).not.toHaveBeenCalled();
+  });
+
+  it("uses Alt-number for document labels and ignores modifier combinations or an open dialog", async () => {
+    const initialWorkbench = labelWorkbench("doc_label");
+    const original = initialWorkbench.annotations[0];
+    mocks.updateAnnotation.mockResolvedValue({ ...original, label: "Excluded" });
+    render(<Harness personal initialAssignments={[]} initialWorkbench={initialWorkbench} />);
+    fireEvent.keyDown(window, { key: "2", altKey: true, ctrlKey: true });
+    expect(mocks.updateAnnotation).not.toHaveBeenCalled();
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    document.body.append(dialog);
+    fireEvent.keyDown(window, { key: "2", altKey: true });
+    expect(mocks.updateAnnotation).not.toHaveBeenCalled();
+    dialog.remove();
+    fireEvent.keyDown(window, { key: "2", altKey: true });
+    await waitFor(() => expect(mocks.updateAnnotation).toHaveBeenCalledWith(71, { label: "Excluded" }));
+  });
+
+  it("uses the sentence menu's number keys without switching views", async () => {
+    const initialWorkbench = labelWorkbench("sentence_label");
+    mocks.updateAnnotation.mockResolvedValue({ ...initialWorkbench.annotations[0], label: "Excluded" });
+    render(<Harness personal initialAssignments={[]} initialWorkbench={initialWorkbench} />);
+    fireEvent.click(screen.getByRole("button", { name: "Clinical" }));
+    fireEvent.keyDown(window, { key: "2" });
+    await waitFor(() => expect(mocks.updateAnnotation).toHaveBeenCalledWith(71, { label: "Excluded" }));
+    expect(screen.getByText("Disease text")).toBeTruthy();
+  });
+
+  it("does not leave the paper editor when pressing 2", () => {
+    render(<NavigationHarness />);
+    fireEvent.keyDown(window, { key: "2" });
+    expect(screen.getByRole("button", { name: /Next document/ })).toBeTruthy();
+  });
+});
+
+describe("document task links", () => {
+  it("selects the linked document task and allows the picker to select another task", async () => {
+    window.history.replaceState(null, "", "/my-work?project=1&document=1&view=annotate&task=1&tool=legacy");
+    render(<NavigationHarness canonical={false} />);
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Task" })).toHaveProperty("value", "11"));
+    fireEvent.change(screen.getByRole("combobox", { name: "Task" }), { target: { value: "10" } });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Task" })).toHaveProperty("value", "10"));
+    expect(new URLSearchParams(window.location.search).get("task")).toBe("2");
+  });
+
+  it("ignores a task outside the current project", async () => {
+    window.history.replaceState(null, "", "/my-work?project=1&document=1&view=annotate&task=999&tool=legacy");
+    render(<NavigationHarness canonical={false} />);
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Task" })).toHaveProperty("value", "10"));
   });
 });

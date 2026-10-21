@@ -393,25 +393,25 @@ def create_round_label_set(
     commit: bool = True,
 ) -> models.LabelSetVersion:
     resolved = resolve_round_labels(db, annotation_round_id, data)
-    if data.publication_mode == "submitted_snapshot":
-        db.query(models.DatasetVersion).filter(
-            models.DatasetVersion.id == resolved["dataset_version_id"]
-        ).with_for_update().one()
-        candidates = db.query(models.LabelSetVersion).filter(
-            models.LabelSetVersion.dataset_version_id == resolved["dataset_version_id"],
-            models.LabelSetVersion.task_version_id == resolved["task_version_id"],
-            models.LabelSetVersion.name == data.name,
-            models.LabelSetVersion.source_kind == data.source_kind,
-            models.LabelSetVersion.composition_policy == data.composition_policy,
-            models.LabelSetVersion.source_annotation_round_id == annotation_round_id,
-        ).all()
-        for candidate in candidates:
-            if (
-                sorted(candidate.source_submission_ids) == resolved["source_submission_ids"]
-                and sorted(candidate.source_decision_ids) == resolved["source_decision_ids"]
-                and candidate.labels == resolved["labels"]
-            ):
-                return candidate
+    db.query(models.DatasetVersion).filter(
+        models.DatasetVersion.id == resolved["dataset_version_id"]
+    ).with_for_update().one()
+    candidates = db.query(models.LabelSetVersion).filter(
+        models.LabelSetVersion.dataset_version_id == resolved["dataset_version_id"],
+        models.LabelSetVersion.task_version_id == resolved["task_version_id"],
+        models.LabelSetVersion.name == data.name,
+        models.LabelSetVersion.source_kind == data.source_kind,
+        models.LabelSetVersion.composition_policy == data.composition_policy,
+        models.LabelSetVersion.source_annotation_round_id == annotation_round_id,
+        models.LabelSetVersion.parent_version_id == data.parent_version_id,
+    ).all()
+    for candidate in candidates:
+        if (
+            sorted(candidate.source_submission_ids) == resolved["source_submission_ids"]
+            and sorted(candidate.source_decision_ids) == resolved["source_decision_ids"]
+            and candidate.labels == resolved["labels"]
+        ):
+            return candidate
 
     return create_label_set_version(
         db,

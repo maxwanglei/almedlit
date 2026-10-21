@@ -138,7 +138,7 @@ export default function DataScreen({
                   const latest = versions[0];
                   const layers = data.labelSets.filter((layer) => layer.dataset_version_id === latest?.id);
                   const labeledKeys = new Set(layers.flatMap((layer) => Object.keys(layer.labels ?? {})));
-                  const rounds = data.rounds.filter((round) => round.dataset_version_id === latest?.id);
+                  const rounds = data.rounds.filter((round) => versions.some((version) => version.id === round.dataset_version_id));
                   const submissionProgress = latest ? progressByVersion.get(latest.id) : undefined;
                   return (
                     <tr key={dataset.id}>
@@ -151,7 +151,15 @@ export default function DataScreen({
                       <td><PlatformStatus value={dataset.source_type} /></td>
                       <td>{latest ? `v${latest.version_number}` : "No version"}</td>
                       <td>{latest?.item_count ?? 0}</td>
-                      <td>{submissionProgress ? <strong>{submissionProgress.submitted}/{submissionProgress.total} submitted</strong> : null}{layers.length ? `${labeledKeys.size || Math.max(...layers.map((layer) => layer.label_count))} saved labels` : "No saved label layer"}<span>{rounds.length ? `${rounds.filter((round) => round.status === "open").length} open · ${rounds.filter((round) => ["closed", "completed"].includes(round.status)).length} closed rounds` : "Annotation not started"}</span></td>
+                      <td>
+                        {submissionProgress ? <strong>{submissionProgress.submitted}/{submissionProgress.total} submitted</strong> : null}
+                        {layers.length ? `${labeledKeys.size || Math.max(...layers.map((layer) => layer.label_count))} saved labels` : "No saved label layer"}
+                        <span>{rounds.length ? `${rounds.filter((round) => round.status === "open").length} open · ${rounds.filter((round) => round.status === "closed").length} closed rounds` : "Annotation not started"}</span>
+                        {versions.filter((version) => version.id !== latest?.id).map((version) => {
+                          const prior = progressByVersion.get(version.id);
+                          return prior?.submitted ? <span key={version.id}>v{version.version_number}: {prior.submitted}/{prior.total} submitted (preserved)</span> : null;
+                        })}
+                      </td>
                       {onPrepareTraining || onAnnotate || onPredict || onImport ? (
                         <td>
                           <div className="platform-row-actions">

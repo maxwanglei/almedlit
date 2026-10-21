@@ -334,3 +334,13 @@ describe("AnnotatorWorkspace legacy API Unicode offsets", () => {
     expect(within(sentenceBodies(container)[0]).getByRole("button", { name: "Disease: disease" })).toBeTruthy();
   });
 });
+
+it.each([{ ctrlKey: true }, { metaKey: true }])("preserves the browser copy shortcut with a pending C label selection (%j)", (modifier) => {
+  const task = { ...entityTask, labels: [{ name: "Condition", color: "#4d6e5b", description: null }] };
+  const { container } = render(<Harness text="Clinical disease" sentences={[[0, 16]]} task={task} />);
+  const body = sentenceBodies(container)[0];
+  if (!body) throw new Error("Sentence body missing");
+  selectText(body, "disease");
+  fireEvent.keyDown(window, { key: "c", ...modifier });
+  expect(mocks.createAnnotation).not.toHaveBeenCalled();
+});

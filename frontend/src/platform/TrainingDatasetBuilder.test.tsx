@@ -3,15 +3,19 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import TrainingDatasetBuilder, { inheritedTrainingSource } from "./TrainingDatasetBuilder";
-import { EMPTY_PLATFORM_PROJECT_DATA, type Dataset, type DatasetVersion, type TaskVersion } from "./types";
+import { EMPTY_PLATFORM_PROJECT_DATA, type PlatformProjectData, type AnnotationRound } from "./types";
 import type { TrainingPreview } from "./trainingPreparationApi";
 
 const mocks = vi.hoisted(() => ({ preview: vi.fn(), prepare: vi.fn() }));
 vi.mock("./trainingPreparationApi", () => ({ previewTrainingDataset: mocks.preview, prepareTrainingDataset: mocks.prepare }));
-const data = { ...EMPTY_PLATFORM_PROJECT_DATA,
-  datasets: [{ id: 1, name: "External labels", source_type: "upload" }] as Dataset[],
-  datasetVersions: [{ id: 11, dataset_id: 1, version_number: 1, item_count: 12 }] as DatasetVersion[],
-  taskVersions: [{ id: 2, task_kind: "instruction_tuning", input_schema: { properties: { prompt: { type: "string" } } } }] as unknown as TaskVersion[],
+const data: PlatformProjectData = { ...EMPTY_PLATFORM_PROJECT_DATA,
+  datasets: [{ id: 1, project_id: 7, name: "External labels", source_type: "upload", description: null }],
+  datasetVersions: [{ id: 11, project_id: 7, dataset_id: 1, version_number: 1, item_count: 12,
+    data_schema: { properties: { label: { type: "string" } } }, source_uri: null, source_revision: "1",
+    source_format: "json", provenance: {}, license_info: {}, content_hash: "source", artifact_package_id: null }],
+  taskVersions: [{ id: 2, project_id: 7, task_definition_id: 1, version_number: 1, task_kind: "instruction_tuning",
+    input_schema: { properties: { prompt: { type: "string" } } }, output_schema: {}, label_rules: {}, annotation_ui: {},
+    metrics: [], trainer_compatibility: [], content_hash: "task" }],
 };
 const preview: TrainingPreview = { ready: true, issues: [], source_counts: [{ dataset_version_id: 11, total_count: 12, labeled_count: 12, excluded_unlabeled_count: 0 }], input_count: 12, labeled_count: 12, excluded_unlabeled_count: 0, duplicate_count: 0, item_count: 12, group_count: 12, split_counts: { train: 10, validation: 1, test: 1 }, manifest_hash: "f".repeat(64), resolved_sources: [{ dataset_version_id: 11, input_mapping: { prompt: "prompt" }, label_field: "label" }] };
 beforeEach(() => { vi.clearAllMocks(); sessionStorage.clear(); mocks.preview.mockResolvedValue(preview); });
@@ -53,7 +57,7 @@ describe("TrainingDatasetBuilder", () => {
   });
   it("restores the exact reviewed submissions and request key after a lost save response and reload", async () => {
     const user = userEvent.setup();
-    const annotatedData = { ...data, rounds: [{ id: 9, task_version_id: 2, dataset_version_id: 11, name: "Review" }] as typeof data.rounds };
+    const annotatedData = { ...data, rounds: [completedRound(9, 11)] };
     const pinned = { ...preview, resolved_sources: [{ dataset_version_id: 11, input_mapping: { prompt: "prompt" }, annotation_round_id: 9, submission_ids: [101] }] };
     mocks.preview.mockResolvedValueOnce(pinned).mockResolvedValue({ ...pinned, manifest_hash: "a".repeat(64), resolved_sources: [{ ...pinned.resolved_sources[0], submission_ids: [101, 102] }] });
     mocks.prepare.mockRejectedValueOnce(new Error("Response lost")).mockResolvedValue({ training_dataset_version: { id: 33, name: "Prepared", version_number: 1 } });
@@ -82,4 +86,73 @@ describe("TrainingDatasetBuilder", () => {
     expect((screen.getByRole("button", { name: "Preview training dataset" }) as HTMLButtonElement).disabled).toBe(true);
     expect(mocks.preview).not.toHaveBeenCalled();
   });
+});
+
+function completedRound(id: number, datasetVersionId: number, status = "closed"): AnnotationRound {
+  return { id, project_id: 7, cycle_id: null, name: `Round ${id}`, sequence: id,
+    dataset_version_id: datasetVersionId, task_version_id: 2, guideline_revision_id: null,
+    selection_set_version_id: null, feedback_set_version_id: null, assistance_policy: "blind",
+    reannotation_mode: "full_dataset", annotator_user_ids: [], open_to_all_annotators: true,
+    reason: null, status, opened_at: null, closed_at: null };
+}
+it("defaults to the latest task revision and requires an actual imported label field", async () => {
+  const user = userEvent.setup();
+  render(<TrainingDatasetBuilder projectId={7} data={{ ...data, datasetVersions: data.datasetVersions.map((version) => ({ ...version, data_schema: {} })), taskVersions: [
+    { ...data.taskVersions[0], id: 2, version_number: 1 },
+    { ...data.taskVersions[0], id: 3, version_number: 2 },
+  ] }} onImport={vi.fn()} onCreated={async () => undefined} onCancel={vi.fn()} />);
+  expect(screen.getByLabelText("Task")).toHaveProperty("value", "3");
+  expect(screen.getByLabelText("Label field")).toHaveProperty("value", "");
+  await user.type(screen.getByLabelText("Training dataset name"), "Prepared");
+  await user.click(screen.getByRole("button", { name: "Preview training dataset" }));
+  expect(mocks.preview).not.toHaveBeenCalled();
+});
+it("keeps annotation defaults on the launched source and chooses the latest completed round", async () => {
+  const user = userEvent.setup();
+  render(<TrainingDatasetBuilder projectId={7} initialDatasetId={1} data={{ ...data, rounds: [
+    completedRound(1, 99), completedRound(2, 11), completedRound(3, 11), completedRound(4, 11, "draft"),
+  ] }} onImport={vi.fn()} onCreated={async () => undefined} onCancel={vi.fn()} />);
+  await user.click(screen.getByRole("radio", { name: "Import external labeled data" }));
+  await user.click(screen.getByRole("radio", { name: "Use project annotations" }));
+  expect(screen.getByLabelText("Source dataset version")).toHaveProperty("value", "11");
+  expect(screen.getByLabelText("Labels from")).toHaveProperty("value", "round:3");
+});
+
+it("chooses the newest task across independent task revision series", () => {
+  render(<TrainingDatasetBuilder projectId={7} data={{ ...data, taskVersions: [
+    { ...data.taskVersions[0], id: 20, task_definition_id: 1, version_number: 9 },
+    { ...data.taskVersions[0], id: 21, task_definition_id: 2, version_number: 1 },
+  ] }} onImport={vi.fn()} onCreated={async () => undefined} onCancel={vi.fn()} />);
+  expect(screen.getByLabelText("Task")).toHaveProperty("value", "21");
+});
+
+function labelSet(id: number, name: string, versionNumber: number, sourceKind: "human" | "imported" = "human"): PlatformProjectData["labelSets"][number] {
+  return { id, project_id: 7, dataset_version_id: 11, task_version_id: 2, parent_version_id: null,
+    name, version_number: versionNumber, source_kind: sourceKind, composition_policy: "replace",
+    labels: {}, label_count: 12, content_hash: `labels-${id}` };
+}
+
+it("chooses the newest label set across independently named revision series", () => {
+  render(<TrainingDatasetBuilder projectId={7} initialDatasetVersionId={11} data={{ ...data, labelSets: [
+    labelSet(20, "Initial labels", 9), labelSet(21, "Adjudicated labels", 1),
+  ] }} onImport={vi.fn()} onCreated={async () => undefined} onCancel={vi.fn()} />);
+  expect(screen.getByLabelText("Labels from")).toHaveProperty("value", "layer:21");
+});
+
+it("chooses the newest closed round across independent cycle sequences", () => {
+  render(<TrainingDatasetBuilder projectId={7} initialDatasetVersionId={11} data={{ ...data, rounds: [
+    { ...completedRound(20, 11), cycle_id: 1, sequence: 9 },
+    { ...completedRound(21, 11), cycle_id: 2, sequence: 1 },
+  ] }} onImport={vi.fn()} onCreated={async () => undefined} onCancel={vi.fn()} />);
+  expect(screen.getByLabelText("Labels from")).toHaveProperty("value", "round:21");
+});
+
+it("keeps imported label sets out of project annotation mode", async () => {
+  const user = userEvent.setup();
+  render(<TrainingDatasetBuilder projectId={7} initialDatasetVersionId={11} data={{ ...data,
+    labelSets: [labelSet(30, "Imported labels", 9, "imported")], rounds: [completedRound(21, 11)],
+  }} onImport={vi.fn()} onCreated={async () => undefined} onCancel={vi.fn()} />);
+  await user.click(screen.getByRole("radio", { name: "Import external labeled data" }));
+  await user.click(screen.getByRole("radio", { name: "Use project annotations" }));
+  expect(screen.getByLabelText("Labels from")).toHaveProperty("value", "round:21");
 });

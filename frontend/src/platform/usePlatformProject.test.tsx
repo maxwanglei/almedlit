@@ -30,6 +30,8 @@ const mocks = vi.hoisted(() => ({
   createDatasetWithVersion: vi.fn(),
   createGuidelineWithRevision: vi.fn(),
   createRound: vi.fn(),
+  getAnnotationRound: vi.fn(),
+  transitionRound: vi.fn(),
   createTaskWithVersion: vi.fn(),
   createTrainingDataset: vi.fn(),
   launchTrainingRun: vi.fn(),
@@ -297,6 +299,22 @@ describe("usePlatformProject load scope", () => {
     expect(mocks.loadPlatformProject).toHaveBeenCalledTimes(2);
   });
 
+  it("reloads a saved draft after opening fails and preserves the original error", async () => {
+    mocks.createRound.mockImplementation(async (_id: number, _draft: RoundDraft, onCreated?: (round: { id: number }) => void) => { onCreated?.({ id: 71 }); throw new Error("Opening failed"); });
+    const { result } = renderHook(() => usePlatformProject(7, 5, true, "rounds"));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const draft: RoundDraft = { name: "Recover me", datasetVersionId: 2, taskVersionId: 3, cycleId: null, splitMapId: null, guidelineRevisionId: null, feedbackSetVersionId: null, assistancePolicy: "blind", reannotationMode: "full_dataset", selectionStrategy: "all", selectionLimit: 1, annotatorUserIds: [7], openToAllAnnotators: false, reason: "" };
+    await act(async () => { await expect(result.current.addRound(draft)).rejects.toThrow("Opening failed"); });
+    expect(mocks.loadPlatformProject).toHaveBeenCalledTimes(2);
+    expect(result.current.error).toBe("Opening failed");
+    mocks.getAnnotationRound.mockResolvedValue({ id: 71, status: "draft" });
+    mocks.transitionRound.mockResolvedValue({ id: 71, status: "open" });
+    await act(() => result.current.addRound(draft));
+    expect(mocks.createRound).toHaveBeenCalledOnce();
+    expect(mocks.transitionRound).toHaveBeenCalledWith(7, 71, "open");
+    expect(result.current.error).toBeNull();
+  });
+
   it("retains the active roles when reloading after a mutation", async () => {
     const roles: readonly WorkspaceRole[] = ["annotator", "trainer", "manager"];
     mocks.createRound.mockResolvedValueOnce({ id: 21 });
@@ -323,7 +341,7 @@ describe("usePlatformProject load scope", () => {
 
     await act(() => result.current.addRound(draft));
 
-    expect(mocks.createRound).toHaveBeenCalledWith(7, draft);
+    expect(mocks.createRound).toHaveBeenCalledWith(7, draft, expect.any(Function));
     expect(mocks.loadPlatformProject).toHaveBeenCalledTimes(2);
     expect(mocks.loadPlatformProject).toHaveBeenLastCalledWith(7, "rounds", 5, roles);
     expect(result.current.busy).toBe(false);
@@ -414,4 +432,25 @@ describe("usePlatformProject resource creation retries", () => {
     await act(() => result.current.addDataset(dataset));
     expect(mocks.createDatasetWithVersion).toHaveBeenNthCalledWith(3, 7, dataset, expect.any(Function), undefined);
   });
+});
+
+it("retries project launches with one attempt and handles the displayed failure", async () => {
+  const draft = { modelName: "Baseline", taskVersionId: 1, trainingDatasetVersionId: 2,
+    recipeKey: "linear", recipeVersionId: null, environmentId: 3, storagePolicyId: 4,
+    seed: 42, config: {}, evaluationPlan: {} };
+  mocks.launchTrainingRun.mockRejectedValueOnce(new Error("Response lost")).mockResolvedValue({ id: 151 });
+  const { result, rerender } = renderHook(({ projectId }) => usePlatformProject(projectId, 5, true, "train"),
+    { initialProps: { projectId: 7 } });
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  await act(async () => { await expect(result.current.launch(draft)).resolves.toBeUndefined(); });
+  expect(result.current.error).toBe("Response lost");
+  await act(() => result.current.launch(draft));
+  const firstAttempt = mocks.launchTrainingRun.mock.calls[0]?.[3];
+  expect(firstAttempt).toMatchObject({ key: expect.any(String) });
+  expect(mocks.launchTrainingRun.mock.calls[1]?.[3]).toBe(firstAttempt);
+  await act(() => result.current.launch({ ...draft, seed: 73 }));
+  expect(mocks.launchTrainingRun.mock.calls[2]?.[3].key).not.toBe(firstAttempt.key);
+  rerender({ projectId: 8 });
+  await act(() => result.current.launch(draft));
+  expect(mocks.launchTrainingRun.mock.calls[3]?.[3].key).not.toBe(firstAttempt.key);
 });

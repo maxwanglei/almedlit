@@ -454,6 +454,15 @@ describe("PlatformDialog accessibility", () => {
     );
   });
 
+  it("excludes empty generated versions from round creation", () => {
+    const data = learningProjectData();
+    data.datasetVersions = data.datasetVersions.map((version) => ({ ...version, item_count: 0 }));
+    const complete = vi.fn();
+    render(<PlatformDialog kind="round" data={data} busy={false} currentUserId={7} onClose={vi.fn()} onCreateDataset={complete} onCreateCycle={complete} onCreateRound={complete} onScoreFeedback={complete} onCreateGuideline={complete} onCreateTask={complete} onPrepareTrainingData={complete} />);
+    expect(screen.getByRole<HTMLSelectElement>("combobox", { name: "Dataset version" }).options.length).toBe(0);
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: /^Create/ }).disabled).toBe(true);
+  });
+
   it("offers the existing project corpus as a dataset source", async () => {
     const user = userEvent.setup();
     const onCreateDataset = vi.fn().mockResolvedValue(undefined);

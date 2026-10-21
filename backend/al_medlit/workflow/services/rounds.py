@@ -322,6 +322,54 @@ def create_annotation_round(
             raise ValidationError("Selected items must belong to the round's pinned source dataset")
         validate_annotation_assistance(db, source_items, task.id, data.assistance_policy)
 
+    if data.reannotation_mode == "unassigned":
+        if selection_set is not None:
+            raise ValidationError("Unassigned rounds cannot use a selection set")
+        if data.assistance_policy != "blind":
+            raise ValidationError("Unassigned rounds must use blind annotation")
+        (
+            db.query(models.TaskVersion)
+            .filter(models.TaskVersion.id == task.id)
+            .with_for_update()
+            .one()
+        )
+
+    source_item_ids: list[int] = []
+    if selection_set is None:
+        available_items = db.query(models.DatasetItem.id).filter(
+            models.DatasetItem.dataset_version_id == dataset.id,
+        )
+        if data.reannotation_mode == "unassigned":
+            covered_keys = (
+                db.query(models.DatasetItem.stable_key)
+                .join(
+                    models.DatasetVersion,
+                    models.DatasetItem.dataset_version_id == models.DatasetVersion.id,
+                )
+                .join(models.RoundItem, models.RoundItem.dataset_item_id == models.DatasetItem.id)
+                .join(
+                    models.AnnotationRound,
+                    models.RoundItem.annotation_round_id == models.AnnotationRound.id,
+                )
+                .filter(
+                    models.DatasetVersion.dataset_id == dataset.dataset_id,
+                    models.AnnotationRound.task_version_id == task.id,
+                    models.AnnotationRound.status != "cancelled",
+                )
+            )
+            available_items = available_items.filter(
+                models.DatasetItem.stable_key.notin_(covered_keys),
+            )
+        source_item_ids = [
+            item_id for (item_id,) in available_items.order_by(models.DatasetItem.id).all()
+        ]
+    if not (selection_set.items if selection_set is not None else source_item_ids):
+        raise ValidationError(
+            "No unassigned source items remain"
+            if data.reannotation_mode == "unassigned"
+            else "Annotation rounds require at least one source item"
+        )
+
     sequence = _next_sequence(
         db,
         models.AnnotationRound,
@@ -351,19 +399,18 @@ def create_annotation_round(
                     metadata_={},
                 )
             )
-    elif data.reannotation_mode == "full_dataset":
-        for (item_id,) in (
-            db.query(models.DatasetItem.id)
-            .filter(models.DatasetItem.dataset_version_id == dataset.id)
-            .order_by(models.DatasetItem.id)
-            .all()
-        ):
+    elif data.reannotation_mode in ("full_dataset", "unassigned"):
+        for item_id in source_item_ids:
             db.add(
                 models.RoundItem(
                     project_id=data.project_id,
                     annotation_round_id=annotation_round.id,
                     dataset_item_id=item_id,
-                    selection_reason={"strategy": "all"},
+                    selection_reason={
+                        "strategy": (
+                            "unassigned" if data.reannotation_mode == "unassigned" else "all"
+                        )
+                    },
                     metadata_={},
                 )
             )

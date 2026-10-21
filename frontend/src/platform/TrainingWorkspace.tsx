@@ -4,6 +4,7 @@ import { Button } from "@astryxdesign/core/Button";
 import type { Project } from "@/types/api";
 
 import {
+  type TrainingLaunchAttempt,
   cancelTrainingRun,
   createExecutionEnvironment,
   createStoragePolicy,
@@ -257,6 +258,7 @@ function TrainingRuns({
     projectId: initialProjectId ?? undefined,
     limit: 50,
   });
+  const appliedFilters = useRef(filters);
   const [page, setPage] = useState<WorkspaceTrainingRunPage>({
     items: [],
     next_cursor: null,
@@ -281,6 +283,7 @@ function TrainingRuns({
           projects,
         );
         if (requestId !== loadRequestIdRef.current) return;
+        appliedFilters.current = nextFilters;
         setPage((current) => ({
           items: append ? [...current.items, ...result.items] : result.items,
           next_cursor: result.next_cursor,
@@ -572,7 +575,7 @@ function TrainingRuns({
               onClick={() =>
                 void load(
                   {
-                    ...filters,
+                    ...appliedFilters.current,
                     cursor: page.next_cursor ?? undefined,
                   },
                   true,
@@ -614,6 +617,8 @@ function NewTraining({
   const [projectDescription, setProjectDescription] = useState("");
   const contextsRequestIdRef = useRef(0);
   const projectDataRequestIdRef = useRef(0);
+  const selectedContextRef = useRef(initialProjectId ?? 0);
+  const launchAttempt = useRef<{ signature: string; attempt: TrainingLaunchAttempt } | null>(null);
 
   const loadContexts = useCallback(async (): Promise<void> => {
     const requestId = ++contextsRequestIdRef.current;
@@ -629,7 +634,7 @@ function NewTraining({
       if (requestId !== contextsRequestIdRef.current) return;
       setContexts(result.items);
       setContextsWorkspaceId(workspaceId);
-      if (initialProjectId) {
+      if (initialProjectId && selectedContextRef.current === initialProjectId) {
         const initial = result.items.find(
           (item) => item.project_id === initialProjectId,
         );
@@ -660,6 +665,7 @@ function NewTraining({
   useEffect(() => {
     setContexts([]);
     setContextsWorkspaceId(null);
+    selectedContextRef.current = initialProjectId ?? 0;
     setProjectId(initialProjectId ?? 0);
     setContextConfirmed(false);
     setContextKind("existing");
@@ -757,6 +763,7 @@ function NewTraining({
         projectName,
         projectDescription,
       );
+      selectedContextRef.current = project.id;
       await onProjectCreated?.(project);
       setContexts((current) => [
         ...current.filter((item) => item.project_id !== project.id),
@@ -792,12 +799,15 @@ function NewTraining({
     setBusy(true);
     setError(null);
     try {
-      const run = await launchTrainingRun(projectId, draft, data);
+      const signature = JSON.stringify({ projectId, draft });
+      if (launchAttempt.current?.signature !== signature) {
+        launchAttempt.current = { signature, attempt: { key: crypto.randomUUID(), modelId: null, recipeVersionId: null } };
+      }
+      const run = await launchTrainingRun(projectId, draft, data, launchAttempt.current.attempt);
       onNavigate(`/training/runs/${run.id}`);
     } catch (caught) {
       const message = errorMessage(caught, "Unable to launch training.");
       setError(message);
-      throw caught;
     } finally {
       setBusy(false);
     }
@@ -869,7 +879,7 @@ function NewTraining({
                   ? "Existing training-only project"
                   : "Existing project"
               }
-              onChange={setProjectId}
+              onChange={(id) => { selectedContextRef.current = id; setProjectId(id); }}
             />
           </div>
           <div className="platform-wizard-actions">
@@ -974,8 +984,8 @@ function NewTraining({
         creatorLabel={currentUserName}
         title="New training"
         showRecentRuns={false}
-        initialDatasetId={initialDatasetId}
-        initialTrainingDatasetVersionId={initialTrainingDatasetVersionId}
+        initialDatasetId={projectId === initialProjectId ? initialDatasetId : null}
+        initialTrainingDatasetVersionId={projectId === initialProjectId ? initialTrainingDatasetVersionId : null}
         initialEnvironmentId={
           typeof contextProject?.settings.default_environment_id === "number"
             ? contextProject.settings.default_environment_id
@@ -995,7 +1005,7 @@ function NewTraining({
         onOpenTrainingData={() =>
           onNavigate(
             `/training/data?projectId=${projectId}${
-              initialDatasetId ? `&datasetId=${initialDatasetId}` : ""
+              projectId === initialProjectId && initialDatasetId ? `&datasetId=${initialDatasetId}` : ""
             }`,
           )
         }
@@ -1022,17 +1032,16 @@ function TrainingData({
   const [contextsWorkspaceId, setContextsWorkspaceId] = useState<number | null>(
     null,
   );
-  const [projectId, setProjectId] = useState(0);
+  const projectId = contextsWorkspaceId !== workspaceId ? 0 :
+    initialProjectId ? contexts.find((item) => item.project_id === initialProjectId)?.project_id ?? 0 : contexts[0]?.project_id ?? 0;
   const resourceCreation = useResourceCreation(projectId || null, workspaceId);
   const [data, setData] = useState(EMPTY_PLATFORM_PROJECT_DATA);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dialog, setDialog] = useState<TrainingDialog>(null);
-  const [dialogDatasetId, setDialogDatasetId] = useState<number | null>(null);
-  const [requestedDatasetHandled, setRequestedDatasetHandled] =
-    useState(false);
-  const [builderOpen, setBuilderOpen] = useState(new URLSearchParams(search).get("flow") === "prepare");
+  const builderOpen = new URLSearchParams(search).get("flow") === "prepare" || Boolean(initialDatasetId);
+  const [loadedProjectId, setLoadedProjectId] = useState<number | null>(null);
   const [savedMessage, setSavedMessage] = useState<string | null>(null);
   const dataTab = new URLSearchParams(search).get("tab") === "source" ? "source" : "training";
   const reloadRequestIdRef = useRef(0);
@@ -1064,6 +1073,7 @@ function TrainingData({
         loadPlatformProject(projectId, "train", workspaceId),
       ]);
       if (isCurrentRequest()) {
+        setLoadedProjectId(projectId);
         setData({
           ...sourceData,
           trainingDatasets: trainingData.trainingDatasets,
@@ -1099,18 +1109,12 @@ function TrainingData({
     setContexts([]);
     setContextsWorkspaceId(null);
     setData(EMPTY_PLATFORM_PROJECT_DATA);
-    setProjectId(0);
     setLoading(true);
     void listWorkspaceTrainingContexts(workspaceId, projects, { limit: 100 })
       .then((result) => {
         if (!active) return;
         setContexts(result.items);
         setContextsWorkspaceId(workspaceId);
-        setProjectId(
-          result.items.some((item) => item.project_id === initialProjectId)
-            ? initialProjectId ?? 0
-            : result.items[0]?.project_id ?? 0,
-        );
       })
       .catch((caught: unknown) => {
         if (active) {
@@ -1123,11 +1127,7 @@ function TrainingData({
     return () => {
       active = false;
     };
-  }, [initialProjectId, projects, workspaceId]);
-
-  useEffect(() => {
-    setRequestedDatasetHandled(false);
-  }, [initialDatasetId, projectId, workspaceId]);
+  }, [projects, workspaceId]);
 
   useEffect(() => {
     void reload();
@@ -1136,27 +1136,7 @@ function TrainingData({
     };
   }, [reload]);
 
-  useEffect(() => {
-    if (
-      requestedDatasetHandled ||
-      !initialDatasetId ||
-      loading ||
-      !data.datasets.some((dataset) => dataset.id === initialDatasetId)
-    ) {
-      return;
-    }
-    setDialogDatasetId(initialDatasetId);
-    setBuilderOpen(true);
-    setRequestedDatasetHandled(true);
-  }, [
-    data.datasets,
-    initialDatasetId,
-    loading,
-    requestedDatasetHandled,
-  ]);
-
   const context = contexts.find((item) => item.project_id === projectId);
-  useEffect(() => { setBuilderOpen(new URLSearchParams(search).get("flow") === "prepare"); }, [search, projectId]);
 
   async function mutate(operation: () => Promise<unknown>): Promise<void> {
     setBusy(true);
@@ -1180,29 +1160,32 @@ function TrainingData({
           <ProjectContextPicker
             contexts={contexts}
             projectId={projectId}
-            onChange={setProjectId}
+            onChange={(nextProjectId) => {
+              setDialog(null);
+              setSavedMessage(null);
+              onNavigate(`/training/data?projectId=${nextProjectId}${builderOpen ? "&flow=prepare" : `&tab=${dataTab}`}`);
+            }}
           />
         </div>
       </PlatformSection>
       {error ? <p role="alert" className="platform-form-warning">{error}</p> : null}
       {savedMessage ? <p role="status">{savedMessage}</p> : null}
-      {builderOpen && projectId && !loading ? <TrainingDatasetBuilder key={`${workspaceId}:${projectId}:${initialTrainingDatasetVersionId ?? "new"}:${initialDatasetVersionId ?? dialogDatasetId ?? initialDatasetId ?? "all"}:${initialTaskVersionId ?? "task"}`}
-        projectId={projectId} data={data} initialDatasetId={dialogDatasetId ?? initialDatasetId}
+      {builderOpen && projectId && loadedProjectId === projectId ? <TrainingDatasetBuilder key={`${workspaceId}:${projectId}:${initialTrainingDatasetVersionId ?? "new"}:${initialDatasetVersionId ?? initialDatasetId ?? "all"}:${initialTaskVersionId ?? "task"}`}
+        projectId={projectId} data={data} initialDatasetId={initialDatasetId}
         initialDatasetVersionId={initialDatasetVersionId} initialTaskVersionId={initialTaskVersionId} initialLabelSetVersionId={initialLabelSetVersionId}
         parent={data.trainingDatasets.find((version) => version.id === initialTrainingDatasetVersionId)}
         onImport={() => setDialog("dataset")} onDefineTask={canCreateTask ? () => setDialog("task") : undefined}
-        onCancel={() => { setBuilderOpen(false); onNavigate(`/training/data?projectId=${projectId}&tab=training`); }}
+        onCancel={() => onNavigate(`/training/data?projectId=${projectId}&tab=training`)}
         onCreated={async (version) => {
           setSavedMessage(`${version.name} · v${version.version_number ?? 1} saved. Choose Train model to launch training.`);
           await reload();
-          setBuilderOpen(false);
           onNavigate(`/training/data?projectId=${projectId}&tab=training`);
         }} /> : null}
       {loading && !projectId ? (
         <p className="platform-inline-empty" role="status">Loading training contexts…</p>
       ) : projectId ? (builderOpen ? null : (
         <DataScreen
-          data={data}
+          data={loadedProjectId === projectId ? data : EMPTY_PLATFORM_PROJECT_DATA}
           legacyDocumentCount={0}
           title="Training data"
           description={`Versioned source data and label composition for ${
@@ -1219,12 +1202,10 @@ function TrainingData({
           onCreate={() => setDialog("dataset")}
           activeTab={dataTab}
           onTabChange={(tab) => onNavigate(`/training/data?projectId=${projectId}&tab=${tab}`)}
-          onCreateTraining={() => { setBuilderOpen(true); onNavigate(`/training/data?projectId=${projectId}&flow=prepare`); }}
+          onCreateTraining={() => onNavigate(`/training/data?projectId=${projectId}&flow=prepare`)}
           onTrain={(version) => onNavigate(`/training/new?projectId=${projectId}&trainingDatasetVersionId=${version.id}`)}
           onNewTrainingVersion={(version) => onNavigate(`/training/data?projectId=${projectId}&flow=prepare&trainingDatasetId=${version.training_dataset_id}&trainingDatasetVersionId=${version.id}`)}
           onPrepareTraining={(dataset) => {
-            setDialogDatasetId(dataset.id);
-            setBuilderOpen(true);
             onNavigate(`/training/data?projectId=${projectId}&flow=prepare&datasetId=${dataset.id}`);
           }}
         />
@@ -1239,10 +1220,9 @@ function TrainingData({
           kind={dialog}
           data={data}
           busy={busy}
-          initialDatasetId={dialogDatasetId}
+          initialDatasetId={initialDatasetId}
           onClose={() => {
             setDialog(null);
-            setDialogDatasetId(null);
           }}
           onCreateDataset={(draft) =>
             mutate(() => resourceCreation.createDataset(draft))

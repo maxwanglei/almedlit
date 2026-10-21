@@ -2018,3 +2018,30 @@ def test_gold_block_policies_are_scoped_to_guideline_version(
     assert new_gold.status_code == 201, new_gold.text
     assert new_gold.json()["guideline_version_id"] == new_guideline_id
     assert new_gold.json()["annotator_user_id"] != old_gold.json()["annotator_user_id"]
+
+
+def test_manager_can_request_own_command_history_without_losing_audit_history(client):
+    ctx = _setup_evidence_project(client, "evidence-own-history")
+    own = client.post("/api/annotations", json=_block_payload(ctx, 0, 0)).json()
+    other_headers = {"Authorization": f"Bearer {client._token_for('other-manager')}"}
+    other = client.post(
+        "/api/annotations", json=_block_payload(ctx, 1, 1), headers=other_headers,
+    ).json()
+    url = "/api/annotations/evidence-blocks/commands"
+    filters = {"project_id": ctx["project"]["id"], "document_id": ctx["document"]["id"]}
+    all_commands = client.get(url, params=filters)
+    assert all_commands.status_code == 200, all_commands.text
+    assert {command["command_group_key"] for command in all_commands.json()} == {
+        own["evidence_block"]["last_command_group_key"],
+        other["evidence_block"]["last_command_group_key"],
+    }
+    own_commands = client.get(url, params={**filters, "mine_only": True})
+    assert own_commands.status_code == 200, own_commands.text
+    assert [command["command_group_key"] for command in own_commands.json()] == [
+        own["evidence_block"]["last_command_group_key"],
+    ]
+    key = own_commands.json()[0]["command_group_key"]
+    undo = client.post(f"{url}/{key}/undo")
+    assert undo.status_code == 200, undo.text
+    redo = client.post(f"{url}/{key}/redo")
+    assert redo.status_code == 200, redo.text

@@ -291,6 +291,7 @@ def list_corrections(
 )
 def list_evidence_commands(
     project_id: int = Query(...),
+    mine_only: bool = Query(False),
     document_id: int | None = Query(None),
     target_version_id: int | None = Query(None),
     structure_version_id: int | None = Query(None),
@@ -306,7 +307,11 @@ def list_evidence_commands(
         target_version_id=target_version_id,
         structure_version_id=structure_version_id,
         guideline_version_id=guideline_version_id,
-        actor_user_id=(None if has_assignment_bypass(current_user, member) else current_user.id),
+        actor_user_id=(
+            current_user.id
+            if mine_only or not has_assignment_bypass(current_user, member)
+            else None
+        ),
     )
 
 

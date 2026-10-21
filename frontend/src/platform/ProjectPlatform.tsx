@@ -12,6 +12,7 @@ import type {
   Document,
   Project,
   ProjectProgress,
+  ProjectTask,
   ProjectUpdate,
   TaskAssignment,
 } from "@/types/api";
@@ -114,6 +115,9 @@ export default function ProjectPlatform({
   const canInfer = canPerform(access, "inference:run") && effectiveModules.has("data") && effectiveModules.has("models");
   const canManageSources = canPerform(access, "projects:create");
   const openImport = (dataset?: Dataset): void => onNavigate(`/projects/${project.id}/data?tab=source&flow=import${dataset ? `&datasetId=${dataset.id}` : ""}`);
+  const openDocumentTask = canPerform(access, "annotation:work") && effectiveModules.has("annotate")
+    ? (task: ProjectTask): void => onNavigate(`/my-work?project=${project.id}&view=annotate&task=${task.id}&tool=${task.annotation_type === "evidence_block" ? "evidence" : "legacy"}`)
+    : undefined;
   const setupTask = (taskVersionId: number): void => {
     const collections = data.datasets.filter((dataset) => dataset.source_type === "project_corpus");
     const versions = data.datasetVersions.filter((version) => collections.some((dataset) => dataset.id === version.dataset_id));
@@ -193,6 +197,8 @@ export default function ProjectPlatform({
         <>
         <AnnotateScreen
           view="tasks"
+          projectTasks={project.tasks}
+          onOpenDocumentTask={openDocumentTask}
           data={data}
           onCreateRound={() => onDialogChange("round")}
           onCreateTask={() => onDialogChange("task")}
@@ -261,6 +267,7 @@ export default function ProjectPlatform({
         <OverviewScreen
           data={data}
           projectTasks={project.tasks}
+          onOpenDocumentTask={openDocumentTask}
           onSetupTask={canManageAnnotation ? setupTask : undefined}
           documents={documents}
           assignments={assignments}

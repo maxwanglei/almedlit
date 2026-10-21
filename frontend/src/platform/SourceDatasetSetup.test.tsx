@@ -29,6 +29,27 @@ function sourceData(tasks: TaskVersion[] = []) {
   };
 }
 describe("SourceDatasetSetup", () => {
+  it("continues an older source version's open round after adding papers", async () => {
+    const user = userEvent.setup(); const navigate = vi.fn();
+    const data = sourceData([classificationTask(31)]);
+    const prior = data.datasetVersions[0];
+    if (!prior) throw new Error("Fixture requires source version");
+    data.datasetVersions.push({ ...prior, id: 14, version_number: 2, item_count: 3 });
+    data.rounds = [{ id: 900, project_id: 7, name: "Earlier annotation", sequence: 1, status: "open", dataset_version_id: 13, task_version_id: 31, annotator_user_ids: [9], open_to_all_annotators: false, cycle_id: null, guideline_revision_id: null, selection_set_version_id: null, feedback_set_version_id: null, assistance_policy: "blind", reannotation_mode: "full_dataset", reason: null, opened_at: null, closed_at: null }];
+    render(<SourceDatasetSetup projectId={7} projectName="Tucatinib" data={data} datasetId={12} datasetVersionId={14} initialTaskVersionId={31} currentUserId={9} canAnnotate canInfer={false} onRefresh={async () => undefined} onNavigate={navigate} />);
+    await user.click(screen.getByRole("button", { name: "Continue annotation" }));
+    expect(navigate).toHaveBeenLastCalledWith("/my-work/rounds/900?view=annotate");
+    expect(mocks.round).not.toHaveBeenCalled();
+  });
+
+  it("starts only unassigned source records after earlier rounds finish", async () => {
+    const user = userEvent.setup(); const navigate = vi.fn();
+    mocks.round.mockResolvedValue({ id: 901 });
+    render(<SourceDatasetSetup projectId={7} projectName="Tucatinib" data={sourceData([classificationTask(31)])} datasetId={12} datasetVersionId={13} initialTaskVersionId={31} currentUserId={9} canAnnotate canInfer={false} onRefresh={async () => undefined} onNavigate={navigate} />);
+    await user.click(screen.getByRole("button", { name: "Start annotating" }));
+    expect(mocks.round).toHaveBeenCalledWith(7, expect.objectContaining({ reannotationMode: "unassigned", taskVersionId: 31, datasetVersionId: 13 }), expect.any(Function));
+  });
+
   it("resumes a partially opened round only for its pinned source and task and opens the editor", async () => {
     const user = userEvent.setup(); const navigate = vi.fn(); const task = classificationTask(31);
     const data = sourceData([task]);
