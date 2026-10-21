@@ -1,4 +1,6 @@
+import math
 import os
+import signal
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,6 +37,7 @@ class CommandRunner(Protocol):
         cwd: str | Path | None = None,
         environment: dict[str, str] | None = None,
         input_text: str | None = None,
+        timeout_seconds: float | None = None,
     ) -> CommandResult: ...
 
 
@@ -48,24 +51,62 @@ class SubprocessCommandRunner:
         cwd: str | Path | None = None,
         environment: dict[str, str] | None = None,
         input_text: str | None = None,
+        timeout_seconds: float | None = None,
     ) -> CommandResult:
         process_environment = None
         if environment is not None:
             process_environment = {**os.environ, **environment}
-        completed = subprocess.run(
+        if timeout_seconds is not None and (
+            not math.isfinite(timeout_seconds) or timeout_seconds <= 0
+        ):
+            raise ComputeBackendError("Command timeout must be positive finite seconds")
+        timed_process_group = timeout_seconds is not None and os.name == "posix"
+        process = subprocess.Popen(
             argv,
             cwd=cwd,
             env=process_environment,
-            input=input_text,
             text=True,
-            capture_output=True,
-            check=False,
+            stdin=subprocess.PIPE if input_text is not None else None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=timed_process_group,
         )
+        try:
+            stdout, stderr = process.communicate(input=input_text, timeout=timeout_seconds)
+        except subprocess.TimeoutExpired as exc:
+            cleanup_error = None
+            try:
+                if timed_process_group:
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+            except ProcessLookupError:
+                pass
+            except OSError as error:
+                cleanup_error = f"termination failed: {error}"
+            try:
+                process.communicate(timeout=1)
+            except (subprocess.TimeoutExpired, OSError):
+                # Detached descendants can retain pipes after the process group dies.
+                for pipe in (process.stdin, process.stdout, process.stderr):
+                    if pipe is not None:
+                        try:
+                            pipe.close()
+                        except OSError as error:
+                            cleanup_error = f"pipe cleanup failed: {error}"
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    cleanup_error = "process did not exit during cleanup"
+            message = f"{Path(argv[0]).name} timed out after {timeout_seconds:g} seconds"
+            if cleanup_error is not None:
+                message += f" ({cleanup_error})"
+            raise ComputeBackendError(message) from exc
         return CommandResult(
             argv=argv,
-            returncode=completed.returncode,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
+            returncode=process.returncode,
+            stdout=stdout,
+            stderr=stderr,
         )
 
 

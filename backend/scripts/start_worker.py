@@ -25,6 +25,15 @@ def main() -> None:
             f"Worker queue {queue!r} does not match runtime profile {profile_key!r}"
         )
 
+    try:
+        concurrency = int(os.environ.get("AL_MEDLIT_WORKER_CONCURRENCY", "1"))
+    except ValueError as exc:
+        raise SystemExit("Worker concurrency must be a positive integer") from exc
+    if concurrency < 1:
+        raise SystemExit("Worker concurrency must be a positive integer")
+    if descriptor.required_device != "cpu" and concurrency != 1:
+        raise SystemExit("Accelerator worker concurrency must be 1 per device")
+
     image_digest = normalize_worker_image_digest(
         os.environ.get("AL_MEDLIT_WORKER_IMAGE_DIGEST")
     )
@@ -68,6 +77,9 @@ def main() -> None:
             "worker",
             "--loglevel=info",
             f"--queues={queue}",
+            "--pool=prefork",
+            f"--concurrency={concurrency}",
+            "--prefetch-multiplier=1",
         ),
     )
 

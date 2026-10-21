@@ -58,11 +58,37 @@ MAX_JSON_INSPECTION_BYTES = 5 * 1024 * 1024
 MAX_MODEL_METADATA_JSON_BYTES = 128 * 1024 * 1024
 MAX_SAFETENSORS_HEADER_BYTES = 5 * 1024 * 1024
 DEFAULT_COPY_CHUNK_SIZE = 1024 * 1024
-_ACCESS_MODE_RANK = {
-    "downloadable": 0,
-    "execution_only": 1,
-    "manager_only": 2,
-}
+_MODEL_ACCESS_RELATIONSHIPS = frozenset(
+    {
+        "uses_base_model",
+        "derived_from_parent_model",
+        "promoted_from_candidate",
+        "imported_from",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PackageAccessRestrictions:
+    requires_manager: bool = False
+    execution_only: bool = False
+
+    def combine(self, other: PackageAccessRestrictions) -> PackageAccessRestrictions:
+        return PackageAccessRestrictions(
+            requires_manager=self.requires_manager or other.requires_manager,
+            execution_only=self.execution_only or other.execution_only,
+        )
+
+
+def _access_mode_restrictions(mode: object) -> PackageAccessRestrictions:
+    if mode == "downloadable":
+        return PackageAccessRestrictions()
+    if mode == "manager_only":
+        return PackageAccessRestrictions(requires_manager=True)
+    if mode == "execution_only":
+        return PackageAccessRestrictions(execution_only=True)
+    return PackageAccessRestrictions(requires_manager=True, execution_only=True)
+
 
 _FORBIDDEN_SUFFIXES = {
     ".7z",
@@ -435,6 +461,7 @@ def publish_artifact_package(
             expires_at = None
             if retention_class == "resume_14d":
                 expires_at = datetime.now(UTC) + timedelta(days=14)
+            retained_at = datetime.now(UTC)
             db.add(
                 ArtifactPackageRetention(
                     package_id=package.id,
@@ -442,6 +469,8 @@ def publish_artifact_package(
                     pinned=data.pinned or retention_class == "candidate",
                     expires_at=expires_at,
                     updated_by_user_id=actor_user_id,
+                    created_at=retained_at,
+                    updated_at=retained_at,
                 )
             )
             if reservation_id is not None:
@@ -804,10 +833,12 @@ def import_base_model_from_package(
         or source_package.retention.archived_at is not None
     ):
         raise ConflictError("Only ready, deployable, non-archived packages may be imported")
-    source_access_mode = source_package.license_info.get("access_mode", "downloadable")
-    if source_access_mode not in _ACCESS_MODE_RANK:
-        raise ConflictError("The source package has an unsupported license access mode")
-    if _ACCESS_MODE_RANK[data.access_mode] < _ACCESS_MODE_RANK[source_access_mode]:
+    source_access = artifact_package_access_restrictions(db, source_package)
+    requested_access = _access_mode_restrictions(data.access_mode)
+    if (
+        source_access.requires_manager and not requested_access.requires_manager
+        or source_access.execution_only and not requested_access.execution_only
+    ):
         raise ConflictError("A base-model import cannot broaden source package access")
     verify_artifact_package(
         db,
@@ -900,15 +931,15 @@ def list_base_model_assets(
     )
     if not include_archived:
         query = query.filter(BaseModelAssetState.archived_at.is_(None))
-    if not include_manager_only:
-        query = query.filter(BaseModelAsset.access_mode != "manager_only")
     if readiness:
         query = query.filter(BaseModelAssetState.readiness == readiness)
-    return (
-        query.order_by(BaseModelAsset.created_at.desc(), BaseModelAsset.id.desc())
-        .limit(limit)
-        .all()
-    )
+    assets = []
+    for asset in query.order_by(BaseModelAsset.created_at.desc(), BaseModelAsset.id.desc()):
+        if artifact_package_visible_to_role(db, asset.package, is_manager=include_manager_only):
+            assets.append(asset)
+            if len(assets) >= limit:
+                break
+    return assets
 
 
 def public_base_model_descriptor(asset: BaseModelAsset) -> BaseModelAssetRead:
@@ -1011,18 +1042,48 @@ def archive_base_model_asset(
     return asset
 
 
-def base_model_package_access_mode(db: Session, package: ArtifactPackage) -> str:
-    """Resolve the strictest access mode without exposing catalog internals."""
+def artifact_package_access_restrictions(
+    db: Session, package: ArtifactPackage
+) -> PackageAccessRestrictions:
+    """Combine visibility and download restrictions across model provenance."""
 
-    asset = (
-        db.query(BaseModelAsset)
-        .filter(BaseModelAsset.package_id == package.id)
-        .first()
-    )
-    if asset is not None:
-        return asset.access_mode
-    access_mode = package.license_info.get("access_mode", "downloadable")
-    return access_mode if access_mode in _ACCESS_MODE_RANK else "manager_only"
+    restrictions = PackageAccessRestrictions()
+    pending = [package]
+    visited: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if current.id in visited:
+            continue
+        visited.add(current.id)
+        license_nodes = [current.license_info]
+        while license_nodes:
+            license_info = license_nodes.pop()
+            if not isinstance(license_info, dict):
+                restrictions = restrictions.combine(_access_mode_restrictions(None))
+                continue
+            restrictions = restrictions.combine(
+                _access_mode_restrictions(license_info.get("access_mode", "downloadable"))
+            )
+            if "base_model" in license_info:
+                license_nodes.append(license_info["base_model"])
+        assets = db.query(BaseModelAsset).filter(BaseModelAsset.package_id == current.id).all()
+        for asset in assets:
+            restrictions = restrictions.combine(_access_mode_restrictions(asset.access_mode))
+        references = (
+            db.query(ArtifactPackageReference)
+            .filter(
+                ArtifactPackageReference.source_package_id == current.id,
+                ArtifactPackageReference.relationship_type.in_(_MODEL_ACCESS_RELATIONSHIPS),
+            )
+            .all()
+        )
+        for reference in references:
+            target = db.get(ArtifactPackage, reference.target_package_id)
+            if target is None:
+                restrictions = restrictions.combine(_access_mode_restrictions(None))
+            else:
+                pending.append(target)
+    return restrictions
 
 
 def artifact_package_visible_to_role(
@@ -1036,20 +1097,19 @@ def artifact_package_visible_to_role(
         return False
     if retention.purged_at is not None or retention.archived_at is not None:
         return is_manager
-    asset = (
+    assets = (
         db.query(BaseModelAsset)
         .filter(BaseModelAsset.package_id == package.id)
-        .first()
+        .all()
     )
-    if asset is not None:
+    for asset in assets:
         if not is_manager and (
-            asset.access_mode == "manager_only"
-            or asset.state is None
+            asset.state is None
             or asset.state.readiness != "ready"
             or asset.state.archived_at is not None
         ):
             return False
-    return is_manager or base_model_package_access_mode(db, package) != "manager_only"
+    return is_manager or not artifact_package_access_restrictions(db, package).requires_manager
 
 
 def _require_package_payload_available(package: ArtifactPackage) -> None:
@@ -1067,6 +1127,7 @@ def request_artifact_package_archive(
     actor_user_id: int | None,
     reason: str | None = None,
     now: datetime | None = None,
+    release_automatic_candidate_pin: bool = False,
 ) -> ArtifactPackageRetention:
     """Archive a package and start the non-bypassable seven-day purge grace."""
 
@@ -1078,6 +1139,15 @@ def request_artifact_package_archive(
         raise ConflictError("Purged packages cannot be archived")
     if retention.archived_at is not None:
         return retention
+    if (
+        release_automatic_candidate_pin
+        and package.package_kind == "model_candidate"
+        and package.metadata_.get("automatic_candidate_pin_version") == 1
+        and retention.retention_class == "candidate"
+        and retention.updated_at == retention.created_at
+    ):
+        retention.pinned = False
+        db.flush()
     _raise_if_package_retention_blocked(db, package, action="archived")
     effective_now = now or datetime.now(UTC)
     retention.archived_at = effective_now
@@ -1109,6 +1179,10 @@ def update_artifact_package_retention(
     if legal_hold is not None:
         retention.legal_hold = legal_hold
     retention.updated_by_user_id = actor_user_id
+    retention.updated_at = max(
+        datetime.now(UTC),
+        _as_utc(retention.updated_at) + timedelta(microseconds=1),
+    )
     db.flush()
     return retention
 
@@ -1290,6 +1364,7 @@ def _locked_package_retention(
     retention = (
         db.query(ArtifactPackageRetention)
         .filter(ArtifactPackageRetention.package_id == package_id)
+        .populate_existing()
         .with_for_update()
         .one_or_none()
     )

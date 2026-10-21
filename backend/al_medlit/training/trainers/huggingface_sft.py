@@ -169,7 +169,11 @@ class _HuggingFaceSftTrainer:
     ):
         parameterization = plan.manifest["output_contract"]["parameterization"]
         precision = plan.normalized_config["mixed_precision"]
-        dtype = torch.float16 if precision == "fp16" else torch.bfloat16
+        dtype = {
+            "fp16": torch.float16,
+            "bf16": torch.bfloat16,
+            "none": torch.float32,
+        }[precision]
         model_class = (
             transformers.AutoModelForCausalLM
             if self.architecture == "causal_lm"
@@ -179,7 +183,9 @@ class _HuggingFaceSftTrainer:
             "local_files_only": True,
             "trust_remote_code": False,
             "use_safetensors": True,
-            "torch_dtype": dtype,
+            "torch_dtype": (
+                torch.float32 if parameterization == Parameterization.FULL.value else dtype
+            ),
         }
         dispatched = False
         if parameterization == Parameterization.QLORA.value:
@@ -192,6 +198,7 @@ class _HuggingFaceSftTrainer:
             load_kwargs.update(
                 {
                     "quantization_config": quantization,
+                    "torch_dtype": dtype,
                     "device_map": {"": torch.cuda.current_device()},
                 }
             )
@@ -220,6 +227,9 @@ class _HuggingFaceSftTrainer:
                 task_type=task_type,
             )
             model = peft.get_peft_model(model, adapter_config)
+            for parameter in model.parameters():
+                if parameter.requires_grad:
+                    parameter.data = parameter.data.float()
         return model, dispatched
 
     @staticmethod
@@ -242,11 +252,10 @@ class _HuggingFaceSftTrainer:
                 raise ValidationError(
                     f"Training row {index} completion produced no target tokens"
                 )
-            if len(completion_ids) >= max_length:
-                completion_ids = completion_ids[:max_length]
-                prompt_ids = []
-            else:
-                prompt_ids = prompt_ids[-(max_length - len(completion_ids)) :]
+            if len(prompt_ids) + len(completion_ids) > max_length:
+                raise ValidationError(
+                    f"Training row {index} prompt and completion exceed max_sequence_length"
+                )
             input_ids = [*prompt_ids, *completion_ids]
             encoded_rows.append(
                 {
@@ -260,17 +269,19 @@ class _HuggingFaceSftTrainer:
     @staticmethod
     def _seq2seq_rows(tokenizer, rendered_rows, max_length: int) -> list[dict]:
         encoded_rows = []
-        for prompt, completion in rendered_rows:
+        for index, (prompt, completion) in enumerate(rendered_rows):
             encoded = tokenizer(
                 prompt,
-                truncation=True,
-                max_length=max_length,
+                truncation=False,
             )
             target = tokenizer(
                 text_target=completion,
-                truncation=True,
-                max_length=max_length,
+                truncation=False,
             )
+            if len(encoded["input_ids"]) > max_length or len(target["input_ids"]) > max_length:
+                raise ValidationError(
+                    f"Training row {index} prompt or completion exceeds max_sequence_length"
+                )
             item = dict(encoded)
             item["labels"] = target["input_ids"]
             encoded_rows.append(item)
@@ -288,6 +299,7 @@ class _HuggingFaceSftTrainer:
         import torch
         import transformers
 
+        transformers.set_seed(seed)
         tokenizer = self._load_tokenizer(transformers, base_model_path)
         model, dispatched = self._load_model(
             torch=torch,

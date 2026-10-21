@@ -8,6 +8,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from al_medlit.core.config import settings
 from al_medlit.core.exceptions import ConflictError, NotFoundError, ValidationError
 from al_medlit.model_artifacts.models import (
     ArtifactBlob,
@@ -84,7 +85,7 @@ def _locked_quota(db: Session, workspace_id: int) -> WorkspaceArtifactQuota:
 
     candidate = WorkspaceArtifactQuota(
         workspace_id=workspace_id,
-        limit_bytes=None,
+        limit_bytes=settings.default_workspace_artifact_quota_bytes,
         used_bytes=_physical_usage(db, workspace_id),
         reserved_bytes=0,
         reservation_ttl_seconds=DEFAULT_RESERVATION_TTL_SECONDS,
@@ -557,7 +558,7 @@ def workspace_artifact_quota_snapshot(
     )
     physical_bytes = _physical_usage(db, workspace_id)
     if quota is None:
-        limit_bytes = None
+        limit_bytes = settings.default_workspace_artifact_quota_bytes
         used_bytes = physical_bytes
         reserved_bytes = 0
         ttl_seconds = DEFAULT_RESERVATION_TTL_SECONDS

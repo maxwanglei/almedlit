@@ -24,6 +24,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from al_medlit.auth.models import User
+from al_medlit.core.config import settings
 from al_medlit.core.exceptions import (
     ConflictError,
     ForbiddenError,
@@ -33,7 +34,11 @@ from al_medlit.core.exceptions import (
 from al_medlit.core.storage import ObjectStorage
 from al_medlit.model_artifacts import quota as artifact_quota
 from al_medlit.model_artifacts import service as artifact_service
-from al_medlit.model_artifacts.models import ArtifactPackage, BaseModelAsset
+from al_medlit.model_artifacts.models import (
+    ArtifactPackage,
+    ArtifactStorageReservation,
+    BaseModelAsset,
+)
 from al_medlit.model_artifacts.schemas import (
     ArtifactPackageCreate,
     ArtifactPackageReferenceCreate,
@@ -68,6 +73,7 @@ from al_medlit.workspace.models import WorkspaceMember
 
 _TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
 _WORKER_HEARTBEAT_KEY = "worker_heartbeat_at"
+_WORKER_EXECUTION_KEY = "worker_execution_token"
 _TRAINING_SPLITS = {"train", "validation"}
 _NEVER_TRAIN_SPLITS = {"test", "pool"}
 _KNOWN_RETENTION_CLASSES = {"indefinite", "resume_14d", "candidate"}
@@ -135,6 +141,8 @@ def _canonical_hash(value: Any) -> str:
 def _claim_training_run(
     db: Session,
     training_run_id: int,
+    *,
+    execution_token: str | None = None,
 ) -> tuple[workflow_models.TrainingRun, bool]:
     run = workflow_service.lock_training_run_for_mutation(db, training_run_id)
     if run.status in _TERMINAL_STATUSES or run.status == "running":
@@ -160,6 +168,7 @@ def _claim_training_run(
     run.runtime_snapshot = {
         **run.runtime_snapshot,
         _WORKER_HEARTBEAT_KEY: claimed_at.isoformat(),
+        _WORKER_EXECUTION_KEY: execution_token,
     }
     db.commit()
     return db.get(workflow_models.TrainingRun, training_run_id), True
@@ -170,11 +179,15 @@ def heartbeat_training_run(
     training_run_id: int,
     *,
     now: datetime | None = None,
+    execution_token: str | None = None,
 ) -> bool:
     """Renew one running worker lease and record its durable heartbeat."""
 
     run = workflow_service.lock_training_run_for_mutation(db, training_run_id)
-    if run.status != "running":
+    if run.status != "running" or (
+        execution_token is not None
+        and run.runtime_snapshot.get(_WORKER_EXECUTION_KEY) != execution_token
+    ):
         db.rollback()
         return False
     reservation = artifact_quota.renew_owner_artifact_reservation(
@@ -218,30 +231,99 @@ def reconcile_stale_training_runs(
     now: datetime | None = None,
     stale_after_seconds: int = 300,
     limit: int = 200,
+    should_stop: Callable[[], bool] | None = None,
 ) -> list[int]:
     """Fail abandoned worker leases so runs and quota cannot remain stuck."""
 
     if stale_after_seconds < 60:
         raise ValidationError("Training worker timeout must be at least 60 seconds")
+    if should_stop is not None and should_stop():
+        return []
     effective_now = now or datetime.now(UTC)
     cutoff = effective_now - timedelta(seconds=stale_after_seconds)
-    candidates = (
-        db.query(workflow_models.TrainingRun)
-        .filter(workflow_models.TrainingRun.status == "running")
-        .order_by(workflow_models.TrainingRun.id)
-        .limit(min(max(limit, 1), 1000))
-        .all()
-    )
+    queued_cutoff = effective_now - timedelta(seconds=settings.training_max_queue_wait_seconds)
+
+    def queued_failure(run):
+        if _as_utc(run.created_at) <= queued_cutoff:
+            return "queue_wait_expired"
+        reservation = (
+            db.query(ArtifactStorageReservation)
+            .filter(
+                ArtifactStorageReservation.owner_type == "training_run",
+                ArtifactStorageReservation.owner_id == run.id,
+            )
+            .populate_existing()
+            .one_or_none()
+        )
+        if (
+            reservation is None
+            or reservation.status != "active"
+            or _as_utc(reservation.expires_at) <= effective_now
+        ):
+            return "artifact_reservation_unavailable"
+        return None
+
+    def candidates():
+        after_id = 0
+        while True:
+            batch = (
+                db.query(workflow_models.TrainingRun)
+                .filter(
+                    workflow_models.TrainingRun.status.in_(("queued", "running")),
+                    workflow_models.TrainingRun.id > after_id,
+                )
+                .order_by(workflow_models.TrainingRun.id)
+                .limit(200)
+                .all()
+            )
+            if not batch:
+                return
+            after_id = batch[-1].id
+            yield from batch
+
     recovered_ids: list[int] = []
-    for candidate in candidates:
+    for candidate in candidates():
+        if should_stop is not None and should_stop():
+            db.rollback()
+            break
+        if len(recovered_ids) >= min(max(limit, 1), 1000):
+            break
+        if candidate.status == "queued":
+            if queued_failure(candidate) is None:
+                continue
+            run = workflow_service.lock_training_run_for_mutation(db, candidate.id)
+            if should_stop is not None and should_stop():
+                db.rollback()
+                break
+            failure_code = queued_failure(run) if run.status == "queued" else None
+            if failure_code is None:
+                db.rollback()
+                continue
+            workflow_service.transition_training_run(
+                db,
+                run.project_id,
+                run.id,
+                workflow_schemas.TrainingRunTransition(
+                    status="failed",
+                    failure_code=failure_code,
+                    failure_reason=(
+                        "The training run exceeded its maximum queue wait."
+                        if failure_code == "queue_wait_expired"
+                        else "The queued run no longer has a live artifact reservation."
+                    ),
+                ),
+            )
+            recovered_ids.append(run.id)
+            continue
         heartbeat_at = _worker_heartbeat_at(candidate)
         if heartbeat_at is not None and heartbeat_at > cutoff:
             continue
         run = workflow_service.lock_training_run_for_mutation(db, candidate.id)
+        if should_stop is not None and should_stop():
+            db.rollback()
+            break
         heartbeat_at = _worker_heartbeat_at(run)
-        if run.status != "running" or (
-            heartbeat_at is not None and heartbeat_at > cutoff
-        ):
+        if run.status != "running" or (heartbeat_at is not None and heartbeat_at > cutoff):
             db.rollback()
             continue
         snapshot = {
@@ -733,7 +815,10 @@ def _stage_base_model(
             )
         )
     )
-    if asset.access_mode == "manager_only" and not can_use_manager_assets:
+    if (
+        artifact_service.artifact_package_access_restrictions(db, asset.package).requires_manager
+        and not can_use_manager_assets
+    ):
         raise ForbiddenError("This base model is restricted to workspace managers")
 
     destination.mkdir(parents=True, exist_ok=False)
@@ -1062,6 +1147,11 @@ def _checkpoint_package_data(
         },
         runtime=runtime_snapshot,
         metadata={
+            **(
+                {"automatic_candidate_pin_version": 1}
+                if package_kind == "model_candidate" and retention_class == "candidate"
+                else {}
+            ),
             "training_run_id": pinned.run.id,
             "launch_hash": pinned.run.launch_hash,
             "training_dataset_version_id": pinned.training_dataset.id,
@@ -1315,17 +1405,13 @@ def _run_protected_test_evaluation(
     candidate_package: ArtifactPackage,
     model_directory: Path,
     normalized_config: dict,
-    training_input: TrainingInput,
+    evaluation_input: EvaluationInput,
     descriptor: Any,
     evaluator: EvaluatorPlugin | None,
     artifact_publisher: ArtifactPublisher,
 ) -> _ProtectedEvaluationResult:
-    evaluation_input = _protected_test_evaluation_input(
-        db,
-        pinned,
-        normalized_config,
-        training_input,
-        model_fingerprint=candidate_package.manifest_digest,
+    evaluation_input = evaluation_input.model_copy(
+        update={"model_fingerprint": candidate_package.manifest_digest},
     )
     if evaluator is None:
         reason = (
@@ -1652,10 +1738,21 @@ def _mark_failed(
     db: Session,
     training_run_id: int,
     exc: Exception,
-) -> workflow_models.TrainingRun:
+    *,
+    expected_status: str = "running",
+    execution_token: str | None = None,
+) -> workflow_models.TrainingRun | None:
     db.rollback()
-    run = db.get(workflow_models.TrainingRun, training_run_id)
-    if run is None or run.status != "running":
+    try:
+        run = workflow_service.lock_training_run_for_mutation(db, training_run_id)
+    except NotFoundError:
+        db.rollback()
+        return None
+    if run.status != expected_status or (
+        execution_token is not None
+        and run.runtime_snapshot.get(_WORKER_EXECUTION_KEY) != execution_token
+    ):
+        db.rollback()
         return run
     return workflow_service.transition_training_run(
         db,
@@ -1678,10 +1775,23 @@ def execute_training_run(
     evaluator_registry: EvaluatorPluginRegistry | None = None,
     recipe_catalog: TrainingRecipeRegistry = training_recipes,
     artifact_publisher: ArtifactPublisher = artifact_service.publish_artifact_package,
+    execution_token: str | None = None,
 ) -> workflow_models.TrainingRun:
     """Execute one immutable training run; repeated deliveries are harmless no-ops."""
 
-    run, claimed = _claim_training_run(db, training_run_id)
+    if execution_token is None:
+        try:
+            run, claimed = _claim_training_run(db, training_run_id)
+        except Exception as exc:
+            _mark_failed(db, training_run_id, exc, expected_status="queued")
+            raise
+    else:
+        run = workflow_service.lock_training_run_for_mutation(db, training_run_id)
+        claimed = (
+            run.status == "running"
+            and run.runtime_snapshot.get(_WORKER_EXECUTION_KEY) == execution_token
+        )
+        db.rollback()
     if not claimed:
         return run
     try:
@@ -1709,9 +1819,6 @@ def execute_training_run(
 
                 evaluator_registry = evaluator_plugins
             evaluator = evaluator_registry.find_for_recipe(pinned.recipe.key)
-            # Historical compositions may have unlabeled protected items.
-            # Reject them before training or publishing a pinned candidate.
-            _protected_test_labels(db, pinned)
 
         with tempfile.TemporaryDirectory(prefix=f"al-medlit-run-{run.id}-") as temporary:
             root = Path(temporary)
@@ -1728,6 +1835,21 @@ def execute_training_run(
                 normalized_config,
                 base_model=base_model,
             )
+            evaluation_input = None
+            if evaluation_requested:
+                evaluation_input = _protected_test_evaluation_input(
+                    db,
+                    pinned,
+                    normalized_config,
+                    training_input,
+                    model_fingerprint=pinned.run.launch_hash,
+                )
+                if evaluator is not None:
+                    evaluator.validate_input(
+                        recipe_key=pinned.recipe.key,
+                        config=normalized_config,
+                        evaluation_input=evaluation_input,
+                    )
             plan = plugin.plan(
                 recipe_key=pinned.recipe.key,
                 config=normalized_config,
@@ -1812,7 +1934,7 @@ def execute_training_run(
                     candidate_package,
                     output_root,
                     plan.normalized_config,
-                    training_input,
+                    evaluation_input,
                     descriptor,
                     evaluator,
                     artifact_publisher,
@@ -1934,5 +2056,5 @@ def execute_training_run(
                 evaluation,
             )
     except Exception as exc:
-        _mark_failed(db, training_run_id, exc)
+        _mark_failed(db, training_run_id, exc, execution_token=execution_token)
         raise

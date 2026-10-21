@@ -246,19 +246,14 @@ def source_split_constraints(
     learning_ids: set[int] = set()
     learning_tokens: set[str] = set()
     mapped_inputs = None
-    match_all_inputs = False
     if input_mapping:
         target, source_field = next(iter(input_mapping.items()))
         values = [item.payload[source_field] for item in items if source_field in item.payload]
-        if all(isinstance(value, str) for value in values):
-            mapped_inputs = (target, sorted(set(values)))
-        else:
-            # Structured inputs need the canonical Python comparison below.
-            match_all_inputs = True
+        mapped_inputs = (target, list({_canonical_hash(value): value for value in values}.values()))
     for record in historical_assignments(
         db, dataset_version.project_id, task_version_id, training_only=True,
         identity_ids=identity_ids, identity_tokens=identity_tokens,
-        mapped_inputs=mapped_inputs, match_all_inputs=match_all_inputs,
+        mapped_inputs=mapped_inputs,
     ):
         item = record.item
         ids, tokens = _item_identity(

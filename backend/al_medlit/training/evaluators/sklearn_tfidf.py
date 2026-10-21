@@ -16,6 +16,17 @@ from al_medlit.training.evaluators.contracts import (
 
 _CLASSIFICATION_ALIASES = {"f1": "macro_f1"}
 _REGRESSION_ALIASES = {"mae": "mean_absolute_error", "rmse": "root_mean_squared_error"}
+_METRICS_BY_TASK = {
+    "classification": ({"accuracy", "macro_f1"}, _CLASSIFICATION_ALIASES),
+    "regression": (
+        {"mean_absolute_error", "root_mean_squared_error", "r2"},
+        _REGRESSION_ALIASES,
+    ),
+    "multilabel_classification": (
+        {"subset_accuracy", "micro_f1", "macro_f1", "hamming_loss"},
+        _CLASSIFICATION_ALIASES,
+    ),
+}
 
 
 def _python_value(value: Any) -> Any:
@@ -283,6 +294,55 @@ class SklearnTfidfEvaluator:
             / (len(expected_sets) * len(vocabulary)),
         }
 
+    def validate_input(
+        self,
+        *,
+        recipe_key: str,
+        config: Mapping,
+        evaluation_input: EvaluationInput,
+    ) -> None:
+        if recipe_key not in self.recipe_keys:
+            raise ValidationError(f"Unsupported sklearn recipe '{recipe_key}'")
+        if not evaluation_input.protected_split:
+            raise ValidationError(
+                "The holdout evaluator requires a protected split binding"
+            )
+        contract = _METRICS_BY_TASK.get(evaluation_input.task_kind)
+        if contract is None:
+            raise ValidationError(
+                "TF-IDF evaluation does not support task kind "
+                f"'{evaluation_input.task_kind}'"
+            )
+        supported_metrics, aliases = contract
+        _selected_metrics(
+            dict.fromkeys(supported_metrics),
+            evaluation_input.requested_metrics,
+            aliases,
+        )
+        input_field, target_field = self._field_mapping(config)
+        _texts, targets = self._extract(evaluation_input.rows, input_field, target_field)
+        if evaluation_input.task_kind == "regression":
+            if any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                for value in targets
+            ):
+                raise ValidationError("Regression evaluation values must be finite numbers")
+        elif evaluation_input.task_kind == "classification":
+            if any(isinstance(value, (list, tuple, dict, set)) for value in targets):
+                raise ValidationError("Classification evaluation values must be scalar labels")
+        else:
+            vocabulary = evaluation_input.label_vocabulary
+            if not vocabulary:
+                raise ValidationError("Multilabel evaluation requires a pinned label vocabulary")
+            labels = self._label_sets(targets, vocabulary, predicted=False)
+            known = set(vocabulary)
+            if any(values - known for values in labels):
+                raise ValidationError(
+                    "Multilabel evaluation contains labels outside the pinned vocabulary"
+                )
+
     def evaluate(
         self,
         *,
@@ -291,12 +351,11 @@ class SklearnTfidfEvaluator:
         evaluation_input: EvaluationInput,
         model_directory: Path,
     ) -> EvaluationOutput:
-        if recipe_key not in self.recipe_keys:
-            raise ValidationError(f"Unsupported sklearn recipe '{recipe_key}'")
-        if not evaluation_input.protected_split:
-            raise ValidationError(
-                "The holdout evaluator requires a protected split binding"
-            )
+        self.validate_input(
+            recipe_key=recipe_key,
+            config=config,
+            evaluation_input=evaluation_input,
+        )
         model_path = model_directory / "model.skops"
         if not model_path.is_file() or model_path.is_symlink():
             raise ValidationError("TF-IDF evaluation requires model.skops")

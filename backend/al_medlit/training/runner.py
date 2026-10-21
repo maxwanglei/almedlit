@@ -475,6 +475,26 @@ def _evaluate_checkpoint_splits(
         if not conventional and not neural and not synthetic_mode:
             rows = _rewindow_transformer_rows(rows, predictor.tokenizer, predictor.config)
         groups: dict[tuple[str, str], dict] = {}
+        if conventional:
+            from al_medlit.training.model_types.evidence_conventional.model import (
+                canonical_sentence_groups,
+            )
+
+            rows = [
+                {
+                    "document_id": sequence[0].document_id,
+                    "target": {
+                        "id": sequence[0].target_version_id,
+                        "text": sequence[0].target_text,
+                    },
+                    "sentences": [
+                        {"ordinal": item.ordinal, "text": item.text, "label": item.label}
+                        for item in sequence
+                    ],
+                    "_line_number": index,
+                }
+                for index, sequence in enumerate(canonical_sentence_groups(rows))
+            ]
         if neural:
             documents = documents_from_window_rows(rows)
             predictions = predict_neural_model(
@@ -519,6 +539,7 @@ def _evaluate_checkpoint_splits(
                         predictor,
                         target_text=str(row["target"].get("text", "")),
                         sentences=[str(sentence.get("text", "")) for sentence in sentences],
+                        sentence_ordinals=[int(sentence["ordinal"]) for sentence in sentences],
                     )
                     row_logits = None
                 elif synthetic_mode:
@@ -646,7 +667,7 @@ def _evaluate_checkpoint_splits(
         )
         if conventional:
             preprocessing_kind = (
-                "sentence-crf-features-v1"
+                "sentence-crf-features-v2-canonical-sequences"
                 if model_type == "evidence_crf"
                 else "tfidf-sentence-features-v1"
             )
@@ -1553,6 +1574,36 @@ def run_inference_job(manifest_path: str | Path) -> dict:
                 )
             except WindowBuildError as exc:
                 raise RunnerError(str(exc)) from exc
+            conventional_logits = {}
+            if conventional and not synthetic_mode:
+                from al_medlit.training.model_types.evidence_conventional.model import (
+                    predict_window,
+                )
+
+                ordered_sentences = sorted(sentence_inputs, key=lambda sentence: sentence.ordinal)
+                predictions = predict_window(
+                    predictor,
+                    target_text=target["text"],
+                    sentences=[sentence.text for sentence in ordered_sentences],
+                    sentence_ordinals=[sentence.ordinal for sentence in ordered_sentences],
+                )
+                inside = False
+                previous_ordinal = None
+                label_logits = {
+                    "O": [1.0, 0.0, 0.0],
+                    "B": [0.0, 1.0, 0.0],
+                    "I": [0.0, 0.0, 1.0],
+                }
+                for sentence, prediction in zip(ordered_sentences, predictions, strict=True):
+                    if predictor.produces_sentence_scores:
+                        positive = float(prediction) >= predictor.config.sentence_score_threshold
+                        continues = inside and previous_ordinal == sentence.ordinal - 1
+                        label = ("I" if continues else "B") if positive else "O"
+                        inside = positive
+                        previous_ordinal = sentence.ordinal
+                    else:
+                        label = str(prediction)
+                    conventional_logits[str(sentence.ordinal)] = label_logits[label]
             for window in result.windows:
                 if synthetic_mode:
                     logits = {
@@ -1560,35 +1611,9 @@ def run_inference_job(manifest_path: str | Path) -> dict:
                         for sentence in window.sentences
                     }
                 elif conventional:
-                    from al_medlit.training.model_types.evidence_conventional.model import (
-                        predict_window,
-                    )
-
-                    predictions = predict_window(
-                        predictor,
-                        target_text=target["text"],
-                        sentences=[sentence.text for sentence in window.sentences],
-                    )
-                    if predictor.produces_sentence_scores:
-                        threshold = predictor.config.sentence_score_threshold
-                        labels = []
-                        inside = False
-                        for score in predictions:
-                            positive = float(score) >= threshold
-                            labels.append(
-                                "B" if positive and not inside else ("I" if positive else "O")
-                            )
-                            inside = positive
-                    else:
-                        labels = [str(value) for value in predictions]
-                    label_logits = {
-                        "O": [1.0, 0.0, 0.0],
-                        "B": [0.0, 1.0, 0.0],
-                        "I": [0.0, 0.0, 1.0],
-                    }
                     logits = {
-                        str(sentence.ordinal): label_logits[labels[index]]
-                        for index, sentence in enumerate(window.sentences)
+                        str(sentence.ordinal): conventional_logits[str(sentence.ordinal)]
+                        for sentence in window.sentences
                     }
                 elif neural:
                     from al_medlit.training.model_types.evidence_neural import (

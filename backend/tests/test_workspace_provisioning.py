@@ -1,6 +1,13 @@
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def enable_registration_for_workspace_flows(monkeypatch):
+    from al_medlit.core.config import settings
+
+    monkeypatch.setattr(settings, "allow_self_registration", True)
+
+
 def _make_user(db, username):
     from al_medlit.auth import service as auth_service
     from al_medlit.auth.schemas import UserCreate

@@ -65,6 +65,8 @@ class SSHSlurmProfileConfig(BaseModel):
     ssh_identity_file: Path | None = None
     apptainer_args: tuple[str, ...] = ("--nv",)
     module_prelude: tuple[str, ...] = ()
+    command_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+    transfer_timeout_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
     verified_capabilities: tuple[Literal["cuda", "ascend", "qlora_4bit"], ...] = ()
     worker_image_digest: str | None = None
     capability_report_sha256: str | None = None
@@ -95,6 +97,8 @@ class SSHSlurmProfileConfig(BaseModel):
             ssh_identity_file=self.ssh_identity_file,
             apptainer_args=self.apptainer_args,
             module_prelude=self.module_prelude,
+            command_timeout_seconds=self.command_timeout_seconds,
+            transfer_timeout_seconds=self.transfer_timeout_seconds,
         )
 
 

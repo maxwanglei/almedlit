@@ -482,7 +482,12 @@ def predict_neural_model(
     torch = _import_torch()
     preflight = require_neural_device(device or bundle.config.device)
     torch_device = torch.device(preflight.torch_device)
-    bundle.model.to(torch_device)
+    current_device = next(bundle.model.parameters()).device
+    if current_device != torch_device and not (
+        current_device.type == torch_device.type and torch_device.index is None
+    ):
+        bundle.model.to(torch_device)
+    torch_device = next(bundle.model.parameters()).device
     bundle.model.eval()
     encoded = encode_documents(documents, bundle)
     predictions: list[EvidenceSequencePrediction] = []
@@ -513,7 +518,6 @@ def predict_neural_model(
                         probabilities=scores,
                     )
                 )
-    bundle.model.to("cpu")
     return tuple(predictions)
 
 

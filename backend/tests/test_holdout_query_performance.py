@@ -367,3 +367,89 @@ def test_reordered_upload_protection_is_independent_of_prediction_page(
         assert protected_dataset_item_ids(fresh, [current[0]], task_id) == set()
         assert protected_dataset_item_ids(fresh, [current[1]], task_id) == {current[1].id}
         assert protected_dataset_item_ids(fresh, current, task_id) == {current[1].id}
+
+
+@pytest.mark.parametrize(
+    "value, unrelated",
+    [
+        (42, 999),
+        (1.5, 2.5),
+        (True, False),
+        (None, "unrelated"),
+        ({"a": "shared", "b": [1, {"quoted.key": True}]},
+         {"a": "shared", "b": [2, {"quoted.key": True}]}),
+        ([{"features": [1, None]}], [{"features": [2, None]}]),
+        ({}, {"other": 1}),
+        ([], [1]),
+    ],
+)
+def test_mapped_input_history_filters_json_values_without_losing_learning_identity(
+    db, workflow_scope, workflow_data, testing_session_factory, test_engine, value, unrelated,
+):
+    project_id = workflow_scope.project.id
+    task_id = workflow_data.task_version.id
+    unrelated_protected, unrelated_learning, _ = _history(
+        db, project_id, count=3, prefix="unrelated-inputs", task_version_id=task_id,
+        learning_fields={"features": unrelated},
+    )
+    _heldout, matching_learning, _ = _history(
+        db, project_id, count=1, prefix="matching-input", task_version_id=task_id,
+        learning_fields={"features": value},
+    )
+    reordered = dict(reversed(list(value.items()))) if isinstance(value, dict) else value
+    current = service.create_dataset_version(
+        db, schemas.DatasetVersionCreate(
+            project_id=project_id, dataset_id=workflow_data.dataset.id,
+            source_revision="structured-copy", source_format="jsonl",
+            items=[schemas.DatasetItemCreate(
+                stable_key="mapped-copy", payload={"renamed": reordered},
+            )],
+        ), workflow_scope.manager,
+    )
+    current_id = current.id
+    with testing_session_factory() as fresh:
+        version = fresh.get(models.DatasetVersion, current_id)
+        items = fresh.query(models.DatasetItem).filter_by(dataset_version_id=current_id).all()
+        with _capture_loads(test_engine) as loads:
+            constraints = source_split_constraints(
+                fresh, version, items, task_id, input_mapping={"features": "renamed"},
+            )
+    assert constraints == {"mapped-copy": {"train", "validation", "pool"}}
+    assert loads.item_ids & matching_learning
+    assert not (loads.item_ids & (unrelated_protected | unrelated_learning))
+
+
+@pytest.mark.parametrize("action, status", [("preview", 200), ("prepare", 201)])
+def test_structured_preparation_does_not_materialize_unrelated_history(
+    client, db, test_engine, action, status,
+):
+    from test_training_preparation import _context, _request, _source
+
+    project, original = _context(client)
+    response = client.post("/api/tasks/versions", json={
+        "project_id": project["id"], "task_definition_id": original["task_definition_id"],
+        "task_kind": "classification",
+        "input_schema": {
+            "type": "object", "required": ["features"],
+            "properties": {"features": {"type": "object"}},
+        },
+        "output_schema": original["output_schema"],
+    })
+    assert response.status_code == 201, response.text
+    task = response.json()
+    source = _source(client, project, "Structured", [
+        {"key": str(index), "features": {"measurement": index}, "label": "yes"}
+        for index in range(5)
+    ])
+    protected, learning, _ = _history(
+        db, project["id"], count=4, prefix="unrelated-structured",
+        task_version_id=task["id"], learning_fields={"features": {"measurement": 999}},
+    )
+    payload = _request(task, source)
+    payload["sources"][0]["input_mapping"] = {"features": "features"}
+    with _capture_loads(test_engine) as loads:
+        response = client.post(
+            f"/api/projects/{project['id']}/training-datasets/{action}", json=payload,
+        )
+    assert response.status_code == status, response.text
+    assert not (loads.item_ids & (protected | learning))

@@ -601,6 +601,54 @@ def _compose_label_sets(
     return normalized, composed
 
 
+def _assisted_training_keys(
+    db: Session,
+    dataset_version: models.DatasetVersion,
+    items: list[models.DatasetItem],
+    label_sets: list[models.LabelSetVersion],
+    composition: list[dict],
+) -> set[str]:
+    from .holdouts import _item_identity
+    from .preparation import _assisted_label_set_keys, _prepared_provenance_items
+
+    label_sets_by_id = {label_set.id: label_set for label_set in label_sets}
+    assisted_keys: set[str] = set()
+    for step in composition:
+        if step["policy"] != "exclude":
+            label_set = label_sets_by_id[step["label_set_version_id"]]
+            assisted_keys.update(_assisted_label_set_keys(db, label_set)[0])
+
+    provenance_items = _prepared_provenance_items(db, dataset_version)
+    for item in items:
+        provenance = provenance_items.get(item.stable_key, {})
+        if isinstance(provenance, dict) and provenance.get("model_assisted") is True:
+            assisted_keys.add(item.stable_key)
+    if not assisted_keys:
+        return set()
+
+    identities_by_key: dict[str, set[int | str]] = {}
+    keys_by_identity: dict[int | str, set[str]] = {}
+    for item in items:
+        ids, tokens = _item_identity(dataset_version, item, provenance_items)
+        identities: set[int | str] = ids | tokens
+        identities_by_key[item.stable_key] = identities
+        for identity in identities:
+            keys_by_identity.setdefault(identity, set()).add(item.stable_key)
+
+    assisted_keys.intersection_update(identities_by_key)
+    pending = list(assisted_keys)
+    visited_identities: set[int | str] = set()
+    while pending:
+        for identity in identities_by_key[pending.pop()]:
+            if identity in visited_identities:
+                continue
+            visited_identities.add(identity)
+            related = keys_by_identity[identity] - assisted_keys
+            assisted_keys.update(related)
+            pending.extend(related)
+    return assisted_keys
+
+
 def create_training_dataset_version(
     db: Session,
     data: schemas.TrainingDatasetVersionCreate,
@@ -672,6 +720,19 @@ def create_training_dataset_version(
     )
     if not composed_labels:
         raise ValidationError("Training label composition cannot be empty")
+    assisted_keys = _assisted_training_keys(
+        db, dataset_version, items, label_sets, normalized_composition,
+    )
+    protected_splits = set(split_map.protected_splits)
+    assisted_protected_keys = sorted(
+        key for key in composed_labels
+        if key in assisted_keys and split_map.assignments.get(key) in protected_splits
+    )
+    if assisted_protected_keys:
+        raise ValidationError(
+            "Model-assisted articles cannot supply protected evaluation labels: "
+            + ", ".join(assisted_protected_keys[:5])
+        )
     payload = data.model_dump(exclude={"artifact_package_id"})
     payload["composition"] = normalized_composition
     content = {

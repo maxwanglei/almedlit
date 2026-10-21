@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
+from al_medlit.auth.models import User
 from al_medlit.core.database import get_db
-from al_medlit.core.exceptions import NotFoundError
+from al_medlit.core.exceptions import ForbiddenError, NotFoundError
 from al_medlit.model_artifacts import quota
 from al_medlit.model_artifacts.models import ArtifactStorageReservation
 from al_medlit.model_artifacts.schemas import (
@@ -61,6 +62,14 @@ def update_workspace_artifact_quota(
         db,
         workspace_id=workspace_id,
     )
+    actor = db.get(User, manager.user_id)
+    if (
+        "limit_bytes" in payload.model_fields_set
+        and current.limit_bytes is not None
+        and (payload.limit_bytes is None or payload.limit_bytes > current.limit_bytes)
+        and (actor is None or not actor.is_superuser)
+    ):
+        raise ForbiddenError("Only instance administrators can increase storage allocations")
     quota.set_workspace_artifact_quota(
         db,
         workspace_id=workspace_id,

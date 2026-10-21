@@ -420,11 +420,20 @@ def test_base_model_import_reuses_blobs_and_cannot_broaden_license(db, object_st
             actor_user_id=user.id,
         )
 
+    with pytest.raises(ConflictError, match="broaden"):
+        import_base_model_from_package(
+            db,
+            object_storage,
+            project_id=project.id,
+            data=BaseModelImportCreate(**common, access_mode="manager_only"),
+            actor_user_id=user.id,
+        )
+
     asset = import_base_model_from_package(
         db,
         object_storage,
         project_id=project.id,
-        data=BaseModelImportCreate(**common, access_mode="manager_only"),
+        data=BaseModelImportCreate(**common, access_mode="execution_only"),
         actor_user_id=user.id,
     )
     db.commit()
@@ -437,7 +446,7 @@ def test_base_model_import_reuses_blobs_and_cannot_broaden_license(db, object_st
         db,
         project_id=project.id,
         include_manager_only=False,
-    ) == []
+    ) == [asset]
 
 
 def _legacy_checkpoint(db, object_storage, user, project, payload: bytes):

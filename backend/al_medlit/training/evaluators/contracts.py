@@ -41,6 +41,14 @@ class EvaluatorPlugin(Protocol):
     evaluator_version: str
     recipe_keys: tuple[str, ...]
 
+    def validate_input(
+        self,
+        *,
+        recipe_key: str,
+        config: Mapping,
+        evaluation_input: EvaluationInput,
+    ) -> None: ...
+
     def evaluate(
         self,
         *,

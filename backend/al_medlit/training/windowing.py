@@ -454,12 +454,15 @@ class EvidenceBlockWindowBuilder:
     ) -> int:
         if candidate <= previous_start or candidate >= end:
             return candidate
+        token_stride_start = candidate
         paragraph = sentences[candidate].paragraph_ordinal
         while (
             candidate > previous_start + 1
             and sentences[candidate - 1].paragraph_ordinal == paragraph
         ):
             candidate -= 1
+        if sentences[candidate - 1].paragraph_ordinal == paragraph:
+            return token_stride_start
         return candidate
 
     @staticmethod

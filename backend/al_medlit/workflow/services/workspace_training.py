@@ -13,7 +13,12 @@ from al_medlit.core.exceptions import (
     ValidationError,
 )
 from al_medlit.model_artifacts import quota as artifact_quota
-from al_medlit.model_artifacts.models import BaseModelAsset
+from al_medlit.model_artifacts import service as artifact_service
+from al_medlit.model_artifacts.models import (
+    ArtifactPackage,
+    ArtifactStorageReservation,
+    BaseModelAsset,
+)
 from al_medlit.project.models import Project
 from al_medlit.workflow import access, models, schemas
 from al_medlit.workspace.models import Workspace
@@ -689,6 +694,51 @@ def list_workspace_registered_models(
     return items, next_cursor
 
 
+def _archive_abandoned_training_candidate(
+    db: Session,
+    run: models.TrainingRun,
+    *,
+    now: datetime,
+) -> None:
+    if run.output_model_version_id is not None:
+        return
+    candidate = (
+        db.query(ArtifactPackage)
+        .join(
+            ArtifactStorageReservation,
+            ArtifactStorageReservation.artifact_package_id == ArtifactPackage.id,
+        )
+        .filter(
+            ArtifactStorageReservation.id == run.artifact_reservation_id,
+            ArtifactStorageReservation.owner_type == "training_run",
+            ArtifactStorageReservation.owner_id == run.id,
+            ArtifactPackage.project_id == run.project_id,
+            ArtifactPackage.package_kind == "model_candidate",
+        )
+        .one_or_none()
+    )
+    if candidate is None or candidate.metadata_.get("training_run_id") != run.id:
+        return
+    cleanup = {"artifact_package_id": candidate.id, "status": "archived"}
+    try:
+        with db.begin_nested():
+            artifact_service.request_artifact_package_archive(
+                db,
+                package=candidate,
+                actor_user_id=run.created_by_user_id,
+                reason=f"Training run ended as {run.status} without an output model",
+                now=now,
+                release_automatic_candidate_pin=True,
+            )
+    except ConflictError as exc:
+        cleanup = {
+            **cleanup,
+            "status": "protected",
+            "reason": str(exc),
+        }
+    run.runtime_snapshot = {**run.runtime_snapshot, "candidate_cleanup": cleanup}
+
+
 def transition_training_run(
     db: Session,
     project_id: int,
@@ -749,6 +799,8 @@ def transition_training_run(
             run.runtime_snapshot = data.runtime_snapshot
         if data.storage_snapshot is not None:
             run.storage_snapshot = data.storage_snapshot
+    if data.status in {"failed", "cancelled"}:
+        _archive_abandoned_training_candidate(db, run, now=now)
     _commit(db, "Could not transition the training run")
     db.refresh(run)
     return run

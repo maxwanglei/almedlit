@@ -26,6 +26,7 @@ from al_medlit.inference.schemas import (
     PredictionReviewCreate,
     PredictionReviewRead,
 )
+from al_medlit.model_artifacts.service import artifact_package_access_restrictions
 from al_medlit.training.compute_profiles import (
     build_compute_backend,
     get_compute_profile,
@@ -60,6 +61,32 @@ def _require_trainer_run_mutation(
     return member
 
 
+def _require_checkpoint_execution_access(
+    db: Session,
+    current_user: User,
+    member,
+    checkpoint: ModelCheckpoint | None,
+    *,
+    project_id: int,
+) -> None:
+    if checkpoint is None or checkpoint.project_id != project_id:
+        raise NotFoundError("Model checkpoint not found in project")
+    is_manager = current_user.is_superuser or member.role in {"manager", "admin"}
+    if (
+        checkpoint.package is not None
+        and artifact_package_access_restrictions(db, checkpoint.package).requires_manager
+        and not is_manager
+    ):
+        raise ForbiddenError("This model checkpoint is restricted to managers")
+    if checkpoint.model_type in {"evidence_lora", "evidence_qlora"}:
+        base_asset = service.resolve_peft_base_model_asset(db, checkpoint)
+        if (
+            artifact_package_access_restrictions(db, base_asset.package).requires_manager
+            and not is_manager
+        ):
+            raise ForbiddenError("This adapter's base model is restricted to managers")
+
+
 @router.post(
     "/projects/{project_id}/inference/runs",
     response_model=InferenceRunRead,
@@ -82,17 +109,9 @@ def launch_inference_run(
     if profile.project_id == project_id and profile.backend == "ssh_slurm":
         enforce_capability(db, project_id=project_id, key="hpc_training")
     checkpoint = db.get(ModelCheckpoint, payload.checkpoint_id)
-    if checkpoint is not None and checkpoint.model_type in {
-        "evidence_lora",
-        "evidence_qlora",
-    }:
-        base_asset = service.resolve_peft_base_model_asset(db, checkpoint)
-        if (
-            member.role == "trainer"
-            and base_asset.access_mode == "manager_only"
-            and not current_user.is_superuser
-        ):
-            raise ForbiddenError("This adapter's base model is restricted to managers")
+    _require_checkpoint_execution_access(
+        db, current_user, member, checkpoint, project_id=project_id,
+    )
     run = service.launch_inference_run(
         db,
         project_id=project_id,
@@ -107,6 +126,9 @@ def launch_inference_run(
         # Project-wide idempotency keys must not let one trainer resume or
         # execute another trainer's existing run by guessing its key.
         raise ForbiddenError("Trainers may execute only their own inference runs")
+    _require_checkpoint_execution_access(
+        db, current_user, member, run.checkpoint, project_id=project_id,
+    )
     return execute_backend_inference(db, storage, run_id=run.id)
 
 
@@ -173,10 +195,13 @@ def execute_inference_run(
     storage: ObjectStorage = Depends(get_object_storage),
 ):
     run = service.get_inference_run(db, run_id)
-    _require_trainer_run_mutation(db, current_user, run)
+    member = _require_trainer_run_mutation(db, current_user, run)
     enforce_capability(db, project_id=run.project_id, key="inference")
     if run.compute_profile.backend == "ssh_slurm":
         enforce_capability(db, project_id=run.project_id, key="hpc_training")
+    _require_checkpoint_execution_access(
+        db, current_user, member, run.checkpoint, project_id=run.project_id,
+    )
     return execute_backend_inference(db, storage, run_id=run.id)
 
 

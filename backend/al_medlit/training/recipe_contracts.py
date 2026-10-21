@@ -77,6 +77,14 @@ class DatasetFieldBinding(BaseModel):
     input_field: str = Field(min_length=1, max_length=255)
     target_field: str = Field(min_length=1, max_length=255)
 
+    @model_validator(mode="after")
+    def validate_distinct_fields(self):
+        if self.input_field == self.target_field:
+            raise ValueError(
+                "input_field and target_field must reference different dataset fields"
+            )
+        return self
+
 
 class TfidfLinearRegressionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -127,6 +135,14 @@ class TransformerTaskConfig(BaseModel):
     gradient_accumulation_steps: int = Field(default=1, ge=1)
     mixed_precision: Literal["none", "fp16", "bf16"] = "none"
 
+    @model_validator(mode="after")
+    def validate_distinct_fields(self):
+        if self.input_field == self.target_field:
+            raise ValueError(
+                "input_field and target_field must reference different dataset fields"
+            )
+        return self
+
 
 class LanguageModelSftConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -151,6 +167,14 @@ class LanguageModelSftConfig(BaseModel):
     lora_alpha: int | None = Field(default=32, ge=1, le=4096)
     lora_dropout: float | None = Field(default=0.05, ge=0, lt=1)
     lora_target_modules: list[str] | None = None
+
+    @model_validator(mode="after")
+    def validate_distinct_fields(self):
+        if self.prompt_field == self.completion_field:
+            raise ValueError(
+                "prompt_field and completion_field must reference different dataset fields"
+            )
+        return self
 
     @model_validator(mode="after")
     def validate_templates(self):

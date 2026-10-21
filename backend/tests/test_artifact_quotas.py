@@ -343,7 +343,9 @@ def test_quota_api_hides_mutation_from_non_managers(db, client):
     assert client.get(path, headers=_headers(annotator)).status_code == 403
     visible = client.get(path, headers=_headers(trainer))
     assert visible.status_code == 200
-    assert visible.json()["limit_bytes"] is None
+    from al_medlit.core.config import settings
+
+    assert visible.json()["limit_bytes"] == settings.default_workspace_artifact_quota_bytes
 
     forbidden = client.patch(
         path,

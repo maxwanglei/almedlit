@@ -171,11 +171,9 @@ def download_artifact_package_file(
         raise NotFoundError("Artifact package not found")
     if package.retention is None or package.retention.purged_at is not None:
         raise ConflictError("Artifact package payload has been purged")
-    access_mode = service.base_model_package_access_mode(db, package)
-    if access_mode == "execution_only":
+    access = service.artifact_package_access_restrictions(db, package)
+    if access.execution_only:
         raise ForbiddenError("This model license permits execution but not file download")
-    if access_mode == "manager_only" and not is_manager:
-        raise ForbiddenError("This model package is restricted to project managers")
     package_file = db.get(ArtifactPackageFile, file_id)
     if package_file is None or package_file.package_id != package.id:
         raise NotFoundError("Package file not found")
@@ -368,11 +366,8 @@ def get_base_model(
         min_role="trainer",
     )
     enforce_capability(db, project_id=asset.project_id, key="training")
-    if not _manager_access(current_user, member) and (
-        asset.access_mode == "manager_only"
-        or asset.state is None
-        or asset.state.readiness != "ready"
-        or asset.state.archived_at is not None
+    if not service.artifact_package_visible_to_role(
+        db, asset.package, is_manager=_manager_access(current_user, member)
     ):
         raise NotFoundError("Base model asset not found")
     return service.public_base_model_descriptor(asset)

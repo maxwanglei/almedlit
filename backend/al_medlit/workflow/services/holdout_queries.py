@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Any
 
 from sqlalchemy import String, and_, case, cast, func, literal, or_, select, true, type_coerce
 from sqlalchemy.orm import Session
@@ -52,6 +53,41 @@ def _has_value(db: Session, array, values):
     return select(1).select_from(entries).where(entries.c.value.in_(values)).exists()
 
 
+def _mapped_input_matches(db: Session, payload, field, values: list[Any]):
+    if all(isinstance(value, str) for value in values):
+        return _json_member(db, payload, field, text=True).in_(_array_values(db, values))
+
+    candidates = literal(values, type_=JSONType())
+    if db.get_bind().dialect.name == "postgresql":
+        entries = func.jsonb_array_elements(candidates).table_valued("value")
+        return _json_member(db, payload, field).in_(select(entries.c.value))
+
+    entries = func.json_each(candidates).table_valued("value", "type")
+    candidate = case(
+        (entries.c.type.in_(("array", "object")), entries.c.value),
+        else_=func.json_quote(entries.c.value),
+    )
+    actual = func.json_quote(_json_member(db, payload, field))
+    left = func.json_tree(actual).table_valued("fullkey", "type", "atom")
+    right = func.json_tree(candidate).table_valued("fullkey", "type", "atom")
+    correlations = (models.DatasetItem, models.TrainingDatasetVersion, entries)
+    left_nodes = select(left.c.fullkey, left.c.type, left.c.atom).correlate(*correlations)
+    right_nodes = select(right.c.fullkey, right.c.type, right.c.atom).correlate(*correlations)
+    # Object key order is immaterial; containers and array positions remain significant.
+    path = literal("$.") + func.json_quote(field)
+    return (
+        select(1)
+        .select_from(entries)
+        .where(
+            func.json_type(payload, path).is_not(None),
+            ~left_nodes.except_(right_nodes).exists(),
+            ~right_nodes.except_(left_nodes).exists(),
+        )
+        .correlate(models.DatasetItem, models.TrainingDatasetVersion)
+        .exists()
+    )
+
+
 @dataclass
 class HistoricalAssignment:
     item: models.DatasetItem
@@ -71,8 +107,7 @@ def historical_assignments(
     training_only: bool = False,
     identity_ids: set[int] | None = None,
     identity_tokens: set[str] | None = None,
-    mapped_inputs: tuple[str, list[str]] | None = None,
-    match_all_inputs: bool = False,
+    mapped_inputs: tuple[str, list[Any]] | None = None,
 ):
     """Project only each matched item's provenance; ownership remains server-verified.
 
@@ -150,7 +185,7 @@ def historical_assignments(
     if protected_only:
         query = query.filter(protected)
 
-    if identity_ids is not None and identity_tokens is not None and not match_all_inputs:
+    if identity_ids is not None and identity_tokens is not None:
         tokens = _array_values(db, sorted(identity_tokens))
         ids = _array_values(db, sorted(str(value) for value in identity_ids))
         dataset = cast(version.dataset_id, String)
@@ -212,13 +247,12 @@ def historical_assignments(
             target, values = mapped_inputs
             # Legacy snapshots can retain the old input field alongside labels.
             # Checking both admits extra candidates; the Python check stays exact.
-            input_values = _array_values(db, values)
             predicates.extend(
                 [
-                    _json_member(db, item.payload, target, text=True).in_(input_values),
-                    _json_member(
-                        db, item.payload, func.coalesce(input_field, "text"), text=True
-                    ).in_(input_values),
+                    _mapped_input_matches(db, item.payload, target, values),
+                    _mapped_input_matches(
+                        db, item.payload, func.coalesce(input_field, "text"), values,
+                    ),
                 ]
             )
         query = query.filter(or_(*predicates))

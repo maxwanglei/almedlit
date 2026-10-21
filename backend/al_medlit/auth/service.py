@@ -3,7 +3,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 
-from sqlalchemy import func
+from sqlalchemy import func, or_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -105,11 +105,28 @@ def _username_fingerprint(username: str) -> str:
     return hashlib.sha256(username.encode("utf-8")).hexdigest()[:16]
 
 
-def _recent_login_failure_count(db: Session, user_id: int) -> int:
+def _lock_login_identity(db: Session, username: str) -> None:
+    # Unknown accounts have no User row to serialize failure accounting.
+    if db.get_bind().dialect.name == "postgresql":
+        digest = hashlib.sha256(f"al-medlit:login:{username}".encode()).digest()
+        identity_key = int.from_bytes(digest[:8], "big", signed=True)
+        db.execute(
+            text("SELECT pg_advisory_xact_lock(:identity_key)"),
+            {"identity_key": identity_key},
+        )
+
+
+def _recent_login_failure_count(db: Session, username: str) -> int:
     # Imported lazily: the administration package imports this module, so a
     # module-level import would close a cycle.
     from al_medlit.administration.models import AdminAuditEvent
 
+    user = get_user_by_username(db, username)
+    identity = AdminAuditEvent.details["username_fingerprint"].as_string() == (
+        _username_fingerprint(username)
+    )
+    if user is not None:
+        identity = or_(identity, AdminAuditEvent.target_user_id == user.id)
     window_start = datetime.now(UTC) - timedelta(
         minutes=settings.login_failure_window_minutes
     )
@@ -120,7 +137,7 @@ def _recent_login_failure_count(db: Session, user_id: int) -> int:
         db.query(func.max(AdminAuditEvent.created_at))
         .filter(
             AdminAuditEvent.event_type == LOGIN_SUCCEEDED_EVENT,
-            AdminAuditEvent.target_user_id == user_id,
+            identity,
         )
         .scalar()
     )
@@ -130,7 +147,7 @@ def _recent_login_failure_count(db: Session, user_id: int) -> int:
         db.query(func.count(AdminAuditEvent.id))
         .filter(
             AdminAuditEvent.event_type == LOGIN_FAILED_EVENT,
-            AdminAuditEvent.target_user_id == user_id,
+            identity,
             AdminAuditEvent.created_at > window_start,
         )
         .scalar()
@@ -138,39 +155,14 @@ def _recent_login_failure_count(db: Session, user_id: int) -> int:
     )
 
 
-def assert_login_not_throttled(db: Session, username: str) -> None:
-    """Reject a login against an account with too many recent failures.
-
-    The edge limiter counts per source address, so it never sees a distributed
-    run against a single account, and it is absent from any topology that does
-    not front the API with the bundled nginx. This backoff is keyed on the
-    account instead, and it lapses on its own once the window passes or the
-    owner logs in successfully -- deliberately not a sticky lockout, which would
-    hand anyone a way to keep an administrator out of their own instance.
-
-    Only accounts that exist are counted. Extending the backoff to unknown names
-    would need a separate name-keyed counter, and the enumeration signal that
-    omitting it leaves is bounded by the edge limiter and far weaker than the
-    timing oracle ``authenticate_user`` already closes.
-    """
-
+def _assert_failed_login_not_throttled(db: Session, username: str) -> None:
+    """Apply the same failed-credential response policy to every submitted name."""
     threshold = settings.login_failure_threshold
     if threshold <= 0:
         return
-    # Hold the same account lock as password verification until the login audit
-    # event commits. Waiting requests then count completed failures instead of
-    # all passing the threshold before they queue for password verification.
-    user = (
-        db.query(User)
-        .filter(User.username == username.strip())
-        .populate_existing()
-        .with_for_update()
-        .first()
-    )
-    if user is None:
+    if _recent_login_failure_count(db, username) < threshold:
         return
-    if _recent_login_failure_count(db, user.id) < threshold:
-        return
+    db.rollback()
     raise RateLimitedError(
         "Too many failed login attempts for this account. Try again later."
     )
@@ -218,7 +210,10 @@ def record_login_success(db: Session, user: User) -> None:
         event_type=LOGIN_SUCCEEDED_EVENT,
         actor_user_id=user.id,
         target_user_id=user.id,
-        details={"is_superuser": user.is_superuser},
+        details={
+            "is_superuser": user.is_superuser,
+            "username_fingerprint": _username_fingerprint(user.username),
+        },
     )
 
 
@@ -230,9 +225,11 @@ def authenticate_login(db: Session, username: str, password: str) -> User:
     hash upgrade, and the success audit either commit together or roll back.
     """
 
-    assert_login_not_throttled(db, username)
+    username = username.strip()
+    _lock_login_identity(db, username)
     user = authenticate_user(db, username, password)
     if user is None:
+        _assert_failed_login_not_throttled(db, username)
         record_login_failure(db, username)
         db.commit()
         raise UnauthorizedError("Invalid username or password")

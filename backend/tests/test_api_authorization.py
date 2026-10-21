@@ -159,7 +159,10 @@ def _create_tenant_fixture(db) -> tuple[AuthHeaders, TenantResources]:
     return headers, resources
 
 
-def test_global_auth_guard_blocks_protected_routes(client):
+def test_global_auth_guard_blocks_protected_routes(client, monkeypatch):
+    from al_medlit.core.config import settings
+
+    monkeypatch.setattr(settings, "allow_self_registration", True)
     missing = client.get("/api/projects", headers={"Authorization": ""})
     assert missing.status_code == 401
 

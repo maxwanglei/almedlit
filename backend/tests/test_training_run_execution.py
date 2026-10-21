@@ -244,6 +244,11 @@ class FakeEvaluator:
         self.calls = 0
         self.rows: tuple[dict, ...] = ()
 
+    def validate_input(self, *, recipe_key, config, evaluation_input) -> None:
+        assert recipe_key in self.recipe_keys
+        assert config
+        assert evaluation_input.protected_split
+
     def evaluate(
         self,
         *,

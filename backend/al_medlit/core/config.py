@@ -2,6 +2,7 @@ import tempfile
 from pathlib import Path
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine.url import make_url
 
@@ -39,6 +40,10 @@ class Settings(BaseSettings):
     # profile overrides these values to point at Redis.
     celery_broker_url: str = "memory://"
     celery_task_always_eager: bool = True
+    training_max_runtime_seconds: int = Field(default=86400, ge=60)
+    training_max_queue_wait_seconds: int = Field(default=604800, ge=60)
+    training_supervisor_poll_seconds: float = Field(default=5.0, ge=0.1, le=30)
+    training_termination_grace_seconds: float = Field(default=10.0, ge=0.1, le=60)
     # Deployment profile for capability infra-filtering: "laptop" | "lab".
     # The lab Docker Compose profile sets AL_MEDLIT_DEPLOYMENT_PROFILE=lab.
     deployment_profile: str = "laptop"
@@ -48,18 +53,17 @@ class Settings(BaseSettings):
     local_attempt_root: str = str(Path(tempfile.gettempdir()) / "al-medlit-attempts")
 
     # Auth / JWT. jwt_secret MUST be overridden in production via
-    # AL_MEDLIT_JWT_SECRET. allow_self_registration can be disabled for
-    # sealed PHI deployments.
+    # AL_MEDLIT_JWT_SECRET. Public registration requires explicit opt-in.
     jwt_secret: str = DEFAULT_JWT_SECRET
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 720
-    allow_self_registration: bool = True
+    allow_self_registration: bool = False
+    default_workspace_artifact_quota_bytes: int = Field(default=10 * 1024**3, ge=0)
     auth_cookie_secure: bool = True
 
-    # Per-account login backoff. The nginx limiter in front of the API counts
-    # per source address, so it never sees a distributed attempt against one
-    # account, and it is absent entirely from any topology that does not put
-    # that container in front. Set the threshold to 0 to disable the backoff.
+    # Failed-credential response threshold for existing and unknown names.
+    # Password verification still occurs so the owner can always authenticate.
+    # The nginx source-address limiter bounds attempt rate. Set 0 to disable.
     login_failure_threshold: int = 10
     login_failure_window_minutes: int = 15
 

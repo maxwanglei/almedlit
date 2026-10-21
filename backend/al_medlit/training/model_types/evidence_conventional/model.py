@@ -508,18 +508,27 @@ def predict_window(
     *,
     target_text: str,
     sentences: list[str],
+    sentence_ordinals: list[int] | None = None,
 ) -> list[float] | list[str]:
     if model.model_type == "evidence_crf":
         assert isinstance(model.config, EvidenceCRFConfig)
+        ordinals = (
+            sentence_ordinals if sentence_ordinals is not None else list(range(len(sentences)))
+        )
+        if any(right <= left for left, right in zip(ordinals, ordinals[1:], strict=False)):
+            raise ValueError("Inference sentence ordinals must be strictly increasing")
         records = [
-            SentenceRecord("inference", "target", target_text, index, text, "O")
-            for index, text in enumerate(sentences)
+            SentenceRecord("inference", "target", target_text, ordinal, text, "O")
+            for ordinal, text in zip(ordinals, sentences, strict=True)
         ]
-        features = [
-            _crf_sentence_features(records, index, model.config)
-            for index in range(len(records))
-        ]
-        return list(model.estimator.predict_single(features))
+        labels = []
+        for sequence in _contiguous_sequences([records]):
+            features = [
+                _crf_sentence_features(sequence, index, model.config)
+                for index in range(len(sequence))
+            ]
+            labels.extend(model.estimator.predict_single(features))
+        return labels
 
     assert isinstance(model.config, EvidenceConventionalConfig)
     texts = [

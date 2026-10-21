@@ -6,9 +6,10 @@ import json
 import re
 import unicodedata
 from collections import Counter
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -51,6 +52,14 @@ class VocabularyPayload(BaseModel):
 @dataclass(frozen=True, slots=True)
 class EvidenceVocabulary:
     payload: VocabularyPayload
+    _token_ids: Mapping[str, int] = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "_token_ids",
+            MappingProxyType({token: index for index, token in enumerate(self.payload.tokens)}),
+        )
 
     @property
     def tokens(self) -> tuple[str, ...]:
@@ -67,8 +76,8 @@ class EvidenceVocabulary:
     def __len__(self) -> int:
         return len(self.payload.tokens)
 
-    def token_to_id(self) -> dict[str, int]:
-        return {token: index for index, token in enumerate(self.payload.tokens)}
+    def token_to_id(self) -> Mapping[str, int]:
+        return self._token_ids
 
     def tokenize(self, text: str) -> tuple[str, ...]:
         normalized = unicodedata.normalize(self.payload.unicode_normalization, text)

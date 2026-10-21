@@ -19,43 +19,7 @@ from al_medlit.storage_reclaim.service import reclaim_orphaned_objects
 from al_medlit.training.runtime_profiles import runtime_queue_for_environment_class
 
 logger = logging.getLogger(__name__)
-TRAINING_HEARTBEAT_INTERVAL_SECONDS = 30.0
 FEEDBACK_SCORING_HEARTBEAT_INTERVAL_SECONDS = 30.0
-
-
-def _training_heartbeat_loop(training_run_id: int, stop: Event) -> None:
-    from al_medlit.training.run_execution import heartbeat_training_run
-
-    while not stop.wait(TRAINING_HEARTBEAT_INTERVAL_SECONDS):
-        db = SessionLocal()
-        try:
-            if not heartbeat_training_run(db, training_run_id):
-                return
-        except Exception:
-            db.rollback()
-            logger.exception(
-                "Could not renew the training heartbeat for run %s",
-                training_run_id,
-            )
-        finally:
-            db.close()
-
-
-@contextmanager
-def _training_heartbeat(training_run_id: int) -> Iterator[None]:
-    stop = Event()
-    thread = Thread(
-        target=_training_heartbeat_loop,
-        args=(training_run_id, stop),
-        name=f"training-heartbeat-{training_run_id}",
-        daemon=True,
-    )
-    thread.start()
-    try:
-        yield
-    finally:
-        stop.set()
-        thread.join(timeout=5)
 
 
 def _feedback_scoring_heartbeat_loop(feedback_run_id: int, stop: Event) -> None:
@@ -101,23 +65,9 @@ def _feedback_scoring_heartbeat(feedback_run_id: int) -> Iterator[None]:
     reject_on_worker_lost=True,
 )
 def execute_training_run_task(training_run_id: int) -> int:
-    # Keep worker plugins outside the API import graph. Their optional ML
-    # dependencies remain lazy until the selected plugin actually trains.
-    from al_medlit.training.run_execution import execute_training_run
-    from al_medlit.training.trainers import trainer_plugins
+    from al_medlit.training.supervision import run_supervised_training
 
-    db = SessionLocal()
-    try:
-        with _training_heartbeat(training_run_id):
-            run = execute_training_run(
-                db,
-                get_object_storage(),
-                training_run_id=training_run_id,
-                trainer_registry=trainer_plugins,
-            )
-        return run.id
-    finally:
-        db.close()
+    return run_supervised_training(training_run_id)
 
 
 @app.task(name="al_medlit.training.reconcile_training_runs")

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -9,6 +10,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from al_medlit.training.compute.base import (
+    CommandResult,
     CommandRunner,
     ComputeBackendError,
     ComputeSubmission,
@@ -128,8 +130,13 @@ class SSHSlurmConfig:
     ssh_identity_file: Path | None = None
     apptainer_args: tuple[str, ...] = ("--nv",)
     module_prelude: tuple[str, ...] = field(default_factory=tuple)
+    command_timeout_seconds: float = 60
+    transfer_timeout_seconds: float = 900
 
     def __post_init__(self) -> None:
+        for value in (self.command_timeout_seconds, self.transfer_timeout_seconds):
+            if not math.isfinite(value) or value <= 0:
+                raise ComputeBackendError("SSH timeouts must be positive finite seconds")
         for value, label in ((self.host, "host"), (self.username, "username")):
             if not _SAFE_IDENTIFIER.fullmatch(value):
                 raise ComputeBackendError(f"Invalid SSH {label}")
@@ -165,20 +172,17 @@ class SSHSlurmComputeBackend:
             shlex.join(remote_argv),
         )
 
+    def _run(self, argv: tuple[str, ...]) -> CommandResult:
+        timeout = (
+            self.config.transfer_timeout_seconds
+            if argv[0] == "scp"
+            else self.config.command_timeout_seconds
+        )
+        return self.runner.run(argv, timeout_seconds=timeout)
+
     def upload_commands(self, bundle: JobBundle) -> tuple[tuple[str, ...], ...]:
         remote_directory = self.remote_job_directory(bundle.job_key)
-        scp_options = (
-            "-P",
-            str(self.config.ssh_port),
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "StrictHostKeyChecking=yes",
-            "-o",
-            f"UserKnownHostsFile={self.config.known_hosts_file}",
-        )
-        if self.config.ssh_identity_file is not None:
-            scp_options += ("-i", str(self.config.ssh_identity_file))
+        scp_options = self._scp_options()
         return (
             self.ssh_argv(("mkdir", "-p", "--", str(remote_directory))),
             (
@@ -214,7 +218,7 @@ class SSHSlurmComputeBackend:
             "printf '%s\\n' \"$submission\"; "
             "fi"
         )
-        submit = self.runner.run(self.ssh_argv(("sh", "-c", submit_script)))
+        submit = self._run(self.ssh_argv(("sh", "-c", submit_script)))
         if submit.returncode != 0:
             raise ComputeBackendError(submit.stderr or "sbatch submission failed")
         external_job_id = parse_sbatch_job_id(submit.stdout)
@@ -387,7 +391,7 @@ class SSHSlurmComputeBackend:
             self.ssh_argv(("mkdir", "-p", "--", str(cache_path.parent))),
             "Unable to create the base-model cache directory",
         )
-        exists = self.runner.run(self.ssh_argv(("test", "-f", str(cache_path))))
+        exists = self._run(self.ssh_argv(("test", "-f", str(cache_path))))
         if exists.returncode == 0:
             self._verify_remote_file(
                 cache_path,
@@ -404,7 +408,7 @@ class SSHSlurmComputeBackend:
             checksum_sha256=item.checksum_sha256,
             size_bytes=item.size_bytes,
         )
-        linked = self.runner.run(self.ssh_argv(("ln", str(temporary), str(cache_path))))
+        linked = self._run(self.ssh_argv(("ln", str(temporary), str(cache_path))))
         if linked.returncode not in {0, 1}:
             raise ComputeBackendError(linked.stderr or "Unable to publish cached base model")
         self._run_required(
@@ -429,7 +433,7 @@ class SSHSlurmComputeBackend:
             self.ssh_argv(("mkdir", "-p", "--", str(destination.parent))),
             "Unable to create the remote input directory",
         )
-        exists = self.runner.run(self.ssh_argv(("test", "-f", str(destination))))
+        exists = self._run(self.ssh_argv(("test", "-f", str(destination))))
         if exists.returncode == 1:
             self._run_required(
                 self.ssh_argv(("ln", str(cache_path), str(destination))),
@@ -480,10 +484,10 @@ class SSHSlurmComputeBackend:
         checksum_sha256: str,
         size_bytes: int,
     ) -> None:
-        stat = self.runner.run(self.ssh_argv(("stat", "--format=%s", "--", str(remote_path))))
+        stat = self._run(self.ssh_argv(("stat", "--format=%s", "--", str(remote_path))))
         if stat.returncode != 0 or stat.stdout.strip() != str(size_bytes):
             raise ComputeBackendError("Remote input size verification failed")
-        digest = self.runner.run(self.ssh_argv(("sha256sum", "--", str(remote_path))))
+        digest = self._run(self.ssh_argv(("sha256sum", "--", str(remote_path))))
         if digest.returncode != 0:
             raise ComputeBackendError(digest.stderr or "Remote input checksum failed")
         remote_checksum = digest.stdout.strip().split(maxsplit=1)[0]
@@ -491,13 +495,13 @@ class SSHSlurmComputeBackend:
             raise ComputeBackendError("Remote input checksum verification failed")
 
     def _run_required(self, command: tuple[str, ...], message: str) -> None:
-        result = self.runner.run(command)
+        result = self._run(command)
         if result.returncode != 0:
             raise ComputeBackendError(result.stderr or message)
 
     def poll(self, external_job_id: str) -> JobState:
         job_id = validate_job_id(external_job_id)
-        queue = self.runner.run(
+        queue = self._run(
             self.ssh_argv(("squeue", "--noheader", "--jobs", job_id, "--format", "%T"))
         )
         # Purged jobs can make squeue fail; their terminal state lives in sacct.
@@ -505,7 +509,7 @@ class SSHSlurmComputeBackend:
         if active_state:
             raw = normalize_slurm_state(active_state[0])
             return JobState(status=_ACTIVE_STATES.get(raw, "unknown"), raw_state=raw)
-        accounting = self.runner.run(
+        accounting = self._run(
             self.ssh_argv(
                 (
                     "sacct",
@@ -524,7 +528,7 @@ class SSHSlurmComputeBackend:
 
     def cancel(self, external_job_id: str) -> JobState:
         job_id = validate_job_id(external_job_id)
-        result = self.runner.run(self.ssh_argv(("scancel", job_id)))
+        result = self._run(self.ssh_argv(("scancel", job_id)))
         if result.returncode != 0:
             raise ComputeBackendError(result.stderr or "scancel failed")
         return JobState(status="cancelled", raw_state="CANCELLED")
@@ -533,7 +537,7 @@ class SSHSlurmComputeBackend:
         """Remove one validated, attempt-scoped remote copy after retention expiry."""
 
         remote_directory = self.remote_job_directory(job_key)
-        result = self.runner.run(self.ssh_argv(("rm", "-rf", "--", str(remote_directory))))
+        result = self._run(self.ssh_argv(("rm", "-rf", "--", str(remote_directory))))
         if result.returncode != 0:
             raise ComputeBackendError(result.stderr or "Remote job cleanup failed")
 
@@ -558,7 +562,7 @@ class SSHSlurmComputeBackend:
 
         relative = validate_remote_relative_path(remote_relative_path)
         remote = self.remote_job_directory(job_key) / relative
-        result = self.runner.run(self.ssh_argv(("stat", "--format=%s", "--", str(remote))))
+        result = self._run(self.ssh_argv(("stat", "--format=%s", "--", str(remote))))
         if result.returncode != 0:
             raise ComputeBackendError(result.stderr or "Unable to stat remote artifact")
         output = result.stdout.strip()
@@ -603,7 +607,7 @@ class SSHSlurmComputeBackend:
             f"head -n {max_lines} | head -c {max_bytes}; "
             "fi"
         )
-        result = self.runner.run(self.ssh_argv(("sh", "-c", script)))
+        result = self._run(self.ssh_argv(("sh", "-c", script)))
         if result.returncode != 0:
             raise ComputeBackendError(result.stderr or "Unable to read remote training metrics")
         if not result.stdout:
@@ -717,7 +721,7 @@ class SSHSlurmComputeBackend:
         remote_relative_path: str,
         destination: Path,
     ) -> None:
-        result = self.runner.run(
+        result = self._run(
             self.artifact_download_command(
                 job_key=job_key,
                 remote_relative_path=remote_relative_path,
@@ -772,11 +776,24 @@ class SSHSlurmComputeBackend:
         return "\n".join((*directives, "", *body, ""))
 
     def _ssh_options(self) -> tuple[str, ...]:
-        options = (
+        return (
             "-p",
             str(self.config.ssh_port),
+            *self._connection_options(),
+        )
+
+    def _connection_options(self) -> tuple[str, ...]:
+        options = (
             "-o",
             "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            "-o",
+            "ConnectionAttempts=1",
+            "-o",
+            "ServerAliveInterval=15",
+            "-o",
+            "ServerAliveCountMax=3",
             "-o",
             "StrictHostKeyChecking=yes",
             "-o",
@@ -787,19 +804,11 @@ class SSHSlurmComputeBackend:
         return options
 
     def _scp_options(self) -> tuple[str, ...]:
-        options = (
+        return (
             "-P",
             str(self.config.ssh_port),
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "StrictHostKeyChecking=yes",
-            "-o",
-            f"UserKnownHostsFile={self.config.known_hosts_file}",
+            *self._connection_options(),
         )
-        if self.config.ssh_identity_file is not None:
-            options += ("-i", str(self.config.ssh_identity_file))
-        return options
 
 
 def validate_remote_relative_path(

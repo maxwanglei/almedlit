@@ -63,6 +63,7 @@ def test_sft_outputs_publish_as_deployable_packages(
     descriptor = training_recipes.get(recipe_key)
     monkeypatch.setitem(sys.modules, "torch", ModuleType("torch"))
     transformers = ModuleType("transformers")
+    transformers.set_seed = lambda seed: None
     transformers.DataCollatorForSeq2Seq = lambda **kwargs: object()
     monkeypatch.setitem(sys.modules, "transformers", transformers)
     monkeypatch.setattr(

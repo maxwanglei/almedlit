@@ -248,6 +248,7 @@ class HuggingFaceSequenceTrainer(_HuggingFaceTaskTrainer):
         import torch
         import transformers
 
+        transformers.set_seed(seed)
         config = plan.normalized_config
         output_contract = plan.manifest["output_contract"]
         labels = output_contract["labels"]
@@ -394,9 +395,12 @@ class HuggingFaceTokenTrainer(_HuggingFaceTaskTrainer):
             encoded = tokenizer(
                 list(row[input_field]),
                 is_split_into_words=True,
-                truncation=True,
-                max_length=config["max_sequence_length"],
+                truncation=False,
             )
+            if len(encoded["input_ids"]) > config["max_sequence_length"]:
+                raise ValidationError(
+                    f"Training row {row_index} tokens exceed max_sequence_length"
+                )
             word_ids = encoded.word_ids()
             if word_ids is None:
                 raise ValidationError("Token classification requires a fast tokenizer")
@@ -429,6 +433,7 @@ class HuggingFaceTokenTrainer(_HuggingFaceTaskTrainer):
         import torch
         import transformers
 
+        transformers.set_seed(seed)
         config = plan.normalized_config
         output_contract = plan.manifest["output_contract"]
         labels = output_contract["labels"]
@@ -604,6 +609,7 @@ class HuggingFaceSpanTrainer(_HuggingFaceTaskTrainer):
         import torch
         import transformers
 
+        transformers.set_seed(seed)
         config = plan.normalized_config
         tokenizer = transformers.AutoTokenizer.from_pretrained(
             base_model_path,

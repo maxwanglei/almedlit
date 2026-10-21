@@ -514,7 +514,10 @@ def test_import_endpoint_creates_documents(api_client):
 
 
 @pytest.fixture(name="personal_api_client")
-def fixture_personal_api_client(request):
+def fixture_personal_api_client(request, monkeypatch):
+    from al_medlit.core.config import settings
+
+    monkeypatch.setattr(settings, "allow_self_registration", True)
     testing_session_factory = request.getfixturevalue("testing_session_factory")
     app = create_app()
 

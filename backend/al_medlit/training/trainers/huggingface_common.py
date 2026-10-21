@@ -9,6 +9,7 @@ import math
 import tempfile
 from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -387,12 +388,20 @@ def execute_torch_training(
     precision = config.get("mixed_precision", "none")
     autocast_enabled = precision != "none" and device.type in {"cpu", "cuda"}
     autocast_dtype = torch.float16 if precision == "fp16" else torch.bfloat16
-    epoch_count = max(1, math.ceil(float(config["epochs"])))
+    scaler = (
+        torch.amp.GradScaler(device.type)
+        if autocast_enabled and precision == "fp16"
+        else None
+    )
+    remaining_batches = math.ceil(float(config["epochs"]) * len(loader))
     losses: list[float] = []
     optimizer.zero_grad(set_to_none=True)
     model.train()
-    for _epoch in range(epoch_count):
-        for batch_index, batch in enumerate(loader):
+    while remaining_batches > 0:
+        epoch_batches = min(len(loader), remaining_batches)
+        for batch_index, batch in enumerate(islice(loader, epoch_batches)):
+            group_start = (batch_index // accumulation) * accumulation
+            group_size = min(accumulation, epoch_batches - group_start)
             batch = _move_to_device(batch, device)
             context = (
                 torch.autocast(
@@ -404,15 +413,20 @@ def execute_torch_training(
                 else nullcontext()
             )
             with context:
-                loss = model(**batch).loss / accumulation
-            loss.backward()
-            losses.append(float(loss.detach().cpu()) * accumulation)
-            if (batch_index + 1) % accumulation == 0:
-                optimizer.step()
+                loss = model(**batch).loss / group_size
+            if scaler is None:
+                loss.backward()
+            else:
+                scaler.scale(loss).backward()
+            losses.append(float(loss.detach().cpu()) * group_size)
+            if (batch_index + 1) % accumulation == 0 or batch_index + 1 == epoch_batches:
+                if scaler is None:
+                    optimizer.step()
+                else:
+                    scaler.step(optimizer)
+                    scaler.update()
                 optimizer.zero_grad(set_to_none=True)
-        if len(loader) % accumulation:
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
+        remaining_batches -= epoch_batches
 
     metrics: dict[str, float | None] = {
         "train_loss": sum(losses) / len(losses) if losses else None,

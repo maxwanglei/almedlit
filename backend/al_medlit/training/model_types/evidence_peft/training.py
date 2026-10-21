@@ -273,6 +273,7 @@ def prepare_peft_examples(
 ) -> tuple[PeftEvidenceExample, ...]:
     """Create sentence-boundary windows using the base model's exact tokenizer."""
 
+    context_limit = _context_limit(config, tokenizer)
     documents = documents_from_window_rows(rows)
     examples: list[PeftEvidenceExample] = []
     for document in documents:
@@ -299,12 +300,23 @@ def prepare_peft_examples(
                     if selected[0][2] is not None
                     else None
                 )
-                if _encoded_length(tokenizer, prompt, completion) > config.max_sequence_length:
+                answer_tokens = _completion_token_budget(tokenizer, len(selected))
+                if completion is not None:
+                    answer_tokens = max(
+                        answer_tokens,
+                        len(_token_ids(tokenizer, completion, add_special_tokens=False)) + 1,
+                    )
+                if (
+                    answer_tokens > config.max_new_tokens
+                    or _encoded_length(tokenizer, prompt, None) + answer_tokens
+                    > context_limit
+                ):
                     break
                 best_end = end
             if best_end == start:
                 raise ValueError(
-                    "A PEFT Evidence sentence cannot fit the immutable base tokenizer context"
+                    "A PEFT Evidence sentence and its JSON answer cannot fit the "
+                    "immutable base tokenizer context or max_new_tokens"
                 )
             selected = items[start:best_end]
             sentences = tuple(item[1] for item in selected)
@@ -420,7 +432,7 @@ def evaluate_peft_examples(
         decoder_config={
             "kind": "structured_json_bio",
             "overlap": "majority_vote",
-            "invalid_output": "all_o",
+            "invalid_output": "error",
         },
     )
     report = EvidenceBlockEvaluator().evaluate(
@@ -458,16 +470,22 @@ def predict_peft_examples(
     predictions: list[tuple[str, ...]] = []
     valid_count = 0
     device = next(model.parameters()).device
+    context_limit = _context_limit(config, tokenizer, model)
     with torch.no_grad():
         for example in examples:
             prompt_ids = _token_ids(tokenizer, example.prompt, add_special_tokens=True)
+            generation_budget = min(
+                config.max_new_tokens, context_limit - len(prompt_ids)
+            )
+            if _completion_token_budget(tokenizer, len(example.sentences)) > generation_budget:
+                raise ValueError("PEFT example has insufficient context or JSON answer budget")
             input_ids = torch.tensor([prompt_ids], dtype=torch.long, device=device)
             attention_mask = torch.ones_like(input_ids)
             generated = model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 do_sample=False,
-                max_new_tokens=config.max_new_tokens,
+                max_new_tokens=generation_budget,
                 pad_token_id=tokenizer.pad_token_id,
                 eos_token_id=tokenizer.eos_token_id,
             )
@@ -475,9 +493,13 @@ def predict_peft_examples(
             decoded = tokenizer.decode(generated_ids, skip_special_tokens=True)
             labels = parse_evidence_completion(decoded, expected_count=len(example.sentences))
             if labels is None:
-                labels = ("O",) * len(example.sentences)
-            else:
-                valid_count += 1
+                raise ValueError(
+                    "Invalid PEFT structured output for document "
+                    f"{example.document_id}, target {example.target_id}, "
+                    f"sentence ordinals {example.sentence_ordinals}: expected one JSON "
+                    "BIO label per sentence"
+                )
+            valid_count += 1
             predictions.append(labels)
     return tuple(predictions), valid_count
 
@@ -584,6 +606,7 @@ def _load_base_model(config: EvidencePeftConfig, root: Path):
         load_kwargs["quantization_config"] = build_qlora_quantization_config(config)
         load_kwargs["device_map"] = {"": torch.cuda.current_device()}
     base_model = AutoModelForCausalLM.from_pretrained(root, **load_kwargs)
+    tokenizer.model_max_length = _context_limit(config, tokenizer, base_model)
     if not isinstance(config, EvidenceQLoRAConfig):
         base_model.to(torch.device(runtime_device))
     return torch, tokenizer, base_model, runtime_device
@@ -597,8 +620,8 @@ def _encode_supervised_example(tokenizer, example, config: EvidencePeftConfig) -
     completion_ids = _token_ids(tokenizer, completion, add_special_tokens=False)
     completion_ids.append(int(tokenizer.eos_token_id))
     input_ids = prompt_ids + completion_ids
-    if len(input_ids) > config.max_sequence_length:
-        raise ValueError("Prepared PEFT example exceeds max_sequence_length")
+    if len(input_ids) > _context_limit(config, tokenizer):
+        raise ValueError("Prepared PEFT example exceeds the base-model context limit")
     return {
         "input_ids": input_ids,
         "labels": [-100] * len(prompt_ids) + completion_ids,
@@ -674,11 +697,47 @@ def _seed_everything(torch, config: EvidencePeftConfig) -> None:
         torch.use_deterministic_algorithms(True, warn_only=True)
 
 
+def _context_limit(config: EvidencePeftConfig, tokenizer, model=None) -> int:
+    model_config = getattr(model, "config", None)
+    text_config = getattr(model_config, "text_config", model_config)
+    limits = [
+        config.max_sequence_length,
+        getattr(tokenizer, "model_max_length", None),
+        getattr(text_config, "max_position_embeddings", None),
+        getattr(text_config, "n_positions", None),
+    ]
+    # HF tokenizers use a very large integer when the model limit is unknown.
+    return min(
+        limit for limit in limits
+        if isinstance(limit, int) and not isinstance(limit, bool) and 0 < limit < 10**20
+    )
+
+
 def _encoded_length(tokenizer, prompt: str, completion: str | None) -> int:
     length = len(_token_ids(tokenizer, prompt, add_special_tokens=True))
     if completion is not None:
         length += len(_token_ids(tokenizer, completion, add_special_tokens=False)) + 1
     return length
+
+
+def _completion_token_budget(tokenizer, sentence_count: int) -> int:
+    # Count JSON pieces independently so merges between labels do not reduce
+    # the reserved answer space. Include EOS just as supervised encoding does.
+    def count(text: str) -> int:
+        return len(_token_ids(tokenizer, text, add_special_tokens=False))
+
+    first_label = max(count(json.dumps(label)) for label in VALID_LABELS)
+    next_label = max(count("," + json.dumps(label)) for label in VALID_LABELS)
+    pieces = count('{"labels":[') + count("]}") + 1
+    if sentence_count:
+        pieces += first_label + (sentence_count - 1) * next_label
+    return max(
+        pieces,
+        *(
+            count(render_evidence_completion([label] * sentence_count)) + 1
+            for label in VALID_LABELS
+        ),
+    )
 
 
 def _token_ids(tokenizer, text: str, *, add_special_tokens: bool) -> list[int]:

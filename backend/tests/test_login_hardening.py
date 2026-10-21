@@ -127,11 +127,13 @@ def test_invite_and_regular_login_share_the_failure_threshold(
 
     assert first("incorrect").status_code == 401
     assert second("incorrect").status_code == 401
-    assert login("a-secure-password").status_code == 429
-    assert invite_login("a-secure-password").status_code == 429
+    assert login("incorrect").status_code == 429
+    assert invite_login("incorrect").status_code == 429
     assert len(_events(db, "auth.login_failed")) == 2
     db.refresh(invite)
     assert invite.accepted_at is None
+    assert login("a-secure-password").status_code == 200
+    assert invite_login("a-secure-password").status_code == 200
 
 
 def test_successful_invite_login_audits_and_clears_the_failure_streak(
@@ -289,12 +291,10 @@ def test_repeated_failures_throttle_the_account_then_lapse_after_the_window(
 
     throttled = _login(client, "stuffed-account", "wrong-password")
     assert throttled.status_code == 429
-    # The correct password is refused too, or the throttle would be a no-op.
-    assert _login(client, "stuffed-account", "a-secure-password").status_code == 429
-
     # The backoff is a window, never a sticky lockout: an operator must not be
     # lockable out of their own instance by a stranger.
     monkeypatch.setattr(settings, "login_failure_window_minutes", 0)
+    assert _login(client, "stuffed-account", "wrong-password").status_code == 401
     assert _login(client, "stuffed-account", "a-secure-password").status_code == 200
 
 
@@ -327,20 +327,13 @@ def test_throttle_can_be_disabled(client, db, monkeypatch):
     assert _login(client, "unthrottled-account", "wrong-password").status_code == 401
 
 
-def test_unknown_usernames_are_not_throttled(client, db, monkeypatch):
-    """Documents a deliberate choice, not an oversight.
-
-    Throttling unknown names would need a separate name-keyed counter; without
-    one, a 429 on an existing account and a 401 on a missing one differ. That
-    residual signal is bounded by the edge rate limiter and costs an attacker a
-    full threshold of attempts per guess.
-    """
+def test_unknown_usernames_share_the_failure_backoff(client, db, monkeypatch):
     from al_medlit.core.config import settings
 
     monkeypatch.setattr(settings, "login_failure_threshold", 2)
 
-    for _ in range(4):
-        assert _login(client, "ghost-account", "whatever").status_code == 401
+    statuses = [_login(client, "ghost-account", "whatever").status_code for _ in range(4)]
+    assert statuses == [401, 401, 429, 429]
 
 
 def test_workspace_scoped_user_listing_is_audited(client, db):

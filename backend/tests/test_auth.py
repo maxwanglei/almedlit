@@ -5,6 +5,13 @@ from passlib.context import CryptContext
 from al_medlit.auth import security
 
 
+@pytest.fixture(autouse=True)
+def enable_registration_for_auth_flows(monkeypatch):
+    from al_medlit.core.config import settings
+
+    monkeypatch.setattr(settings, "allow_self_registration", True)
+
+
 def test_password_hash_roundtrip():
     hashed = security.hash_password("s3cret")
     assert hashed != "s3cret"
