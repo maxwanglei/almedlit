@@ -322,7 +322,7 @@ test("public account activation completes once and adopts the new session", asyn
       await route.continue();
       return;
     }
-    if (url.pathname === "/api/account-actions/activation-token" && request.method() === "GET") {
+    if (url.pathname === "/api/account-actions/preview" && request.method() === "POST") {
       await json(route, {
         purpose: "activation",
         username: "new-user",
@@ -331,7 +331,7 @@ test("public account activation completes once and adopts the new session", asyn
       });
       return;
     }
-    if (url.pathname === "/api/account-actions/activation-token" && request.method() === "POST") {
+    if (url.pathname === "/api/account-actions/complete" && request.method() === "POST") {
       completionCount += 1;
       await json(route, { authenticated: true });
       return;

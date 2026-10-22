@@ -7,6 +7,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -128,13 +129,29 @@ describe("RoundWorkbench", () => {
     mocks.addRoundDecision.mockResolvedValue({ ...decision(410, 501, "annotation"), output: 0 });
     render(<RoundWorkbench round={round(41, "Regression")} task={{ ...task, task_kind: "regression", output_schema: { type: "number" } }} currentUserId={12} canManage onClose={vi.fn()} onRefresh={vi.fn()} />);
     await screen.findByRole("spinbutton", { name: "Value" });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save decision" })).toHaveProperty("disabled", false));
     fireEvent.click(screen.getByRole("button", { name: "Save decision" }));
     expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Enter a valid numeric value.");
     expect(mocks.addRoundDecision).not.toHaveBeenCalled();
+    expect(screen.getByRole("spinbutton", { name: "Value" }).getAttribute("aria-invalid")).toBe("true");
+    expect(document.activeElement).toBe(screen.getByRole("spinbutton", { name: "Value" }));
     fireEvent.change(screen.getByRole("spinbutton", { name: "Value" }), { target: { value: "0" } });
     mocks.addRoundDecision.mockResolvedValue({ ...decision(410, 501, "annotation"), output: 0 });
     fireEvent.click(screen.getByRole("button", { name: "Save decision" }));
     await waitFor(() => expect(mocks.addRoundDecision).toHaveBeenCalledWith(7, expect.objectContaining({ output: 0 })));
+  });
+
+  it("confirms round closure and keeps a failed close error inside the dialog", async () => {
+    mocks.loadRoundWork.mockResolvedValue(roundWork(41, "Source"));
+    mocks.transitionRound.mockRejectedValue(new Error("Close failed"));
+    render(<RoundWorkbench round={round(41, "Round")} task={task} currentUserId={12} canManage onClose={vi.fn()} onRefresh={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Close round" }));
+    expect(mocks.transitionRound).not.toHaveBeenCalled();
+    fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Cancel" }));
+    expect(mocks.transitionRound).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Close round" }));
+    fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Close round" }));
+    expect(await within(screen.getByRole("alertdialog")).findByRole("alert")).toHaveProperty("textContent", "Close failed");
   });
 
   it("round-trips plain classification text and retains save confirmation", async () => {
@@ -156,6 +173,8 @@ describe("RoundWorkbench", () => {
     const onRefresh = vi.fn(async () => { rendered.rerender(<RoundWorkbench round={{ ...closed }} task={{ ...task }} currentUserId={12} canManage onClose={vi.fn()} onRefresh={onRefresh} />); });
     const rendered = render(<RoundWorkbench round={closed} task={task} currentUserId={12} canManage onClose={vi.fn()} onRefresh={onRefresh} />);
     fireEvent.click(await screen.findByRole("button", { name: "Publish label set" }));
+    expect(mocks.publishRoundLabelSet).not.toHaveBeenCalled();
+    fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Publish label set" }));
     await waitFor(() => expect(onRefresh).toHaveBeenCalledOnce());
     await waitFor(() => expect(mocks.loadRoundWork).toHaveBeenCalledTimes(2));
     expect(await screen.findByText("Published labels v1 published.")).toBeTruthy();
@@ -224,12 +243,15 @@ describe("RoundWorkbench", () => {
       (screen.getByRole("button", { name: "Finalize submission" }) as HTMLButtonElement).disabled,
     ).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "Finalize submission" }));
+    expect(mocks.submitRoundDecisions).not.toHaveBeenCalled();
+    fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Finalize submission" }));
     await waitFor(() => expect(mocks.submitRoundDecisions).toHaveBeenCalledWith(7, 41, [501]));
     await screen.findByText("Submission 1 finalized.");
-    fireEvent.change(screen.getByRole("combobox", { name: "Label layer" }), {
+    fireEvent.change(screen.getByRole("combobox", { name: "Label set source" }), {
       target: { value: "adjudicated" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Publish label set" }));
+    fireEvent.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Publish label set" }));
     await waitFor(() => expect(mocks.publishRoundLabelSet).toHaveBeenCalledWith(7, 41, {
       name: "Closed disagreement finalized labels",
       sourceKind: "adjudicated",
@@ -357,9 +379,9 @@ describe("RoundWorkbench", () => {
       target: { value: "accepted" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Save decision" }));
-    await waitFor(() => expect(mocks.recordFeedbackDecision).toHaveBeenCalledWith(
-      7, 701, 501, "accepted",
-    ));
+    await waitFor(() => expect(mocks.addRoundDecision).toHaveBeenCalledWith(7, expect.objectContaining({ feedbackDecision: { exposureId: 701, decision: "accepted" } })));
+    expect(mocks.recordFeedbackDecision).not.toHaveBeenCalled();
+    await screen.findByText("Decision saved.");
   });
 
   it("ignores an older round response and its loading completion", async () => {

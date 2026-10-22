@@ -678,7 +678,12 @@ class RoundWorkItemRead(InputModel):
     dataset_item: DatasetItemRead
 
 
-class AnnotationDecisionCreate(InputModel):
+class AnnotationFeedbackDecision(InputModel):
+    exposure_id: int
+    decision: Literal["accepted", "modified", "rejected", "ignored"]
+
+
+class AnnotationDecisionData(InputModel):
     project_id: int
     round_item_id: int
     supersedes_decision_id: int | None = None
@@ -688,7 +693,11 @@ class AnnotationDecisionCreate(InputModel):
     rationale: str | None = None
 
 
-class AnnotationDecisionRead(AnnotationDecisionCreate, ReadModel):
+class AnnotationDecisionCreate(AnnotationDecisionData):
+    feedback_decision: AnnotationFeedbackDecision | None = None
+
+
+class AnnotationDecisionRead(AnnotationDecisionData, ReadModel):
     annotator_user_id: int
     content_hash: str
 

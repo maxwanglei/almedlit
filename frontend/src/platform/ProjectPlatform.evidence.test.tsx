@@ -9,6 +9,11 @@ import type { Project, ProjectTask, TaskAssignment } from "@/types/api";
 import ProjectPlatform from "./ProjectPlatform";
 import { EMPTY_PLATFORM_PROJECT_DATA, type PlatformProjectData } from "./types";
 
+vi.mock("./predictionApi", async (importOriginal) => ({
+  ...await importOriginal<Record<string, unknown>>(),
+  listPredictionRuns: mocks.listPredictionRuns,
+}));
+
 const mocks = vi.hoisted(() => ({
   listProjectTasks: vi.fn(),
   listEvidenceTargets: vi.fn(),
@@ -16,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   listTaskAssignments: vi.fn(),
   listGuidelineVersions: vi.fn(),
   listWorkspaceMembers: vi.fn(),
+  listPredictionRuns: vi.fn(),
 }));
 vi.mock("@/api/client", async (importOriginal) => ({
   ...await importOriginal<Record<string, unknown>>(),
@@ -48,6 +54,30 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("live evidence setup", () => {
+  const sourceData: PlatformProjectData = {
+    ...data,
+    datasets: [{ id: 2, project_id: 7, name: "Papers", source_type: "project_corpus", description: null }],
+    datasetVersions: [{ id: 22, project_id: 7, dataset_id: 2, version_number: 1, item_count: 3, source_uri: null, source_revision: "revision", source_format: "jsonl", data_schema: {}, provenance: {}, license_info: {}, content_hash: "hash", artifact_package_id: null }],
+  };
+
+  it("offers annotation only when the project has the annotate module", async () => {
+    const trainingData: PlatformProjectData = { ...sourceData, projectModules: { ...data.projectModules, effective: ["data", "models", "train"] } };
+    const { rerender } = render(<ProjectPlatform {...props} pathname="/projects/7/data" data={trainingData} />);
+    expect(screen.queryByRole("button", { name: "Annotate" })).toBeNull();
+    rerender(<ProjectPlatform {...props} pathname="/projects/7/data" data={sourceData} />);
+    expect(screen.getByRole("button", { name: "Annotate" })).toBeTruthy();
+  });
+
+  it("offers Open models only when the user has models read access", async () => {
+    const inferenceData: PlatformProjectData = { ...sourceData, projectModules: { ...data.projectModules, effective: ["data", "models"] } };
+    const inferenceAccess = createAccessSnapshot({ workspaceId: 5, workspaceKind: "team", membershipRole: "trainer", effectiveCapabilities: ["inference"] });
+    const { rerender } = render(<ProjectPlatform {...props} pathname="/projects/7/inference" data={inferenceData} access={inferenceAccess} />);
+    await screen.findByText("A compatible trained model is needed");
+    expect(screen.queryByRole("button", { name: "Open models" })).toBeNull();
+    rerender(<ProjectPlatform {...props} pathname="/projects/7/inference" data={inferenceData} access={{ ...inferenceAccess, effectiveCapabilities: ["inference", "training"] }} />);
+    expect(screen.getByRole("button", { name: "Open models" })).toBeTruthy();
+  });
+
   it.each(["/projects/7/tasks", "/projects/7/overview"])("opens the selected legacy document task from %s", async (pathname) => {
     const task = { id: 41, project_id: 7, annotation_type: "entity", display_name: "Drug entities", description: null, enabled: true, sort_order: 0, labels: [], settings: {} } satisfies ProjectTask;
     render(<ProjectPlatform {...props} pathname={pathname} project={{ ...project, tasks: [task] }} documents={[{ id: 11, project_id: 7, external_id: null, title: "Paper", source: null, metadata_: {}, active_structure_version_id: null }]} />);

@@ -5,6 +5,7 @@ import {
   publishSessionChange,
   SESSION_EVENT_STORAGE_KEY,
   subscribeSessionChanges,
+  subscribeMembershipChanges,
 } from "@/auth/session";
 
 import {
@@ -281,6 +282,8 @@ describe("API authentication failures", () => {
 
   it("accepts an invite with the HttpOnly cookie session", async () => {
     const observed: boolean[] = [];
+    const membershipChanged = vi.fn();
+    const unsubscribeMemberships = subscribeMembershipChanges(membershipChanged);
     const unsubscribe = subscribeSessionChanges((authenticated) =>
       observed.push(authenticated),
     );
@@ -294,6 +297,7 @@ describe("API authentication failures", () => {
 
     await acceptInvite("invite-token");
     unsubscribe();
+    unsubscribeMemberships();
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/invites/accept",
@@ -303,7 +307,8 @@ describe("API authentication failures", () => {
       }),
     );
     expect(fetchMock.mock.calls[0]?.[1]?.headers).not.toHaveProperty("Authorization");
-    expect(observed).toEqual([true]);
+    expect(observed).toEqual([]);
+    expect(membershipChanged).toHaveBeenCalledOnce();
   });
 
   it("downloads submission bytes with the cookie session", async () => {

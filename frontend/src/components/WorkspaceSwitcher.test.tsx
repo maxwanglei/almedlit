@@ -25,7 +25,7 @@ const memberships: MeMembership[] = [
 afterEach(cleanup);
 
 describe("WorkspaceSwitcher", () => {
-  it("selects another membership", () => {
+  it("requires confirmation before switching a selected membership", () => {
     const onWorkspaceChange = vi.fn();
     render(
       <WorkspaceSwitcher
@@ -36,8 +36,22 @@ describe("WorkspaceSwitcher", () => {
     );
 
     fireEvent.change(screen.getByLabelText("Workspace"), { target: { value: "20" } });
-
+    expect(onWorkspaceChange).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Switch workspace" }));
     expect(onWorkspaceChange).toHaveBeenCalledWith(20);
+  });
+
+  it("resets an unconfirmed selection when the active workspace changes", () => {
+    const onWorkspaceChange = vi.fn();
+    const props = { memberships, onWorkspaceChange };
+    const { rerender } = render(<WorkspaceSwitcher {...props} activeWorkspaceId={10} />);
+    fireEvent.change(screen.getByLabelText("Workspace"), { target: { value: "20" } });
+    rerender(<WorkspaceSwitcher {...props} activeWorkspaceId={20} />);
+    expect(screen.queryByRole("button", { name: "Switch workspace" })).toBeNull();
+    rerender(<WorkspaceSwitcher {...props} activeWorkspaceId={10} />);
+    expect((screen.getByLabelText("Workspace") as HTMLSelectElement).value).toBe("10");
+    expect(screen.queryByRole("button", { name: "Switch workspace" })).toBeNull();
+    expect(onWorkspaceChange).not.toHaveBeenCalled();
   });
 
   it("keeps the active workspace and effective role visible for one workspace", () => {
@@ -72,6 +86,18 @@ describe("WorkspaceSwitcher", () => {
 
     expect(
       (screen.getByLabelText("Workspace") as HTMLSelectElement).options[0]?.text,
-    ).toBe("Model lab · Model Trainer");
+    ).toBe("Model lab · Model trainer");
+  });
+
+  it("preserves a non-owner role in an individual workspace", () => {
+    render(
+      <WorkspaceSwitcher
+        memberships={[{ ...memberships[0], role: "trainer" }]}
+        activeWorkspaceId={10}
+        onWorkspaceChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole<HTMLOptionElement>("option").text).toBe("Personal · Model trainer");
   });
 });

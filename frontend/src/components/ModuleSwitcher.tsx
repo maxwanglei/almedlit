@@ -163,6 +163,7 @@ export default function ModuleSwitcher({
         <IconButton
           ref={menuButtonRef}
           label={menuOpen ? "Close navigation menu" : "Open navigation menu"}
+          tooltip={menuOpen ? "Close navigation menu" : "Open navigation menu"}
           icon={menuOpen ? <X size={20} /> : <Menu size={20} />}
           variant="ghost"
           size="sm"
@@ -196,6 +197,7 @@ export default function ModuleSwitcher({
                 </div>
                 <IconButton
                   label="Close navigation menu"
+                  tooltip="Close navigation menu"
                   icon={<X size={20} />}
                   variant="ghost"
                   size="sm"

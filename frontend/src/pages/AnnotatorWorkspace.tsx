@@ -1,3 +1,4 @@
+import { NativeInput, NativeSelect } from "@/components/NativeField";
 import {
   type Dispatch,
   type SetStateAction,
@@ -25,6 +26,7 @@ import {
   useSearchState,
 } from "@/hooks/useSearchState";
 import DialogFrame from "@/components/DialogFrame";
+import ConfirmDialog from "@/components/ConfirmDialog";
 import { shouldHandleSpaClick } from "@/components/ModuleSwitcher";
 import {
   isHumanAnnotationOwnedBy,
@@ -36,10 +38,13 @@ import {
   personalDocumentStatusLabel,
   preferredAssignmentId,
 } from "@/lib/annotationWorkspacePolicy";
+import { ANNOTATION_LABEL_COLORS } from "@/lib/annotationPalette";
 import { visibleDocumentsFor } from "@/lib/annotatorIdentity";
-import { filterRelationLabels, relationConstraintsOf } from "@/lib/relationConstraints";
+import { filterRelationLabels, relationConstraintsOf, relationLabelAllows } from "@/lib/relationConstraints";
 import { createTextOffsetMap, type TextOffsetMap } from "@/lib/textOffsets";
 import ActiveRoundQueue from "@/platform/ActiveRoundQueue";
+import { formatCount, formatStatus } from "@/platform/components";
+import { IconButton } from "@astryxdesign/core/IconButton";
 import type { RoundWorkContext } from "@/platform/types";
 import type {
   Annotation,
@@ -59,7 +64,7 @@ import type {
 
 type AnnotatorTab = "progress" | "annotate";
 type AnnotationTool = "legacy" | "evidence";
-export type SaveStatus = "saving" | "saved" | "error";
+export type SaveStatus = "idle" | "saving" | "saved" | "error";
 type WorkspacePane = "document" | "queue" | "tools" | "review";
 type InspectorTab = "annotations" | "relations" | "sentence" | "guideline";
 type ProjectSetupTab = "overview" | "documents" | "tasks" | "export" | "rounds";
@@ -113,6 +118,8 @@ interface PendingSelection {
   left: number;
   top: number;
 }
+
+type PendingDeletion = { kind: "span" | "relation"; annotationId: number };
 
 interface SpanMenuState {
   annotationId: number;
@@ -193,6 +200,7 @@ interface AnnotatorWorkspaceProps {
   annotationApi?: AnnotationMutationAdapter;
   defaultView?: AnnotatorTab;
   overviewControls?: React.ReactNode;
+  workspaceNotice?: React.ReactNode;
   taskInventory?: React.ReactNode;
   onBackToMyWork?: () => void;
   canManageTasks?: boolean;
@@ -203,16 +211,6 @@ interface AnnotatorWorkspaceProps {
 const STATUS_ORDER: QueueStatus[] = ["done", "partial", "review", "todo", "blocked"];
 const DONE_STATUSES = new Set<TaskAssignmentStatus>(["submitted", "completed"]);
 const REVIEW_STATUSES = new Set<TaskAssignmentStatus>(["adjudication_ready", "adjudicated"]);
-
-const FALLBACK_COLORS = [
-  "#4d6e5b",
-  "#8e3a3a",
-  "#8a6d2a",
-  "#4a5a8a",
-  "#6a4a7a",
-  "#5e6e8a",
-  "#c79a47",
-];
 
 const FALLBACK_TYPE_SPECS: Record<AnnotationType, AnnotationTypeSpec> = {
   entity: {
@@ -362,13 +360,13 @@ function getTaskLabels(task: ProjectTask, project: Project | null): LabelDef[] {
 }
 
 function labelColor(label: LabelDef | undefined, fallbackIndex = 0): string {
-  return label?.color || FALLBACK_COLORS[fallbackIndex % FALLBACK_COLORS.length];
+  return label?.color || ANNOTATION_LABEL_COLORS[fallbackIndex % ANNOTATION_LABEL_COLORS.length];
 }
 
 function fallbackLabelColor(annotationType: AnnotationType, labelName: string): string {
   const seed = `${annotationType}:${labelName}`;
   const hash = Array.from(seed).reduce((sum, character) => sum + character.charCodeAt(0), 0);
-  return FALLBACK_COLORS[hash % FALLBACK_COLORS.length];
+  return ANNOTATION_LABEL_COLORS[hash % ANNOTATION_LABEL_COLORS.length];
 }
 
 function findLabel(
@@ -409,10 +407,6 @@ function compactLabel(label: string): string {
     .map((word) => word[0])
     .join("")
     .toUpperCase();
-}
-
-function displayStatus(status: string): string {
-  return status.replace(/_/g, " ");
 }
 
 function documentTitle(documentItem: DocumentSummary): string {
@@ -488,17 +482,6 @@ function sentenceRangesFor(
   }
 
   return length > 0 ? [{ index: 0, start: 0, end: length, text }] : [];
-}
-
-function hexToRgba(hex: string, alpha: number): string {
-  const normalized = hex.replace("#", "");
-  if (!/^[0-9a-fA-F]{6}$/.test(normalized)) {
-    return `rgba(77, 110, 91, ${alpha})`;
-  }
-  const red = Number.parseInt(normalized.slice(0, 2), 16);
-  const green = Number.parseInt(normalized.slice(2, 4), 16);
-  const blue = Number.parseInt(normalized.slice(4, 6), 16);
-  return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
 }
 
 function hotkeyForLabel(label: string, index: number): string {
@@ -651,6 +634,7 @@ export default function AnnotatorWorkspace({
   annotationApi,
   defaultView = "progress",
   overviewControls,
+  workspaceNotice,
   taskInventory,
   onBackToMyWork,
   canManageTasks = true,
@@ -685,12 +669,15 @@ export default function AnnotatorWorkspace({
     useState<AnnotationTool>(initialTool);
   const [workspacePane, setWorkspacePane] =
     useState<WorkspacePane>(initialPane);
-  const [saveStatus, setSaveStatus] = useState<SaveStatus>("saved");
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("annotations");
   const [activeSpanType, setActiveSpanType] = useState<AnnotationType | null>(null);
   const [activeSpanLabel, setActiveSpanLabel] = useState<string>("");
   const [customLabel, setCustomLabel] = useState<string>("");
   const [pendingSelection, setPendingSelection] = useState<PendingSelection | null>(null);
+  const selectionOriginRef = useRef<HTMLElement | null>(null);
+  const [pendingDeletion, setPendingDeletion] = useState<PendingDeletion | null>(null);
+  const [deletionError, setDeletionError] = useState<string | null>(null);
   const [spanMenu, setSpanMenu] = useState<SpanMenuState | null>(null);
   const [relationSourceId, setRelationSourceId] = useState<number | null>(null);
   const [relationChoice, setRelationChoice] = useState<RelationChoiceState | null>(null);
@@ -716,6 +703,9 @@ export default function AnnotatorWorkspace({
   const spanRefs = useRef<Map<number, HTMLElement>>(new Map());
   const clearAnnotationInteractions = useCallback((): void => {
     setPendingSelection(null);
+    setSaveStatus("idle");
+    setPendingDeletion(null);
+    setDeletionError(null);
     setSpanMenu(null);
     setRelationSourceId(null);
     setRelationChoice(null);
@@ -1395,7 +1385,7 @@ export default function AnnotatorWorkspace({
     personalHomeState === "no_project"
       ? "Start a private project for the papers you want to annotate."
       : personalHomeState === "no_documents"
-        ? `${selectedProject?.name ?? "This project"} is ready for PMIDs.`
+        ? `${selectedProject?.name ?? "This project"} is ready for documents.`
         : personalHomeState === "no_tasks"
           ? "Enable at least one annotation task."
           : personalHomeState === "task_setup"
@@ -1409,7 +1399,7 @@ export default function AnnotatorWorkspace({
     personalHomeState === "no_project"
       ? "Create project"
       : personalHomeState === "no_documents"
-        ? "Import PMIDs"
+        ? "Add documents"
         : personalHomeState === "no_tasks" || personalHomeState === "task_setup"
           ? "Configure tasks"
           : personalHomeState === "complete"
@@ -1539,7 +1529,9 @@ export default function AnnotatorWorkspace({
         setSaveStatus("saved");
       } catch (error) {
         setSaveStatus("error");
-        setError(error instanceof Error ? error.message : failureMessage);
+        const message = error instanceof Error ? error.message : failureMessage;
+        setError(message);
+        setDeletionError(message);
       } finally {
         mutationInFlight.current = false;
         setBusy(false);
@@ -1731,6 +1723,7 @@ export default function AnnotatorWorkspace({
       return;
     }
 
+    selectionOriginRef.current = startSection;
     const rect = range.getBoundingClientRect();
     setPendingSelection({
       annotationType: activeSpanTask.annotation_type,
@@ -1741,6 +1734,37 @@ export default function AnnotatorWorkspace({
       top: rect.top,
     });
   }
+
+  function handleTextSelectionKeyDown(event: ReactKeyboardEvent<HTMLElement>): void {
+    if (event.target !== event.currentTarget || !isTaskEditable(activeSpanTask?.id)) return;
+    const selection = window.getSelection();
+    if (!selection) return;
+    if (event.key === "Enter" && !selection.isCollapsed) {
+      event.preventDefault();
+      handleSelection();
+      window.requestAnimationFrame(() => {
+        document.querySelector<HTMLElement>('[data-span-label-picker] button')?.focus();
+      });
+      return;
+    }
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key) || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (!event.currentTarget.contains(selection.anchorNode)) {
+      const range = document.createRange();
+      range.selectNodeContents(event.currentTarget);
+      range.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+    if (typeof selection.modify === "function") {
+      event.preventDefault();
+      selection.modify(event.shiftKey ? "extend" : "move", event.key === "ArrowLeft" || event.key === "Home" ? "backward" : "forward", event.key === "Home" || event.key === "End" ? "lineboundary" : "character");
+    }
+  }
+
+  const requestDeletion = useCallback((kind: PendingDeletion["kind"], annotationId: number): void => {
+    setDeletionError(null);
+    setPendingDeletion({ kind, annotationId });
+  }, []);
 
   const createSpan = useCallback(async (annotationType: AnnotationType, labelName: string): Promise<void> => {
     if (!activeWorkbench || !pendingSelection || !labelName) {
@@ -1807,6 +1831,7 @@ export default function AnnotatorWorkspace({
       setRelationSourceId(null);
       setRelationChoice(null);
       setRelationMenu(null);
+      setPendingDeletion(null);
     }, "Unable to delete annotation", taskId);
   }, [deleteAnnotationRecord, correctionLockedIds, relationLockedIds, removeWorkbenchAnnotations, runMutation, setError, spanById, tasksByType]);
 
@@ -1815,6 +1840,7 @@ export default function AnnotatorWorkspace({
       await deleteAnnotationRecord(annotationId);
       removeWorkbenchAnnotations([annotationId]);
       setRelationMenu(null);
+      setPendingDeletion(null);
       if (hoveredRelationId === annotationId) {
         setHoveredRelationId(null);
       }
@@ -1829,7 +1855,17 @@ export default function AnnotatorWorkspace({
     }, "Unable to update relation", activeRelationTask?.id ?? null);
   }
 
+  function canSwapRelationDirection(relation: Annotation): boolean {
+    const head = relation.head_annotation_id === null ? undefined : spanById.get(relation.head_annotation_id);
+    const tail = relation.tail_annotation_id === null ? undefined : spanById.get(relation.tail_annotation_id);
+    return Boolean(head && tail && relationLabelAllows(relationConstraints[relation.label], tail.label, head.label));
+  }
+
   async function swapRelationDirection(relation: Annotation): Promise<void> {
+    if (!canSwapRelationDirection(relation)) {
+      setError("The reversed relation does not satisfy this task's endpoint constraints.");
+      return;
+    }
     await runMutation(async () => {
       const updated = await updateAnnotationRecord(relation.id, {
         head_annotation_id: relation.tail_annotation_id,
@@ -2255,6 +2291,7 @@ export default function AnnotatorWorkspace({
         <span
           className={cx(
             "aw-entity",
+            !isTaskEditable(tasksByType.get(primary.annotation_type)?.id) && "read-only",
             covering.length > 1 && "stacked",
             covering.some((annotation) => selectedAnnotationId === annotation.id) && "selected",
             covering.some((annotation) => relationSourceId === annotation.id) && "relation-source",
@@ -2266,13 +2303,13 @@ export default function AnnotatorWorkspace({
           style={
             {
               "--aw-label-color": color,
-              backgroundColor: hexToRgba(color, 0.12),
+              backgroundColor: `color-mix(in srgb, ${color} 12%, transparent)`,
               borderBottomColor: color,
             } as React.CSSProperties
           }
-          role="button"
-          tabIndex={0}
-          aria-label={`${primary.label}: ${sliceDocumentText(start, end)}`}
+          role={isTaskEditable(tasksByType.get(primary.annotation_type)?.id) ? "button" : undefined}
+          tabIndex={isTaskEditable(tasksByType.get(primary.annotation_type)?.id) ? 0 : undefined}
+          aria-label={isTaskEditable(tasksByType.get(primary.annotation_type)?.id) ? `${primary.label}: ${sliceDocumentText(start, end)}` : undefined}
           onClick={(event) => handleSpanClick(primary.id, event)}
           onKeyDown={(event) => handleSpanKeyDown(primary.id, event)}
           onContextMenu={(event) => {
@@ -2363,11 +2400,9 @@ export default function AnnotatorWorkspace({
     const bump = (): void => setLayoutTick((tick) => tick + 1);
     const resizeObserver = new ResizeObserver(bump);
     resizeObserver.observe(container);
-    container.addEventListener("scroll", bump);
     window.addEventListener("resize", bump);
     return () => {
       resizeObserver.disconnect();
-      container.removeEventListener("scroll", bump);
       window.removeEventListener("resize", bump);
     };
   }, [activeTab, selectedDocumentId]);
@@ -2376,7 +2411,7 @@ export default function AnnotatorWorkspace({
     function onKeyDown(event: KeyboardEvent): void {
       if (
         busy || mutationInFlight.current || event.defaultPrevented || event.ctrlKey || event.metaKey ||
-        submissionDialogOpen || reopenDialogOpen || document.querySelector('[role="dialog"], dialog[open]')
+        submissionDialogOpen || reopenDialogOpen || document.querySelector('[role="dialog"], [role="alertdialog"], dialog[open]')
       ) {
         return;
       }
@@ -2477,7 +2512,7 @@ export default function AnnotatorWorkspace({
         selectedAnnotationId !== null
       ) {
         event.preventDefault();
-        void deleteSpan(selectedAnnotationId);
+        requestDeletion("span", selectedAnnotationId);
       }
     }
 
@@ -2498,7 +2533,7 @@ export default function AnnotatorWorkspace({
     changeView,
     createRelation,
     createSpan,
-    deleteSpan,
+    requestDeletion,
     displayLabelsForTask,
     isTaskEditable,
     pendingSelection,
@@ -2532,11 +2567,70 @@ export default function AnnotatorWorkspace({
       ? spanById.get(relationMenuAnnotation.tail_annotation_id)
       : undefined;
 
+  function dismissAnnotationMenu(): void {
+    setSpanMenu(null);
+    setRelationMenu(null);
+    setRelationChoice(null);
+    setSentenceMenu(null);
+  }
+
+  function handleAnnotationMenuKeyDown(event: ReactKeyboardEvent<HTMLElement>): void {
+    if (event.key === "Escape" || event.key === "Tab") {
+      if (event.key === "Escape") event.preventDefault();
+      event.stopPropagation();
+      dismissAnnotationMenu();
+      return;
+    }
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'));
+    const index = items.findIndex((item) => item === document.activeElement);
+    const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : (index + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+    event.preventDefault();
+    event.stopPropagation();
+    items[next]?.focus();
+  }
+
+  useLayoutEffect(() => {
+    if (!spanMenu && !relationMenu && !relationChoice && !sentenceMenu) return;
+    const trigger = document.activeElement;
+    const readingPane = readPaneRef.current;
+    const menu = document.querySelector<HTMLElement>('[data-annotation-menu]');
+    if (menu) {
+      const bounds = menu.getBoundingClientRect();
+      const deltaX = Math.max(8 - bounds.left, Math.min(0, window.innerWidth - 8 - bounds.right));
+      const deltaY = Math.max(8 - bounds.top, Math.min(0, window.innerHeight - 8 - bounds.bottom));
+      menu.style.left = `${Number.parseFloat(menu.style.left) + deltaX}px`;
+      menu.style.top = `${Number.parseFloat(menu.style.top) + deltaY}px`;
+    }
+    menu?.querySelector<HTMLElement>('button:not(:disabled)')?.focus();
+    return () => {
+      if (trigger instanceof HTMLElement && trigger.isConnected) trigger.focus();
+      else readingPane?.querySelector<HTMLElement>('.aw-sentence-body[tabindex]')?.focus();
+    };
+  }, [spanMenu, relationMenu, relationChoice, sentenceMenu]);
+
+  useLayoutEffect(() => {
+    if (!pendingSelection) return;
+    const picker = document.querySelector<HTMLElement>('[data-span-label-picker]');
+    if (!picker) return;
+    const bounds = picker.getBoundingClientRect();
+    const deltaX = Math.max(8 - bounds.left, Math.min(0, window.innerWidth - 8 - bounds.right));
+    const deltaY = Math.max(8 - bounds.top, Math.min(0, window.innerHeight - 8 - bounds.bottom));
+    picker.style.left = `${Number.parseFloat(picker.style.left) + deltaX}px`;
+    picker.style.top = `${Number.parseFloat(picker.style.top) + deltaY}px`;
+    const origin = selectionOriginRef.current;
+    return () => {
+      if (origin?.isConnected) origin.focus({ preventScroll: true });
+    };
+  }, [pendingSelection]);
+
   const activeDocLabel = docLabelAnnotations[0] ?? null;
   const relationLevels = assignArcLevels(arcs);
 
   return (
-    <div
+    <WorkspaceMain
+      id={annotationApi ? undefined : "main-content"}
+      tabIndex={-1}
       className="aw"
       data-density="balanced"
       data-view={activeTab}
@@ -2560,11 +2654,21 @@ export default function AnnotatorWorkspace({
             )}
           </nav>
         ) : (
-          <div className="aw-tabs" role="group" aria-label="Annotator views">
+          <div className="aw-tabs" role="tablist" aria-label="Annotator views" onKeyDown={(event) => {
+            if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+            event.preventDefault();
+            event.stopPropagation();
+            const view = event.key === "Home" ? "annotate" : event.key === "End" ? "progress" : activeTab === "annotate" ? "progress" : "annotate";
+            changeView(view);
+            document.getElementById(`aw-tab-${view}`)?.focus();
+          }}>
             <button
               className={cx("aw-tab", activeTab === "annotate" && "active")}
               id="aw-tab-annotate"
-              aria-pressed={activeTab === "annotate"}
+              role="tab"
+              aria-selected={activeTab === "annotate"}
+              aria-controls="aw-panel-annotate"
+              tabIndex={activeTab === "annotate" ? 0 : -1}
               type="button"
               onClick={() => changeView("annotate")}
             >
@@ -2574,11 +2678,14 @@ export default function AnnotatorWorkspace({
             <button
               className={cx("aw-tab", activeTab === "progress" && "active")}
               id="aw-tab-progress"
-              aria-pressed={activeTab === "progress"}
+              role="tab"
+              aria-selected={activeTab === "progress"}
+              aria-controls="aw-panel-progress"
+              tabIndex={activeTab === "progress" ? 0 : -1}
               type="button"
               onClick={() => changeView("progress")}
             >
-              My Progress
+              My Work
               <span className="aw-tab-badge">{documentBadge}</span>
               <kbd>2</kbd>
             </button>
@@ -2588,16 +2695,15 @@ export default function AnnotatorWorkspace({
         <div className="aw-context">
           {annotationApi ? <>
             <span className="aw-project-context">{selectedProject?.name}</span>
-            <span>Paper {Math.max(0, visibleDocuments.findIndex((document) => document.id === selectedDocumentId)) + 1} of {visibleDocuments.length}</span>
+            <span>Paper {visibleDocuments.length ? Math.max(0, visibleDocuments.findIndex((document) => document.id === selectedDocumentId)) + 1 : 0} of {visibleDocuments.length}</span>
           </> : <>
-          <select
+          <NativeSelect
             aria-label="Project"
             className="aw-project-select"
             value={selectedProjectId ?? ""}
             onChange={(event) => {
               const nextProjectId = Number(event.target.value);
               if (Number.isFinite(nextProjectId)) {
-                setSelectedProjectId(nextProjectId);
                 updateSearch(
                   {
                     project: nextProjectId,
@@ -2616,7 +2722,7 @@ export default function AnnotatorWorkspace({
                 {project.name}
               </option>
             ))}
-          </select>
+          </NativeSelect>
           {activeTab === "annotate" ? (
             <>
               <span>/</span>
@@ -2637,7 +2743,7 @@ export default function AnnotatorWorkspace({
             </>
           )}
           </>}
-          {annotationApi && selectedDocument ? <span className="aw-pmid">PMID {externalId(selectedDocument)}</span> : null}
+          {annotationApi && selectedDocument ? <span className="aw-pmid">{externalId(selectedDocument)}</span> : null}
           <span
             className={cx("aw-save-pill", saveStatus)}
             role="status"
@@ -2649,7 +2755,7 @@ export default function AnnotatorWorkspace({
               ? "Saving…"
               : saveStatus === "error"
                 ? "Save failed"
-                : annotationApi ? "Changes saved" : "Saved"}
+                : saveStatus === "idle" ? "No unsaved changes" : "Changes saved"}
           </span>
         </div>
 
@@ -2669,7 +2775,7 @@ export default function AnnotatorWorkspace({
               {currentDocumentAssignments.length > 0 ? (
                 <label className="aw-submit-control">
                   <span>{allowAssignmentlessSubmit ? "Task" : "Assignment"}</span>
-                  <select
+                  <NativeSelect
                     aria-label={allowAssignmentlessSubmit ? "Task" : "Assignment to submit"}
                     className="aw-submit-assignment"
                     value={submissionAssignmentId ?? ""}
@@ -2688,18 +2794,16 @@ export default function AnnotatorWorkspace({
                     {currentDocumentAssignments.map((assignment) => {
                       const task = tasks.find((item) => item.id === assignment.task_id);
                       const target = assignment.target_version_id
-                        ? ` · target v#${assignment.target_version_id}`
+                        ? ` · target ID ${assignment.target_version_id}`
                         : "";
-                      const status = allowAssignmentlessSubmit
-                        ? personalAssignmentStatusLabel(assignment.status)
-                        : assignment.status;
+                      const status = personalAssignmentStatusLabel(assignment.status);
                       return (
                         <option key={assignment.id} value={assignment.id}>
                           {task?.display_name ?? `Task #${assignment.task_id}`}{target} · {status}
                         </option>
                       );
                     })}
-                  </select>
+                  </NativeSelect>
                 </label>
               ) : null}
               {isPersonalReview ? (
@@ -2713,7 +2817,7 @@ export default function AnnotatorWorkspace({
                       onClick={() => setReopenDialogOpen(true)}
                       disabled={busy}
                     >
-                      Edit this paper task
+                      Reopen this paper task
                     </button>
                   ) : null}
                   {nextOpenTaskAssignment || nextPersonalDocument ? (
@@ -2721,7 +2825,7 @@ export default function AnnotatorWorkspace({
                       className="primary"
                       type="button"
                       onClick={openNextPersonalWork}
-                      disabled={busy}
+                      disabled={busy || saveStatus === "saving"}
                     >
                       {nextOpenTaskAssignment ? "Next task" : "Next document"}
                     </button>
@@ -2737,33 +2841,18 @@ export default function AnnotatorWorkspace({
                   }}
                   disabled={busy || !canSubmitCurrentDocument}
                 >
-                  {allowAssignmentlessSubmit
-                    ? "Submit task for this paper"
-                    : "Submit assignment"}
+                  Submit task for this paper
                 </button>
               )}
             </>
-          ) : !allowAssignmentlessSubmit ? (
-            <button
-              className="primary"
-              type="button"
-              onClick={() => {
-                if (selectedDocumentId !== null) {
-                  changeView("annotate");
-                }
-              }}
-              disabled={
-                allowAssignmentlessSubmit ? selectedDocumentId === null : selectedDocumentId === null || !selectedAnnotatorId
-              }
-            >
-              Resume
-            </button>
           ) : null}
         </div>
       </div>
       ) : null}
 
-      <WorkspaceMain id={annotationApi ? undefined : "main-content"} className="aw-main" tabIndex={-1}>
+      <div className="aw-main">
+      {workspaceNotice}
+      {!allowAssignmentlessSubmit ? <div hidden id={`aw-panel-${activeTab === "annotate" ? "progress" : "annotate"}`} role="tabpanel" aria-labelledby={`aw-tab-${activeTab === "annotate" ? "progress" : "annotate"}`} /> : null}
       {activeTab === "progress" ? (
           <div
             className="aw-progress"
@@ -2771,13 +2860,13 @@ export default function AnnotatorWorkspace({
               allowAssignmentlessSubmit ? "personal" : "team"
             }
             id={!allowAssignmentlessSubmit ? "aw-panel-progress" : undefined}
-            role={!allowAssignmentlessSubmit ? "region" : undefined}
+            role={!allowAssignmentlessSubmit ? "tabpanel" : undefined}
             aria-labelledby={!allowAssignmentlessSubmit ? "aw-tab-progress" : undefined}
           >
             <div className="aw-progress-wrap">
               <div className={cx("aw-progress-head", allowAssignmentlessSubmit && "personal")}>
                 <div>
-                  <h1>{allowAssignmentlessSubmit ? "My Work" : "My Progress"}</h1>
+                  <h1>My Work</h1>
                   {overviewControls ?? (
                   <p>
                     {allowAssignmentlessSubmit
@@ -2791,16 +2880,16 @@ export default function AnnotatorWorkspace({
                     selectedProject && (!annotationApi || canManageTasks) ? (
                       <a
                         className="aw-secondary-action"
-                        href={`/projects/${selectedProject.id}/${annotationApi ? "tasks" : "overview"}`}
+                        href={`/projects/${selectedProject.id}/tasks`}
                         onClick={(event) => {
                           if (!shouldHandleSpaClick(event)) {
                             return;
                           }
                           event.preventDefault();
-                          onOpenProjectTab?.(annotationApi ? "tasks" : "overview");
+                          onOpenProjectTab?.("tasks");
                         }}
                       >
-                        {annotationApi ? "Manage tasks" : "Project setup"}
+                        Manage tasks
                       </a>
                     ) : null
                   ) : null}
@@ -2815,9 +2904,9 @@ export default function AnnotatorWorkspace({
                       }
                     }}
                     disabled={
-                      allowAssignmentlessSubmit
+                      busy || saveStatus === "saving" || (allowAssignmentlessSubmit
                         ? personalHomeState === "ready" && nextOpenDocument === null
-                        : selectedDocumentId === null || !selectedAnnotatorId
+                        : selectedDocumentId === null || !selectedAnnotatorId)
                     }
                   >
                     {annotationApi && personalHomeState === "ready"
@@ -2880,9 +2969,9 @@ export default function AnnotatorWorkspace({
 
               {taskInventory}
 
-              {roundContexts.length ? (
+              {!taskInventory && roundContexts.some((context) => context.project.id === selectedProjectId) ? (
                 <ActiveRoundQueue
-                  contexts={roundContexts}
+                  contexts={roundContexts.filter((context) => context.project.id === selectedProjectId)}
                   onOpenRound={(roundId) => onOpenRound?.(roundId)}
                 />
               ) : null}
@@ -2890,8 +2979,8 @@ export default function AnnotatorWorkspace({
               <div className={cx("aw-progress-grid", annotationApi && "paper-progress-grid")}>
                 <section className="aw-panel aw-batch-panel">
                   <h2>
-                    {allowAssignmentlessSubmit ? "Document queue" : "Your batch"}{" "}
-                    <span>{visibleDocuments.length} documents</span>
+                    Document queue{" "}
+                    <span>{formatCount(visibleDocuments.length, "document")}</span>
                   </h2>
                   {!annotationApi ? <p>
                     {allowAssignmentlessSubmit
@@ -2920,11 +3009,7 @@ export default function AnnotatorWorkspace({
                     (status) => (
                       <span key={status}>
                         <i className={status} />
-                        {allowAssignmentlessSubmit
-                          ? personalDocumentStatusLabel(status)
-                          : status === "partial"
-                            ? "In progress"
-                            : status}
+                        {personalDocumentStatusLabel(status)}
                         <b>{progressCounts[status]}</b>
                       </span>
                     ),
@@ -2969,7 +3054,7 @@ export default function AnnotatorWorkspace({
                                 if (!assignment) return null;
                                 const submitted = DONE_STATUSES.has(assignment.status);
                                 return <span key={task.id} data-status={submitted ? "submitted" : assignment.status === "in_progress" ? "draft" : "todo"}>
-                                  {task.display_name}: {submitted ? "Submitted" : assignment.status === "in_progress" ? "Draft" : "To do"}
+                                  {task.display_name}: {personalAssignmentStatusLabel(assignment.status)}
                                 </span>;
                               })}</span> : null}
                             </span>
@@ -2980,7 +3065,8 @@ export default function AnnotatorWorkspace({
                                   ? "No assignments"
                                   : `${docAssignments.length} assignment${docAssignments.length === 1 ? "" : "s"}`}
                             </span>
-                            <span className={cx("aw-status-dot", status)} />
+                            <span className={cx("aw-mini-status", status)}>{personalDocumentStatusLabel(status)}</span>
+                            <span className={cx("aw-status-dot", status)} aria-hidden="true" />
                           </button>
                         );
                       })
@@ -3033,7 +3119,7 @@ export default function AnnotatorWorkspace({
         <div
           className="aw-workspace"
           id={!allowAssignmentlessSubmit ? "aw-panel-annotate" : undefined}
-          role={!allowAssignmentlessSubmit ? "region" : undefined}
+          role={!allowAssignmentlessSubmit ? "tabpanel" : undefined}
           aria-labelledby={!allowAssignmentlessSubmit ? "aw-tab-annotate" : undefined}
         >
           <div className="aw-workspace-heading">
@@ -3105,13 +3191,14 @@ export default function AnnotatorWorkspace({
                   >
                     <span>{String(index + 1).padStart(2, "0")}</span>
                     <strong>{documentTitle(documentItem)}</strong>
+                    <span className={cx("aw-mini-status", status)}>{personalDocumentStatusLabel(status)}</span>
                     <i className={cx("aw-status-dot", status)} aria-hidden="true" />
                   </button>
                 );
               })}
             </div>
             {!annotationApi ? <button className="aw-queue-manage" type="button" onClick={() => changeView("progress")}>
-              {allowAssignmentlessSubmit ? "View My Work queue" : "Manage queue in My Progress"}
+              View My Work queue
             </button> : null}
           </aside>
           ) : null}
@@ -3142,7 +3229,7 @@ export default function AnnotatorWorkspace({
                 onClick={() => chooseAnnotationTool("legacy")}
               >
                 <span>Spans &amp; relations</span>
-                {annotationTool === "legacy" ? <b>ON</b> : null}
+                {annotationTool === "legacy" ? <b>Selected</b> : null}
               </button>
               <button
                 className={cx("aw-label-row", annotationTool === "evidence" && "active")}
@@ -3152,13 +3239,13 @@ export default function AnnotatorWorkspace({
                 disabled={!evidenceTask}
               >
                 <span>Evidence blocks</span>
-                {annotationTool === "evidence" ? <b>ON</b> : null}
+                {annotationTool === "evidence" ? <b>Selected</b> : null}
               </button>
             </section> : null}
             {tasks.length === 0 ? <p className="aw-empty">No enabled annotation tasks.</p> : null}
             {tasks.map((task) => {
               const labels = displayLabelsForTask(task);
-              const heading = task.display_name || displayStatus(task.annotation_type);
+              const heading = task.display_name || formatStatus(task.annotation_type);
               if (task.annotation_type_spec.requires_head_tail) {
                 return (
                   <section className="aw-label-group" key={task.id}>
@@ -3204,7 +3291,7 @@ export default function AnnotatorWorkspace({
                       >
                         <i style={{ backgroundColor: labelColor(label, index) }} />
                         <span>{label.name}</span>
-                        {activeDocLabel?.label === label.name ? <b>OK</b> : <kbd>Alt {index + 1}</kbd>}
+                        {activeDocLabel?.label === label.name ? <b>Selected</b> : <kbd>Alt {index + 1}</kbd>}
                       </button>
                     ))}
                   </section>
@@ -3269,7 +3356,7 @@ export default function AnnotatorWorkspace({
                     {!strictLabelsOnly ? (
                       <label className="aw-custom-label">
                         <span>+ Custom label</span>
-                        <input
+                        <NativeInput
                           value={activeSpanTask?.annotation_type === task.annotation_type ? customLabel : ""}
                           onChange={(event) => {
                             setActiveSpanType(task.annotation_type);
@@ -3326,12 +3413,12 @@ export default function AnnotatorWorkspace({
                 <strong>
                   {allowAssignmentlessSubmit
                     ? isRecentlyFinishedReview
-                      ? "Paper task submitted"
+                      ? "Submitted"
                       : selectedSubmissionAssignment
                         ? personalAssignmentStatusLabel(selectedSubmissionAssignment.status)
                         : "Review mode"
                     : selectedSubmissionAssignment
-                      ? `${selectedSubmissionAssignment.status} annotation round`
+                      ? `${personalAssignmentStatusLabel(selectedSubmissionAssignment.status)} annotation round`
                       : "No open annotation round"}
                 </strong>
                 <span>
@@ -3343,6 +3430,7 @@ export default function AnnotatorWorkspace({
                 </span>
               </header>
             ) : null}
+            <p className="sr-only" id="aw-keyboard-selection-help">Focus a sentence and use Shift with the arrow keys to select text. Press Enter to choose a span label.</p>
             <div
               className={cx(
                 "aw-reading",
@@ -3351,6 +3439,9 @@ export default function AnnotatorWorkspace({
               )}
               ref={readPaneRef}
               onMouseUp={handleSelection}
+              onKeyUp={(event) => {
+                if (event.shiftKey || event.key === "Shift") handleSelection();
+              }}
               onClick={() => {
                 if (relationSourceId === null) {
                   setSelectedAnnotationId(null);
@@ -3368,7 +3459,7 @@ export default function AnnotatorWorkspace({
                       selectedAnnotationId === arc.fromId ||
                       selectedAnnotationId === arc.toId;
                     const middleX = (arc.ax + arc.bx) / 2;
-                    const label = arc.label.toUpperCase();
+                    const label = arc.label;
                     const pillWidth = label.length * 6.5 + 18;
                     return (
                       <g
@@ -3379,6 +3470,8 @@ export default function AnnotatorWorkspace({
                         }
                         tabIndex={isTaskEditable(activeRelationTask?.id) ? 0 : undefined}
                         aria-label={`Relation ${arc.label}`}
+                        onFocus={() => setHoveredRelationId(arc.id)}
+                        onBlur={() => setHoveredRelationId(null)}
                         onMouseEnter={() => setHoveredRelationId(arc.id)}
                         onMouseLeave={() => setHoveredRelationId(null)}
                         onClick={(event) => {
@@ -3454,6 +3547,7 @@ export default function AnnotatorWorkspace({
                                 y: event.clientY,
                               });
                             }}
+                            aria-label={`${sentenceLabel ? "Change" : "Add"} label for sentence ${range.index + 1}${sentenceLabel ? `, ${sentenceLabel.label}` : ""}`}
                             disabled={!isTaskEditable(sentenceTask?.id)}
                           >
                             {sentenceLabel ? (
@@ -3471,7 +3565,7 @@ export default function AnnotatorWorkspace({
                           </button>
                         ) : null}
                       </div>
-                      <div className="aw-sentence-body" data-sentence-index={range.index}>
+                      <div className="aw-sentence-body" role="group" data-sentence-index={range.index} tabIndex={isTaskEditable(activeSpanTask?.id) ? 0 : undefined} aria-label={`Sentence ${range.index + 1}`} aria-describedby="aw-keyboard-selection-help" onKeyDown={handleTextSelectionKeyDown}>
                         {renderSectionText(range)}
                       </div>
                     </section>
@@ -3555,6 +3649,7 @@ export default function AnnotatorWorkspace({
               ))}
             </div>
 
+            {INSPECTOR_TABS.filter((tab) => tab !== inspectorTab).map((tab) => <div key={tab} hidden id={`aw-inspector-panel-${tab}`} role="tabpanel" aria-labelledby={`aw-inspector-tab-${tab}`} />)}
             {inspectorTab === "annotations" ? (
               <div
                 className="aw-inspector-list"
@@ -3613,7 +3708,7 @@ export default function AnnotatorWorkspace({
                       </div>
                       <p>{spanText(annotation)}</p>
                       <small>
-                        {displayStatus(annotation.annotation_type)} - {annotation.status}
+                        {formatStatus(annotation.annotation_type)} · {annotation.status === "draft" ? "In progress" : formatStatus(annotation.status)}
                         {correctionLockedIds.has(annotation.id) ? " - correction locked" : ""}
                         {relationLockedIds.has(annotation.id) ? " - relation target" : ""}
                       </small>
@@ -3664,19 +3759,18 @@ export default function AnnotatorWorkspace({
                           <b>{relation.label}</b>
                           <span>{tail ? spanText(tail) : "Missing tail"}</span>
                         </button>
-                        <button
-                          type="button"
+                        <IconButton
                           className="aw-relation-delete"
-                          aria-label={`Delete relation ${relation.label}`}
-                          title={`Delete relation ${relation.label}`}
+                          label={`Delete relation ${relation.label}`}
+                          tooltip={`Delete relation ${relation.label}`}
+                          icon={<Trash2 size={15} aria-hidden="true" />}
+                          variant="ghost"
                           onClick={(event) => {
                             event.stopPropagation();
-                            void deleteRelation(relation.id);
+                            requestDeletion("relation", relation.id);
                           }}
-                          disabled={!isTaskEditable(activeRelationTask?.id)}
-                        >
-                          <Trash2 size={15} aria-hidden="true" />
-                        </button>
+                          isDisabled={!isTaskEditable(activeRelationTask?.id)}
+                        />
                       </article>
                     );
                   })
@@ -3722,7 +3816,7 @@ export default function AnnotatorWorkspace({
           ) : null}
 
           {isTaskEditable(activeSpanTask?.id) && pendingSelection ? (
-            <div className="aw-popover" style={{ left: pendingSelection.left, top: pendingSelection.top - 12 }}>
+            <div className="aw-popover" data-span-label-picker role="group" aria-label="Choose a span label" style={{ left: Math.max(8, Math.min(pendingSelection.left, window.innerWidth - 320)), top: Math.max(8, pendingSelection.top - 12) }}>
               <span>"{pendingSelection.text.length > 24 ? `${pendingSelection.text.slice(0, 24)}...` : pendingSelection.text}"</span>
               {activeSpanLabels.map((label, index) => (
                 <button
@@ -3746,11 +3840,15 @@ export default function AnnotatorWorkspace({
 
           {isTaskEditable(spanMenuTask?.id) && spanMenu && currentSpanMenuAnnotation && spanMenuTask ? (
             <>
-              <button className="aw-menu-backdrop" type="button" onClick={() => setSpanMenu(null)} aria-label="Close menu" />
+              <button className="aw-menu-backdrop" type="button" tabIndex={-1} aria-hidden="true" onClick={() => setSpanMenu(null)} aria-label="Close menu" />
               <div
                 className="aw-context-menu"
+                data-annotation-menu
+                role="menu"
+                aria-label="Annotation actions"
+                onKeyDown={handleAnnotationMenuKeyDown}
                 style={{
-                  left: Math.min(spanMenu.x, window.innerWidth - 250),
+                  left: Math.max(8, Math.min(spanMenu.x, window.innerWidth - 290)),
                   top: Math.min(spanMenu.y, window.innerHeight - 360),
                 }}
               >
@@ -3760,7 +3858,7 @@ export default function AnnotatorWorkspace({
                 </header>
                 <span className="aw-menu-heading">Change label</span>
                 {displayLabelsForTask(spanMenuTask).map((label, index) => (
-                  <button
+                  <button role="menuitem"
                     className={cx(currentSpanMenuAnnotation.label === label.name && "current")}
                     key={label.name}
                     type="button"
@@ -3769,11 +3867,11 @@ export default function AnnotatorWorkspace({
                   >
                     <i style={{ backgroundColor: labelColor(label, index) }} />
                     {label.name}
-                    {currentSpanMenuAnnotation.label === label.name ? <b>OK</b> : <kbd>{hotkeyForLabel(label.name, index)}</kbd>}
+                    {currentSpanMenuAnnotation.label === label.name ? <b>Selected</b> : <kbd>{hotkeyForLabel(label.name, index)}</kbd>}
                   </button>
                 ))}
                 <hr />
-                <button
+                <button role="menuitem"
                   type="button"
                   onClick={() => {
                     setRelationSourceId(currentSpanMenuAnnotation.id);
@@ -3783,10 +3881,10 @@ export default function AnnotatorWorkspace({
                 >
                   Start relation from here
                 </button>
-                <button
+                <button role="menuitem"
                   className="danger"
                   type="button"
-                  onClick={() => void deleteSpan(currentSpanMenuAnnotation.id)}
+                  onClick={() => requestDeletion("span", currentSpanMenuAnnotation.id)}
                   disabled={
                     correctionLockedIds.has(currentSpanMenuAnnotation.id) ||
                     relationLockedIds.has(currentSpanMenuAnnotation.id)
@@ -3803,6 +3901,8 @@ export default function AnnotatorWorkspace({
               <button
                 className="aw-menu-backdrop"
                 type="button"
+                tabIndex={-1}
+                aria-hidden="true"
                 onClick={() => {
                   setRelationChoice(null);
                   setRelationSourceId(null);
@@ -3811,8 +3911,12 @@ export default function AnnotatorWorkspace({
               />
               <div
                 className="aw-popover relation"
+                data-annotation-menu
+                role="menu"
+                aria-label="Relation labels"
+                onKeyDown={handleAnnotationMenuKeyDown}
                 style={{
-                  left: Math.min(relationChoice.x, window.innerWidth - 230),
+                  left: Math.min(relationChoice.x, window.innerWidth - 320),
                   top: relationChoice.y + 14,
                 }}
               >
@@ -3824,7 +3928,7 @@ export default function AnnotatorWorkspace({
                   </p>
                 ) : null}
                 {relationChoiceLabels.map((label, index) => (
-                  <button key={label.name} type="button" onClick={() => void createRelation(label.name)}>
+                  <button role="menuitem" key={label.name} type="button" onClick={() => void createRelation(label.name)}>
                     <i style={{ backgroundColor: labelColor(label, index) }} />
                     {label.name}
                     <kbd>{hotkeyForLabel(label.name, index)}</kbd>
@@ -3839,13 +3943,19 @@ export default function AnnotatorWorkspace({
               <button
                 className="aw-menu-backdrop"
                 type="button"
+                tabIndex={-1}
+                aria-hidden="true"
                 onClick={() => setRelationMenu(null)}
                 aria-label="Close relation menu"
               />
               <div
                 className="aw-context-menu"
+                data-annotation-menu
+                role="menu"
+                aria-label="Annotation actions"
+                onKeyDown={handleAnnotationMenuKeyDown}
                 style={{
-                  left: Math.min(relationMenu.x, window.innerWidth - 250),
+                  left: Math.max(8, Math.min(relationMenu.x, window.innerWidth - 290)),
                   top: Math.min(relationMenu.y, window.innerHeight - 360),
                 }}
               >
@@ -3866,7 +3976,7 @@ export default function AnnotatorWorkspace({
                     )
                   : displayLabelsForTask(activeRelationTask)
                 ).map((label, index) => (
-                  <button
+                  <button role="menuitem"
                     className={cx(relationMenuAnnotation.label === label.name && "current")}
                     key={label.name}
                     type="button"
@@ -3876,20 +3986,20 @@ export default function AnnotatorWorkspace({
                     <i style={{ backgroundColor: labelColor(label, index) }} />
                     {label.name}
                     {relationMenuAnnotation.label === label.name ? (
-                      <b>OK</b>
+                      <b>Selected</b>
                     ) : (
                       <kbd>{hotkeyForLabel(label.name, index)}</kbd>
                     )}
                   </button>
                 ))}
                 <hr />
-                <button type="button" onClick={() => void swapRelationDirection(relationMenuAnnotation)}>
+                <button role="menuitem" type="button" disabled={busy || saveStatus === "saving" || !canSwapRelationDirection(relationMenuAnnotation)} onClick={() => void swapRelationDirection(relationMenuAnnotation)}>
                   Swap direction
                 </button>
-                <button
+                <button role="menuitem"
                   className="danger"
                   type="button"
-                  onClick={() => void deleteRelation(relationMenuAnnotation.id)}
+                  onClick={() => requestDeletion("relation", relationMenuAnnotation.id)}
                 >
                   Delete relation
                 </button>
@@ -3902,11 +4012,17 @@ export default function AnnotatorWorkspace({
               <button
                 className="aw-menu-backdrop"
                 type="button"
+                tabIndex={-1}
+                aria-hidden="true"
                 onClick={() => setSentenceMenu(null)}
                 aria-label="Close sentence menu"
               />
               <div
                 className="aw-context-menu"
+                data-annotation-menu
+                role="menu"
+                aria-label="Sentence labels"
+                onKeyDown={handleAnnotationMenuKeyDown}
                 style={{
                   left: Math.min(sentenceMenu.x, window.innerWidth - 240),
                   top: Math.min(sentenceMenu.y, window.innerHeight - 280),
@@ -3916,7 +4032,7 @@ export default function AnnotatorWorkspace({
                 {displayLabelsForTask(sentenceTask).map((label, index) => {
                   const current = sentenceAnnotation(sentenceMenuRange)?.label === label.name;
                   return (
-                    <button
+                    <button role="menuitem"
                       className={cx(current && "current")}
                       key={label.name}
                       type="button"
@@ -3925,12 +4041,12 @@ export default function AnnotatorWorkspace({
                     >
                       <i style={{ backgroundColor: labelColor(label, index) }} />
                       {label.name}
-                      {current ? <b>OK</b> : <kbd>{index + 1}</kbd>}
+                      {current ? <b>Selected</b> : <kbd>{index + 1}</kbd>}
                     </button>
                   );
                 })}
                 <hr />
-                <button type="button" disabled={busy || saveStatus === "saving"} onClick={() => void setSentenceLabel(sentenceMenuRange, null)}>
+                <button role="menuitem" type="button" disabled={busy || saveStatus === "saving"} onClick={() => void setSentenceLabel(sentenceMenuRange, null)}>
                   Clear label
                 </button>
               </div>
@@ -3939,7 +4055,22 @@ export default function AnnotatorWorkspace({
           </div>
         </div>
       )}
-      </WorkspaceMain>
+      </div>
+
+      <ConfirmDialog
+        open={pendingDeletion !== null}
+        title={pendingDeletion?.kind === "relation" ? "Delete relation?" : "Delete annotation?"}
+        description="This permanently deletes the selected annotation. This action cannot be undone."
+        confirmLabel={pendingDeletion?.kind === "relation" ? "Delete relation" : "Delete annotation"}
+        busy={busy || saveStatus === "saving"}
+        error={deletionError}
+        onCancel={() => setPendingDeletion(null)}
+        onConfirm={async () => {
+          if (!pendingDeletion) return;
+          if (pendingDeletion.kind === "span") await deleteSpan(pendingDeletion.annotationId);
+          else await deleteRelation(pendingDeletion.annotationId);
+        }}
+      />
 
       {submissionDialogOpen &&
       selectedDocument &&
@@ -3992,7 +4123,7 @@ export default function AnnotatorWorkspace({
                 paper task read-only until you reopen it.
               </p>
               <label>
-                <input
+                <NativeInput
                   type="checkbox"
                   checked={blankSubmissionAcknowledged}
                   onChange={(event) =>
@@ -4089,6 +4220,6 @@ export default function AnnotatorWorkspace({
           </div>
         </DialogFrame>
       ) : null}
-    </div>
+    </WorkspaceMain>
   );
 }

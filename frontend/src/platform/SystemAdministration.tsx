@@ -1,3 +1,7 @@
+import { workspaceRoleLabel } from "@/lib/workspacePresentation";
+import { NativeInput, NativeSelect } from "@/components/NativeField";
+import ValidatedForm from "@/components/ValidatedForm";
+import LoadingState from "@/components/LoadingState";
 import {
   useCallback,
   useEffect,
@@ -47,6 +51,8 @@ import {
   PlatformPageHeader,
   PlatformSection,
   PlatformStatus,
+  formatCount,
+  formatDateTime,
 } from "./components";
 
 const PAGE_SIZE = 20;
@@ -67,16 +73,6 @@ type AdminSectionId = (typeof SECTIONS)[number]["id"];
 
 function messageFrom(caught: unknown, fallback: string): string {
   return caught instanceof Error ? caught.message : fallback;
-}
-
-function formatDate(value: string | null | undefined): string {
-  if (!value) return "Never";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(date);
 }
 
 function absoluteActionUrl(value: string): string {
@@ -107,10 +103,10 @@ function ActionLinkCard({ link }: { link: AccountActionLink }): ReactElement {
     <div className="system-admin-action-link" aria-live="polite">
       <div>
         <strong>{label}</strong>
-        <span>Expires {formatDate(link.expires_at)}</span>
+        <span>Expires {formatDateTime(link.expires_at, "Never")}</span>
       </div>
       <div className="system-admin-copy-row">
-        <input aria-label={label} readOnly value={actionUrl} onFocus={(event) => event.currentTarget.select()} />
+        <NativeInput aria-label={label} readOnly value={actionUrl} onFocus={(event) => event.currentTarget.select()} />
         <Button
           label={`Copy ${label.toLowerCase()}`}
           icon={<Copy size={16} />}
@@ -198,7 +194,7 @@ function CreateUserDialog({
           <h2 id={titleId}>Create inactive account</h2>
         </div>
         <Button
-          label="Close"
+          label="Close" tooltip="Close"
           icon={<X size={17} />}
           isIconOnly
           variant="ghost"
@@ -219,13 +215,13 @@ function CreateUserDialog({
           </div>
         </div>
       ) : (
-        <form className="platform-dialog-form" onSubmit={(event) => void submit(event)}>
+        <ValidatedForm className="platform-dialog-form" onSubmit={(event) => void submit(event)}>
           <p className="platform-form-note">
             The account starts inactive. Share the generated link out of band so the user can set a password.
           </p>
           <label>
             Username
-            <input
+            <NativeInput
               name="username"
               value={username}
               autoComplete="off"
@@ -238,7 +234,7 @@ function CreateUserDialog({
           </label>
           <label>
             Display name
-            <input
+            <NativeInput
               name="displayName"
               value={displayNameValue}
               autoComplete="off"
@@ -248,7 +244,7 @@ function CreateUserDialog({
           </label>
           <label>
             Email
-            <input
+            <NativeInput
               name="email"
               type="email"
               value={email}
@@ -267,7 +263,7 @@ function CreateUserDialog({
               isLoading={busy}
             />
           </div>
-        </form>
+        </ValidatedForm>
       )}
     </DialogFrame>
   );
@@ -370,7 +366,7 @@ function UserDetailDialog({
             <h2 id={titleId}>{user ? displayName(user) : "User details"}</h2>
           </div>
           <Button
-            label="Close"
+            label="Close" tooltip="Close"
             icon={<X size={17} />}
             isIconOnly
             variant="ghost"
@@ -379,7 +375,7 @@ function UserDetailDialog({
           />
         </header>
         <div className="system-admin-user-detail">
-          {loading ? <p role="status">Loading account…</p> : null}
+          {loading ? <LoadingState label="Loading account…" /> : null}
           {error ? (
             <Banner
               status="error"
@@ -395,10 +391,10 @@ function UserDetailDialog({
                   <span>{user.email ?? "No email address"}</span>
                 </div>
                 <PlatformStatus value={user.is_active ? "active" : "inactive"} />
-                {user.is_superuser ? <PlatformStatus value="superuser" /> : null}
+                {user.is_superuser ? <span>Superuser</span> : null}
               </div>
               <dl className="system-admin-detail-list">
-                <div><dt>Last login</dt><dd>{formatDate(user.last_login_at)}</dd></div>
+                <div><dt>Last login</dt><dd>{formatDateTime(user.last_login_at, "Never")}</dd></div>
                 <div><dt>Memberships</dt><dd>{user.membership_count}</dd></div>
               </dl>
               <section className="system-admin-memberships" aria-labelledby={`${titleId}-memberships`}>
@@ -415,7 +411,7 @@ function UserDetailDialog({
                               <span>ID {membership.workspace_id}</span>
                             </td>
                             <td data-label="Type">{membership.workspace_kind === "individual" ? "Individual" : "Team"}</td>
-                            <td data-label="Role"><PlatformStatus value={membership.role} /></td>
+                            <td data-label="Role"><span>{workspaceRoleLabel(membership.role)}</span></td>
                           </tr>
                         ))}
                       </tbody>
@@ -528,7 +524,7 @@ function UsersAdministration(): ReactElement {
 
   function updateListedUser(updated: AdminUserDetail): void {
     setStatus(`${displayName(updated)} is now ${updated.is_active ? "active" : "inactive"}.`);
-    setQuery((current) => ({ ...current, page: 1 }));
+    setRefreshVersion((value) => value + 1);
   }
 
   const currentPage = page?.page ?? query.page ?? 1;
@@ -548,10 +544,10 @@ function UsersAdministration(): ReactElement {
           />
         }
       >
-        <form className="system-admin-user-filters" aria-label="Filter users" onSubmit={applyFilters}>
+        <ValidatedForm className="system-admin-user-filters" aria-label="Filter users" onSubmit={applyFilters}>
           <label>
             Search
-            <input
+            <NativeInput
               type="search"
               value={search}
               placeholder="Username, name, or email"
@@ -560,18 +556,18 @@ function UsersAdministration(): ReactElement {
           </label>
           <label>
             Account status
-            <select
+            <NativeSelect
               value={statusFilter}
               onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}
             >
               <option value="all">All accounts</option>
               <option value="active">Active</option>
               <option value="inactive">Inactive</option>
-            </select>
+            </NativeSelect>
           </label>
           <label>
             Workspace ID
-            <input
+            <NativeInput
               type="number"
               min={1}
               step={1}
@@ -584,7 +580,7 @@ function UsersAdministration(): ReactElement {
           <div className="system-admin-filter-actions">
             <Button label="Apply filters" type="submit" variant="primary" isDisabled={loading} />
             <Button
-              label="Refresh users"
+              label="Refresh users" tooltip="Refresh users"
               icon={<RefreshCw size={16} />}
               isIconOnly
               variant="ghost"
@@ -592,10 +588,10 @@ function UsersAdministration(): ReactElement {
               onClick={() => setRefreshVersion((value) => value + 1)}
             />
           </div>
-        </form>
+        </ValidatedForm>
         {error ? <Banner status="error" title="Users unavailable" description={error} /> : null}
         {status ? <p className="platform-form-success" role="status">{status}</p> : null}
-        {loading && !page ? <p role="status">Loading users…</p> : null}
+        {loading && !page ? <LoadingState label="Loading users…" /> : null}
         {page && page.items.length ? (
           <>
             <div className="platform-table-scroll" tabIndex={0} aria-label="Deployment users">
@@ -622,7 +618,7 @@ function UsersAdministration(): ReactElement {
                       </td>
                       <td data-label="Access">{user.is_superuser ? "Superuser" : "Standard user"}</td>
                       <td data-label="Workspaces">{user.membership_count}</td>
-                      <td data-label="Last login">{formatDate(user.last_login_at)}</td>
+                      <td data-label="Last login">{formatDateTime(user.last_login_at, "Never")}</td>
                       <td data-label="Actions" data-priority="action">
                         <Button
                           label={`View ${displayName(user)}`}
@@ -710,7 +706,7 @@ function InstanceSettingsAdministration(): ReactElement {
 
   async function save(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
-    if (!settings) return;
+    if (!settings || loading || saving) return;
     if (
       !Number.isInteger(settings.default_invite_expiry_minutes) ||
       settings.default_invite_expiry_minutes < INVITE_EXPIRY_MIN ||
@@ -751,7 +747,7 @@ function InstanceSettingsAdministration(): ReactElement {
       description="Set deployment-wide account policy. Infrastructure details are shown for reference and remain environment-managed."
       action={
         <Button
-          label="Refresh settings"
+          label="Refresh settings" tooltip="Refresh settings"
           icon={<RefreshCw size={16} />}
           isIconOnly
           variant="ghost"
@@ -761,19 +757,19 @@ function InstanceSettingsAdministration(): ReactElement {
       }
     >
       {error ? <Banner status="error" title="Instance settings unavailable" description={error} /> : null}
-      {loading && !settings ? <p role="status">Loading instance settings…</p> : null}
+      {loading && !settings ? <LoadingState label="Loading instance settings…" /> : null}
       {settings ? (
         <div className="system-admin-settings-layout">
-          <form
+          <ValidatedForm
             className="platform-settings-form system-admin-policy-form"
             noValidate
             onSubmit={(event) => void save(event)}
           >
             <label className="system-admin-checkbox-row">
-              <input
+              <NativeInput
                 type="checkbox"
                 checked={settings.allow_self_registration}
-                disabled={saving}
+                disabled={loading || saving}
                 onChange={(event) => {
                   setStatus(null);
                   setSettings({ ...settings, allow_self_registration: event.target.checked });
@@ -786,13 +782,13 @@ function InstanceSettingsAdministration(): ReactElement {
             </label>
             <label>
               Default invitation expiry (minutes)
-              <input
+              <NativeInput
                 type="number"
                 min={INVITE_EXPIRY_MIN}
                 max={INVITE_EXPIRY_MAX}
                 step={1}
                 value={settings.default_invite_expiry_minutes}
-                disabled={saving}
+                disabled={loading || saving}
                 aria-describedby="default-invite-expiry-help"
                 onChange={(event) => {
                   setStatus(null);
@@ -803,13 +799,13 @@ function InstanceSettingsAdministration(): ReactElement {
             </label>
             <label>
               Account-link expiry (minutes)
-              <input
+              <NativeInput
                 type="number"
                 min={ACTION_EXPIRY_MIN}
                 max={ACTION_EXPIRY_MAX}
                 step={1}
                 value={settings.account_action_expiry_minutes}
-                disabled={saving}
+                disabled={loading || saving}
                 aria-describedby="account-action-expiry-help"
                 onChange={(event) => {
                   setStatus(null);
@@ -823,12 +819,12 @@ function InstanceSettingsAdministration(): ReactElement {
                 label={saving ? "Saving…" : "Save policy"}
                 type="submit"
                 variant="primary"
-                isDisabled={saving}
+                isDisabled={loading || saving}
                 isLoading={saving}
               />
               {status ? <span role="status">{status}</span> : null}
             </div>
-          </form>
+          </ValidatedForm>
           <section className="system-admin-runtime" aria-labelledby="system-admin-runtime-heading">
             <h3 id="system-admin-runtime-heading">Runtime summary</h3>
             <p>Read-only deployment information. Secrets, credentials, URLs, and storage endpoints are never exposed here.</p>
@@ -837,7 +833,7 @@ function InstanceSettingsAdministration(): ReactElement {
               <div><dt>Storage backend</dt><dd>{settings.storage_backend}</dd></div>
               <div><dt>Storage encryption</dt><dd>{settings.storage_encryption}</dd></div>
               <div><dt>Task execution</dt><dd>{settings.task_execution}</dd></div>
-              <div><dt>JWT lifetime</dt><dd>{settings.jwt_lifetime_minutes} minutes</dd></div>
+              <div><dt>JWT lifetime</dt><dd>{formatCount(settings.jwt_lifetime_minutes, "minute")}</dd></div>
             </dl>
           </section>
         </div>

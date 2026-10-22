@@ -58,7 +58,7 @@ export function usePlatformProject(
     contextKey: string;
     data: PlatformProjectData;
   } | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [loadState, setLoadState] = useState<{ contextKey: string; loading: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const [loadError, setError] = useState<{
     contextKey: string;
@@ -70,6 +70,8 @@ export function usePlatformProject(
   const roundCreation = useRef<{ contextKey: string; requestKey: string; roundId: number } | null>(null);
   const rolesKey = effectiveRoles?.join(",") ?? "";
   const contextKey = `${enabled}:${workspaceId ?? "none"}:${projectId ?? "none"}:${scope}:${rolesKey}`;
+  const loading = enabled && projectId !== null && workspaceId !== null &&
+    (loadState?.contextKey !== contextKey || loadState.loading);
   const contextKeyRef = useRef(contextKey);
   contextKeyRef.current = contextKey;
   const effectiveRolesRef = useRef(effectiveRoles);
@@ -89,12 +91,12 @@ export function usePlatformProject(
     if (!enabled || projectId === null || workspaceId === null) {
       if (isCurrentRequest()) {
         setLoadedData(null);
-        setLoading(false);
+        setLoadState({ contextKey, loading: false });
         setError(null);
       }
       return;
     }
-    setLoading(true);
+    setLoadState({ contextKey, loading: true });
     setError(null);
     try {
       const projectData = await loadPlatformProject(
@@ -115,7 +117,7 @@ export function usePlatformProject(
       }
     } finally {
       if (isCurrentRequest()) {
-        setLoading(false);
+        setLoadState({ contextKey, loading: false });
       }
     }
   }, [contextKey, enabled, projectId, scope, workspaceId]);
@@ -131,7 +133,7 @@ export function usePlatformProject(
   const mutate = useCallback(
     async (operation: (activeProjectId: number) => Promise<unknown>): Promise<void> => {
       if (projectId === null) throw new Error("Select a project first.");
-      if (contextKeyRef.current !== contextKey) return;
+      if (contextKeyRef.current !== contextKey) throw new Error("The active project changed. Review the current project before trying again.");
       const requestId = ++mutationRequestIdRef.current;
       const isCurrentRequest = (): boolean =>
         requestId === mutationRequestIdRef.current &&
@@ -140,9 +142,11 @@ export function usePlatformProject(
       setError(null);
       try {
         await operation(projectId);
+        if (contextKey !== contextKeyRef.current) throw new Error("The active project changed while saving. The update may have been saved in the previous project. Review it before trying again.");
         if (isCurrentRequest()) {
           await reload();
         }
+        if (contextKey !== contextKeyRef.current) throw new Error("The active project changed while refreshing. Review the previous project before trying again.");
       } catch (caught) {
         const message =
           caught instanceof Error ? caught.message : "The project update could not be completed.";
@@ -173,9 +177,11 @@ export function usePlatformProject(
       setError(null);
       try {
         const configuration = await updateProjectModules(projectId, selected);
+        if (contextKey !== contextKeyRef.current) throw new Error("The active project changed while saving. Review the previous project's modules before trying again.");
         if (isCurrentRequest()) {
           await reload();
         }
+        if (contextKey !== contextKeyRef.current) throw new Error("The active project changed while refreshing. Review the previous project's modules before trying again.");
         return configuration;
       } catch (caught) {
         const message =
@@ -237,7 +243,7 @@ export function usePlatformProject(
         launchAttempt.current = { signature, attempt: { key: crypto.randomUUID(), modelId: null, recipeVersionId: null } };
       }
       const attempt = launchAttempt.current.attempt;
-      await mutate((id) => launchTrainingRun(id, draft, data, attempt)).catch(() => undefined);
+      await mutate((id) => launchTrainingRun(id, draft, data, attempt));
     },
     setModules,
   };

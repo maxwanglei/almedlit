@@ -1,3 +1,5 @@
+import { NativeInput, NativeSelect, NativeTextarea } from "@/components/NativeField";
+import ValidatedForm from "@/components/ValidatedForm";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Button } from "@astryxdesign/core/Button";
 
@@ -137,22 +139,22 @@ export default function EvidenceTargetManagement({ projectId, tasks, targets, bu
       onDeactivate={() => void mutate(() => deactivateEvidenceTarget(projectId, target.id), remember, "Target deactivated.")}
       onCreateVersion={(payload) => createVersion(target, payload)} />)}
     {!visibleTargets.length ? <p className="platform-inline-empty">No evidence targets yet.</p> : null}
-    <form className="platform-dialog-form" aria-label="Create evidence target" onSubmit={(event) => { event.preventDefault(); void createTarget(); }}>
+    <ValidatedForm className="platform-dialog-form" aria-label="Create evidence target" onSubmit={(event) => { event.preventDefault(); void createTarget(); }}>
       <h3>Create evidence target</h3>
       <div className="platform-form-grid">
-        <label><span>Evidence task</span><select value={selectedTask?.id ?? ""} onChange={(event) => setTaskId(Number(event.target.value))} disabled={locked} required>
+        <label><span>Evidence task</span><NativeSelect value={selectedTask?.id ?? ""} onChange={(event) => setTaskId(Number(event.target.value))} disabled={locked} required>
           {!selectedTask ? <option value="">Choose an enabled evidence task</option> : null}
           {evidenceTasks.map((task) => <option key={task.id} value={task.id} disabled={!task.enabled}>{task.display_name}{!task.enabled ? " (disabled)" : ""}</option>)}
-        </select></label>
-        <label><span>Target key</span><input value={key} onChange={(event) => setKey(event.target.value)} required maxLength={120}
+        </NativeSelect></label>
+        <label><span>Target key</span><NativeInput value={key} onChange={(event) => setKey(event.target.value)} required maxLength={120}
           pattern="[a-z0-9][a-z0-9_-]*" aria-describedby={keyHelpId} disabled={locked} /></label>
       </div>
       <small id={keyHelpId}>Use a stable key with lowercase letters, numbers, hyphens, or underscores.</small>
-      <label><span>Target name</span><input value={name} onChange={(event) => setName(event.target.value)} required maxLength={255} disabled={locked} /></label>
-      <label><span>Target text</span><textarea value={text} onChange={(event) => setText(event.target.value)} required rows={3} disabled={locked} /></label>
-      <label><span>Target guidance</span><textarea value={guidance} onChange={(event) => setGuidance(event.target.value)} rows={2} disabled={locked} /></label>
+      <label><span>Target name</span><NativeInput value={name} onChange={(event) => setName(event.target.value)} required maxLength={255} disabled={locked} /></label>
+      <label><span>Target text</span><NativeTextarea value={text} onChange={(event) => setText(event.target.value)} required rows={3} disabled={locked} /></label>
+      <label><span>Target guidance</span><NativeTextarea value={guidance} onChange={(event) => setGuidance(event.target.value)} rows={2} disabled={locked} /></label>
       <div className="platform-page-actions"><Button label="Create target" type="submit" variant="primary" isDisabled={locked || !selectedTask?.enabled} /></div>
-    </form>
+    </ValidatedForm>
   </PlatformSection>;
 }
 
@@ -178,9 +180,9 @@ function TargetCard({ target, task, busy, activationBlockedReason, onActivate, o
       <h3>{target.name}</h3>
       <p>{task.display_name} · <code>{target.key}</code> · <strong>{active ? `Active · v${active.version_number}` : "Inactive"}</strong></p>
       {!task.enabled ? <p className="platform-form-note">Enable this evidence task before activating a target.</p> : null}
-      <label><span>Target version</span><select value={selected?.id ?? ""} disabled={busy || versions.length === 0} onChange={(event) => setSelectedId(Number(event.target.value))}>
+      <label><span>Target version</span><NativeSelect value={selected?.id ?? ""} disabled={busy || versions.length === 0} onChange={(event) => setSelectedId(Number(event.target.value))}>
         {versions.map((version) => <option key={version.id} value={version.id}>Version {version.version_number}{active?.id === version.id ? " (active)" : ""}</option>)}
-      </select></label>
+      </NativeSelect></label>
       {selected ? <div><p>{selected.text}</p>{selected.guidance ? <p>{selected.guidance}</p> : null}</div> : null}
       <div className="platform-page-actions">
         <Button label="Activate version" isDisabled={busy || !selected || !task.enabled || Boolean(activationBlockedReason) || active?.id === selected?.id}
@@ -188,16 +190,16 @@ function TargetCard({ target, task, busy, activationBlockedReason, onActivate, o
         {target.is_active ? <Button label="Deactivate target" isDisabled={busy} onClick={onDeactivate} /> : null}
       </div>
       <details><summary>Create a new version</summary>
-        <form className="platform-dialog-form" onSubmit={async (event) => {
+        <ValidatedForm className="platform-dialog-form" onSubmit={async (event) => {
           event.preventDefault();
           const created = await onCreateVersion({ text: text.trim(), guidance: guidance.trim() || null });
           if (created) { setSelectedId(created.id); setText(""); setGuidance(""); }
         }}>
           <p>Creates a new version without changing earlier versions or the active selection.</p>
-          <label><span>New target text</span><textarea value={text} onChange={(event) => setText(event.target.value)} required rows={3} disabled={busy} /></label>
-          <label><span>New target guidance</span><textarea value={guidance} onChange={(event) => setGuidance(event.target.value)} rows={2} disabled={busy} /></label>
+          <label><span>New target text</span><NativeTextarea value={text} onChange={(event) => setText(event.target.value)} required rows={3} disabled={busy} /></label>
+          <label><span>New target guidance</span><NativeTextarea value={guidance} onChange={(event) => setGuidance(event.target.value)} rows={2} disabled={busy} /></label>
           <div className="platform-page-actions"><Button label="Create version" type="submit" isDisabled={busy} /></div>
-        </form>
+        </ValidatedForm>
       </details>
     </div>
   </article>;

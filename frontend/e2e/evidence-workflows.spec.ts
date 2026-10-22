@@ -62,8 +62,8 @@ test("individual user moves between My Work, task annotation, and project sectio
     page.getByRole("button", { name: "Submit task for this paper" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Submit assignment" }),
-  ).toHaveCount(0);
+    page.getByRole("button", { name: "Submit task for this paper" }),
+  ).toHaveCount(1);
   await page
     .getByRole("button", { name: "Submit task for this paper" })
     .click();
@@ -79,7 +79,7 @@ test("individual user moves between My Work, task annotation, and project sectio
   await expect(page).toHaveURL(/\/projects$/);
   await expect(page.getByRole("heading", { name: "Projects" })).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "New project", exact: true }),
+    page.getByRole("button", { name: "Create project", exact: true }),
   ).toBeVisible();
 
   await page.getByRole("link", { name: "Open", exact: true }).click();
@@ -99,7 +99,7 @@ test("individual user moves between My Work, task annotation, and project sectio
   ).toContainText("PubMed screening corpus");
   await page.getByText("Label and split version details", { exact: true }).click();
   await expect(
-    page.getByRole("region", { name: "Label layers table" }),
+    page.getByRole("region", { name: "Label sets table" }),
   ).toContainText("Imported screening decisions");
   await expect
     .poll(() =>
@@ -178,7 +178,7 @@ test("annotator creates a cross-paragraph block, reviews coverage, and submits i
   await page.getByLabel("Note").fill("Three-paragraph evidence block");
   await page.getByRole("button", { name: "Create block" }).click();
 
-  await expect(page.getByText("1 blocks", { exact: true })).toBeVisible();
+  await expect(page.getByText("1 block", { exact: true })).toBeVisible();
   await expect(page.getByText("Sentences 1–4", { exact: true })).toBeVisible();
   const createRequest = api.requests.find(
     (request) => request.method === "POST" && request.pathname === "/api/annotations",
@@ -206,7 +206,7 @@ test("annotator creates a cross-paragraph block, reviews coverage, and submits i
   await page.getByRole("button", { name: "Mark reviewed" }).click();
   await expect(page.getByText("Fully reviewed", { exact: true })).toBeVisible();
 
-  await page.getByRole("button", { name: "Submit assignment" }).click();
+  await page.getByRole("button", { name: "Submit task for this paper" }).click();
   await expect(
     page.getByRole("dialog", { name: "Submit this assignment?" }),
   ).toContainText("1");
@@ -238,7 +238,7 @@ test("manager reviews quality scope and explicitly creates union gold", async ({
 
   await page.goto("/projects/1/quality");
   await expect(
-    page.getByRole("heading", { name: "Quality & Review" }),
+    page.getByRole("heading", { name: "Quality & review" }),
   ).toBeVisible();
   await expect(
     page.getByRole("region", { name: "Round quality table" }),

@@ -156,7 +156,7 @@ export function effectiveRoleLabel(access: AccessSnapshot): string {
   }
   switch (access.membershipRole) {
     case "trainer":
-      return "Model Trainer";
+      return "Model trainer";
     case "manager":
       return "Manager";
     case "admin":

@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 
 import type { CapabilityKey } from "@/auth/capabilities";
+import { formatTaskKind } from "@/lib/taskPresentation";
 import type { DocumentSummary, ProjectProgress, ProjectTask, TaskAssignment } from "@/types/api";
 
 import {
@@ -18,11 +19,13 @@ import {
   PlatformSection,
   PlatformStats,
   PlatformStatus,
+  formatCount,
 } from "./components";
-import type { PlatformProjectData, TaskKind } from "./types";
+import type { PlatformProjectData } from "./types";
 
 interface OverviewScreenProps {
   data: PlatformProjectData;
+  capabilities?: readonly string[];
   documents: DocumentSummary[];
   assignments: TaskAssignment[];
   progress: ProjectProgress | null;
@@ -52,12 +55,6 @@ function WorkflowCard({ title, readiness, description, action }: {
   </article>;
 }
 
-function taskKindLabel(kind: TaskKind, preset?: unknown): string {
-  if (kind === "token_labeling") return "Token labeling (tokenized data)";
-  if (kind === "span_extraction" && preset === "document_entities") return "Named entities (NER)";
-  return kind.replace(/_/g, " ").replace(/^./, (letter) => letter.toUpperCase());
-}
-
 interface RoadmapCapability {
   id: string;
   title: string;
@@ -74,7 +71,7 @@ interface RoadmapCapability {
 const ROADMAP_CAPABILITIES = [
   {
     id: "inference",
-    title: "Inference",
+    title: "Predictions",
     status: "foundation",
     description:
       "Versioned batch predictions, exports, and selected prediction review are available for saved TF-IDF models.",
@@ -83,12 +80,12 @@ const ROADMAP_CAPABILITIES = [
       "Candidate windows and append-only human review",
       "Prompt-based LLM inference after endpoint integration",
     ],
-    capabilities: [{ key: "inference", label: "Inference" }],
+    capabilities: [{ key: "inference", label: "Predictions" }],
     icon: ScanSearch,
   },
   {
     id: "active-learning",
-    title: "Active Learning",
+    title: "Active learning",
     status: "planned",
     description:
       "Strategy execution, pool management, and stopping criteria will close the annotation-to-model loop.",
@@ -116,7 +113,7 @@ const ROADMAP_CAPABILITIES = [
   },
   {
     id: "lineage-export",
-    title: "Lineage & Export",
+    title: "Lineage and export",
     status: "foundation",
     description:
       "Immutable snapshots, artifact lineage, and authenticated exports exist; reproduction and diff reporting UI is staged.",
@@ -133,8 +130,8 @@ const ROADMAP_CAPABILITIES = [
   },
   {
     id: "guideline-learning",
-    title: "Guideline Learning",
-    status: "foundation",
+    title: "Guideline learning",
+    status: "planned",
     description:
       "Versioned guidelines and correction-derived learning records exist; automated proposals and richer collaborative editing are staged.",
     milestones: [
@@ -147,7 +144,7 @@ const ROADMAP_CAPABILITIES = [
   },
   {
     id: "compute-llm",
-    title: "HPC & LLM Serving",
+    title: "HPC and LLM serving",
     status: "partial",
     description:
       "Local and minimal SSH/SLURM execution exist; live cluster hardening and managed vLLM serving come later.",
@@ -171,6 +168,7 @@ function capabilityAvailability(
   available: boolean;
   label: string;
 } {
+  if (item.status === "planned") return { available: false, label: "Planned for a future release" };
   const available = item.capabilities.filter((capability) =>
     workspaceCapabilities.has(capability.key),
   );
@@ -248,6 +246,7 @@ function ResearchLoopRoadmap({
 
 export default function OverviewScreen({
   data,
+  capabilities,
   documents,
   assignments,
   progress,
@@ -269,7 +268,7 @@ export default function OverviewScreen({
   const labeled = data.labelSets.reduce((total, item) => total + item.label_count, 0);
   const effectiveModules = new Set(data.projectModules.effective);
   const workspaceCapabilities = new Set(
-    data.projectModules.workspace_capabilities,
+    capabilities ?? data.projectModules.workspace_capabilities,
   );
   const latestSources = new Map<number, (typeof data.datasetVersions)[number]>();
   for (const version of data.datasetVersions) {
@@ -324,7 +323,7 @@ export default function OverviewScreen({
   const overviewStats = [
     effectiveModules.has("annotate") ? {
       label: "Annotation tasks", value: taskCount,
-      detail: projectTasks.length ? `${data.taskDefinitions.length} round tasks · ${projectTasks.length} document tasks` : `${data.taskVersions.length} saved ${data.taskVersions.length === 1 ? "task version" : "task versions"}`,
+      detail: projectTasks.length ? `${formatCount(data.taskDefinitions.length, "round task")} · ${formatCount(projectTasks.length, "document task")}` : `${data.taskVersions.length} saved ${data.taskVersions.length === 1 ? "task version" : "task versions"}`,
     } : null,
     effectiveModules.has("data")
       ? {
@@ -332,18 +331,18 @@ export default function OverviewScreen({
           value:
             [...latestSources.values()].reduce((total, item) => total + item.item_count, 0) ||
             documents.length,
-          detail: `${latestSources.size} source datasets`,
+          detail: formatCount(latestSources.size, "source dataset"),
         }
       : null,
     effectiveModules.has("train") ? {
       label: "Training datasets", value: new Set(data.trainingDatasets.map((version) => version.training_dataset_id ?? `legacy:${version.id}`)).size,
-      detail: `${data.trainingDatasets.length} saved versions`,
+      detail: formatCount(data.trainingDatasets.length, "saved version"),
     } : null,
     effectiveModules.has("annotate")
       ? {
           label: "Labels",
           value: labeled,
-          detail: `${data.labelSets.length} immutable layers`,
+          detail: formatCount(data.labelSets.length, "immutable label set"),
         }
       : null,
     effectiveModules.has("annotate")
@@ -352,14 +351,14 @@ export default function OverviewScreen({
           value:
             data.rounds.filter((round) => round.status === "open")
               .length || assignments.filter((item) => item.status !== "completed").length,
-          detail: `${data.rounds.length} annotation rounds`,
+          detail: formatCount(data.rounds.length, "annotation round"),
         }
       : null,
     effectiveModules.has("models")
       ? {
           label: "Model versions",
           value: latestModels,
-          detail: `${data.models.length} named models`,
+          detail: formatCount(data.models.length, "named model"),
         }
       : null,
   ].filter((item) => item !== null);
@@ -402,7 +401,7 @@ export default function OverviewScreen({
                     const versions = new Set(data.taskVersions.filter((version) => version.task_definition_id === task.id).map((version) => version.id));
                     const assignedRounds = openRounds.filter((round) => versions.has(round.task_version_id));
                     return <tr key={`round-task:${task.id}`}>
-                      <td data-label="Task" data-priority="identity"><strong>{task.name}</strong><span>{latestVersion ? `${taskKindLabel(latestVersion.task_kind, latestVersion.annotation_ui?.preset)} · v${latestVersion.version_number}` : "Task setup incomplete"}</span></td>
+                      <td data-label="Task" data-priority="identity"><strong>{task.name}</strong><span>{latestVersion ? `${formatTaskKind(latestVersion.task_kind, latestVersion.annotation_ui?.preset)} · v${latestVersion.version_number}` : "Task setup incomplete"}</span></td>
                       <td data-label="Annotation work">{assignedRounds.length ? `${assignedRounds.length} open ${assignedRounds.length === 1 ? "round" : "rounds"} for you` : data.rounds.some((round) => versions.has(round.task_version_id)) ? "No open round assigned to you" : "No annotation round yet"}</td>
                       <td data-label="Actions" data-priority="action">{assignedRounds.length ? assignedRounds.map((round) => <p key={round.id}><PlatformRouteLink href={`/my-work/rounds/${round.id}`} onNavigate={() => onContinueAnnotation?.(round.id)}>Continue {task.name} — {round.name}</PlatformRouteLink></p>) : latestVersion && onSetupTask ? <PlatformRouteLink href={`/projects/${projectId}/data?tab=source&taskVersionId=${latestVersion.id}`} onNavigate={() => onSetupTask(latestVersion.id)}>Set up {task.name}</PlatformRouteLink> : null}</td>
                     </tr>;
@@ -450,7 +449,7 @@ export default function OverviewScreen({
                   <strong>Models</strong>
                   <small>
                     {data.models.length
-                      ? `${data.models.length} named models`
+                      ? formatCount(data.models.length, "named model")
                       : "Open the workspace model registry"}
                   </small>
                 </span>

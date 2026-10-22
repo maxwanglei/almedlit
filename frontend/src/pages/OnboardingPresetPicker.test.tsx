@@ -42,6 +42,16 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("OnboardingPresetPicker", () => {
+  it.each([false, true])("uses the shared sentence-case preset names for personal=%s", (isPersonalWorkspace) => {
+    render(<OnboardingPresetPicker workspaceId={5} isPersonalWorkspace={isPersonalWorkspace} onDone={vi.fn()} />);
+
+    for (const name of ["Annotate", "Train models", "Annotate and train", "Full"]) {
+      expect(screen.getByRole("button", { name })).toBeTruthy();
+    }
+    expect(screen.queryByRole("button", { name: "Annotate and train with active learning" }) !== null)
+      .toBe(!isPersonalWorkspace);
+  });
+
   it("waits for refreshed workspace access before completing setup", async () => {
     const refresh = deferred();
     const onDone = vi.fn(() => refresh.promise);
@@ -50,7 +60,7 @@ describe("OnboardingPresetPicker", () => {
       <OnboardingPresetPicker workspaceId={5} onDone={onDone} />,
     );
 
-    const train = screen.getByRole("button", { name: "Train Models" });
+    const train = screen.getByRole("button", { name: "Train models" });
     await userEvent.click(train);
 
     await waitFor(() => {
@@ -74,7 +84,7 @@ describe("OnboardingPresetPicker", () => {
       <OnboardingPresetPicker workspaceId={5} onDone={onDone} />,
     );
 
-    const train = screen.getByRole("button", { name: "Train Models" });
+    const train = screen.getByRole("button", { name: "Train models" });
     await userEvent.click(train);
 
     expect(

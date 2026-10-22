@@ -83,7 +83,7 @@ test("PMID import includes abstracts and reused papers, then pins annotation to 
   const state = await installReusableMock(page);
   await page.goto("/projects/1/data?tab=source");
   await page.getByRole("button", { name: "Import PMIDs", exact: true }).first().click();
-  await page.getByLabel("Collection name").fill("Tucatinib annotation papers");
+  await page.getByLabel("Dataset name").fill("Tucatinib annotation papers");
   await page.getByLabel("PMIDs", { exact: true }).fill("12345678 23456789 34567890");
   await page.getByRole("button", { name: "Preview documents" }).focus();
   await page.keyboard.press("Enter");
@@ -127,7 +127,7 @@ test("unlabeled inference without Active Learning exports and reviews selected o
   const state = await installReusableMock(page, true);
   await page.setViewportSize({ width: 375, height: 812 });
   await page.goto("/projects/1/inference?datasetVersionId=22");
-  await expect(page.getByRole("heading", { name: "Inference", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Predictions", exact: true })).toBeVisible();
   await expect(page.getByRole("combobox", { name: "Source dataset", exact: true })).toHaveValue("22");
   // The setup has explicit review steps; each next action can be keyboard activated.
   await page.getByRole("button", { name: "Continue to model" }).click();

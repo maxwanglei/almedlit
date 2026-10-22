@@ -1,3 +1,5 @@
+import { NativeInput, NativeTextarea } from "@/components/NativeField";
+import ValidatedForm from "@/components/ValidatedForm";
 import { useEffect, useId, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { Banner } from "@astryxdesign/core/Banner";
@@ -155,11 +157,11 @@ export default function AddWorkspaceDialog({
         />
       </div>
 
-      <form className="platform-dialog-form" onSubmit={submit}>
+      <ValidatedForm className="platform-dialog-form" onSubmit={submit}>
         {mode === "create" ? (
           <label>
             <span>Team name</span>
-            <input
+            <NativeInput
               ref={firstFieldRef}
               name="teamName"
               value={teamName}
@@ -175,7 +177,7 @@ export default function AddWorkspaceDialog({
           <>
             <label>
               <span>Join code</span>
-              <input
+              <NativeInput
                 ref={firstFieldRef}
                 name="joinCode"
                 value={joinCode}
@@ -190,7 +192,7 @@ export default function AddWorkspaceDialog({
             </label>
             <label>
               <span>Message <small>(optional)</small></span>
-              <textarea
+              <NativeTextarea
                 name="message"
                 rows={3}
                 value={message}
@@ -236,7 +238,7 @@ export default function AddWorkspaceDialog({
             />
           )}
         </div>
-      </form>
+      </ValidatedForm>
     </DialogFrame>
   );
 }

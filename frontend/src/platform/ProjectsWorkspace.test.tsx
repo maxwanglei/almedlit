@@ -122,7 +122,7 @@ describe("ProjectsWorkspace", () => {
     );
 
     expect(screen.queryByRole("button", { name: "New project" })).toBeNull();
-    expect(screen.getByText("Training Only")).toBeTruthy();
+    expect(screen.getByText("Training only")).toBeTruthy();
     const openLink = screen.getByRole("link", { name: "Open" });
     expect(openLink.getAttribute("href")).toBe("/projects/12/overview");
     openLink.addEventListener(
@@ -137,4 +137,20 @@ describe("ProjectsWorkspace", () => {
     await user.click(openLink);
     expect(onOpenProject).toHaveBeenCalledWith(12);
   });
+});
+
+it("shows a load failure without declaring the project list empty", async () => {
+  const onRetry = vi.fn();
+  const user = userEvent.setup();
+  render(<ProjectsWorkspace workspaceId={4} workspaceName="Research team" projects={[]} canCreate capabilities={["annotation"]} loading={false} loadError="Project service offline" onRetry={onRetry} onOpenProject={vi.fn()} onProjectCreated={vi.fn()} />);
+  expect(screen.getByRole("alert").textContent).toContain("Project service offline");
+  expect(screen.queryByText("No projects yet")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Retry loading projects" }));
+  expect(onRetry).toHaveBeenCalledOnce();
+});
+
+it("shows the workspace name in the project directory", () => {
+  render(<ProjectsWorkspace workspaceId={4} workspaceName="Research team" projects={[trainingProject]} canCreate={false} capabilities={["training"]} loading={false} onOpenProject={vi.fn()} onProjectCreated={vi.fn()} />);
+  expect(screen.getByRole("cell", { name: "Research team" })).toBeTruthy();
+  expect(screen.queryByText("#4")).toBeNull();
 });

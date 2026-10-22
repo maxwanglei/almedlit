@@ -19,7 +19,7 @@ function DialogHarness({
 }: {
   requiredReason?: boolean;
   busy?: boolean;
-  onConfirm?: (reason: string) => void;
+  onConfirm?: (reason: string) => void | Promise<void>;
 }): React.ReactElement {
   const [open, setOpen] = useState(false);
   return (
@@ -99,5 +99,18 @@ describe("ConfirmDialog", () => {
         .disabled,
     ).toBe(true);
     expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it("keeps a failed confirmation visible inside the dialog", async () => {
+    const onConfirm = vi.fn().mockRejectedValue(new Error("Unable to delete this item"));
+    render(<DialogHarness onConfirm={onConfirm} />);
+    fireEvent.click(screen.getByRole("button", { name: "Delete item" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Delete item" })[1]);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toBe("Unable to delete this item");
+    expect(screen.getByRole("alertdialog").contains(alert)).toBe(true);
+    await waitFor(() => expect(document.activeElement).toBe(alert));
+    expect(screen.getAllByRole<HTMLButtonElement>("button", { name: "Delete item" })[1].disabled).toBe(false);
   });
 });

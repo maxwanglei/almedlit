@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import EvidenceAdjudicationPanel from "./EvidenceAdjudicationPanel";
@@ -33,12 +33,20 @@ async function openPanel() {
   return user;
 }
 
+it("identifies opaque pinned-version IDs without presenting them as version numbers", () => {
+  render(<EvidenceAdjudicationPanel projectId={1} documents={[]} assignments={[assignment]} allowSoloGold />);
+  expect(screen.getByRole("option").textContent).toMatch(/target ID\s*101.*guideline ID\s*301/);
+  expect(screen.getByRole("option").textContent).not.toContain("v101");
+});
+
 it("rejects blank boundaries instead of treating them as sentence zero", async () => {
   const user = await openPanel();
   await user.click(screen.getByRole("button", { name: "Create gold block" }));
   await screen.findByRole("alert");
   expect(api.adjudicateEvidence).not.toHaveBeenCalled();
   expect(api.getDocumentStructure).not.toHaveBeenCalled();
+  expect(screen.getByLabelText("Start sentence ordinal").getAttribute("aria-invalid")).toBe("true");
+  expect(document.activeElement).toBe(screen.getByLabelText("Start sentence ordinal"));
 });
 
 it("resolves displayed sentence ordinals in the pinned structure before saving gold", async () => {
@@ -70,4 +78,16 @@ it("rejects an ordinal outside the pinned structure", async () => {
   await user.click(screen.getByRole("button", { name: "Create gold block" }));
   expect(await screen.findByRole("alert")).toBeTruthy();
   expect(api.adjudicateEvidence).not.toHaveBeenCalled();
+});
+
+it("discards a comparison from the previous scope and releases its busy state", async () => {
+  let resolveOld!: (value: { blocks: { annotation_id: number; status: string; start_sentence_ordinal: number; end_sentence_ordinal: number }[] }) => void;
+  api.getEvidenceAdjudication.mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }));
+  const user = userEvent.setup();
+  const { rerender } = render(<EvidenceAdjudicationPanel projectId={1} documents={[]} assignments={[assignment]} allowSoloGold />);
+  await user.click(screen.getByRole("button", { name: "Load comparison" }));
+  rerender(<EvidenceAdjudicationPanel projectId={2} documents={[]} assignments={[{ ...assignment, project_id: 2, document_id: 42 }]} allowSoloGold />);
+  await act(async () => resolveOld({ blocks: [{ annotation_id: 4, status: "draft", start_sentence_ordinal: 0, end_sentence_ordinal: 2 }] }));
+  expect(screen.queryByText("Sentences 0-2")).toBeNull();
+  expect(screen.getByRole<HTMLButtonElement>("button", { name: "Load comparison" }).disabled).toBe(false);
 });

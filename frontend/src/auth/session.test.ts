@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   getSessionGeneration,
@@ -7,6 +7,9 @@ import {
   removeLegacyToken,
   SESSION_EVENT_STORAGE_KEY,
   subscribeSessionChanges,
+  publishMembershipChange,
+  subscribeMembershipChanges,
+  MEMBERSHIP_EVENT_STORAGE_KEY,
 } from "./session";
 
 interface InstalledStorage {
@@ -102,5 +105,58 @@ describe("session token store", () => {
     unsubscribe();
 
     expect(observed).toEqual([true, false]);
+  });
+
+  it("refreshes memberships without invalidating account sessions in any tab", () => {
+    const { dispatchStorage, localStorage } = installStorage();
+    const sessionChanged = vi.fn();
+    const membershipChanged = vi.fn();
+    const unsubscribeSession = subscribeSessionChanges(sessionChanged);
+    const unsubscribeMemberships = subscribeMembershipChanges(membershipChanged);
+    const generation = getSessionGeneration();
+    publishMembershipChange();
+    const event = localStorage.getItem(MEMBERSHIP_EVENT_STORAGE_KEY);
+    dispatchStorage(MEMBERSHIP_EVENT_STORAGE_KEY, event);
+    expect(membershipChanged).toHaveBeenCalledTimes(2);
+    expect(sessionChanged).not.toHaveBeenCalled();
+    expect(getSessionGeneration()).toBe(generation);
+    unsubscribeSession(); unsubscribeMemberships();
+  });
+
+  it("clears app drafts on logout and cross-tab logout while retaining unrelated storage", () => {
+    const { dispatchStorage } = installStorage();
+    const drafts = new Map<string, string>();
+    Object.defineProperty(window, "sessionStorage", { configurable: true, value: {
+      get length() { return drafts.size; },
+      key: (index: number) => [...drafts.keys()][index] ?? null,
+      removeItem: (key: string) => drafts.delete(key),
+    } });
+    const seed = () => {
+      drafts.set("prediction-draft:7", "private");
+      drafts.set("prediction-review:7:8", "private");
+      drafts.set("al-medlit:source-setup:7:new", "private");
+      drafts.set("al-medlit:training-preparation:7:new", "private");
+      drafts.set("other-app", "retained");
+    };
+    seed();
+    publishSessionChange(false);
+    expect([...drafts.keys()]).toEqual(["other-app"]);
+    seed();
+    const unsubscribe = subscribeSessionChanges(() => undefined);
+    dispatchStorage(SESSION_EVENT_STORAGE_KEY, JSON.stringify({ authenticated: false }));
+    expect([...drafts.keys()]).toEqual(["other-app"]);
+    unsubscribe();
+  });
+
+  it("notifies this tab even when browser storage is unavailable", () => {
+    const observed = vi.fn();
+    const unsubscribe = subscribeSessionChanges(observed);
+    Object.defineProperty(window, "localStorage", {
+      configurable: true, get: () => { throw new Error("Storage denied"); },
+    });
+    expect(() => publishSessionChange(false)).not.toThrow();
+    expect(observed).toHaveBeenCalledWith(false);
+    unsubscribe();
+    installStorage();
   });
 });

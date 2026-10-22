@@ -90,27 +90,26 @@ describe("OverviewScreen", () => {
       screen.getByRole("heading", { name: "Research loop roadmap" }),
     ).toBeTruthy();
     expect(
-      screen.getByRole("article", { name: "Inference roadmap" }),
+      screen.getByRole("article", { name: "Predictions roadmap" }),
     ).toBeTruthy();
     expect(
-      screen.getByRole("article", { name: "Active Learning roadmap" }),
+      screen.getByRole("article", { name: "Active learning roadmap" }),
     ).toBeTruthy();
     expect(
       screen.getByRole("article", { name: "Co-learning roadmap" }),
     ).toBeTruthy();
     expect(
-      screen.getByRole("article", { name: "Lineage & Export roadmap" }),
+      screen.getByRole("article", { name: "Lineage and export roadmap" }),
     ).toBeTruthy();
     expect(
-      screen.getByRole("article", { name: "Guideline Learning roadmap" }),
+      screen.getByRole("article", { name: "Guideline learning roadmap" }),
     ).toBeTruthy();
     expect(
-      screen.getByRole("article", { name: "HPC & LLM Serving roadmap" }),
+      screen.getByRole("article", { name: "HPC and LLM serving roadmap" }),
     ).toBeTruthy();
-    expect(screen.getByText("Inference capability available")).toBeTruthy();
-    expect(
-      screen.getByText("Active learning capability available"),
-    ).toBeTruthy();
+    expect(screen.getByText("Predictions capability available")).toBeTruthy();
+    expect(screen.queryByText("Active learning capability available")).toBeNull();
+    expect(screen.getAllByText("Planned for a future release")).toHaveLength(2);
     expect(screen.getAllByText("Not available in this workspace")).toHaveLength(
       1,
     );
@@ -218,7 +217,7 @@ describe("OverviewScreen", () => {
       currentUserId={9} access={access} loading={false} busy={false} error={null} dialog={null} onDialogChange={vi.fn()} onProjectSelect={vi.fn()} onNavigate={vi.fn()} onOpenRound={vi.fn()}
       onUpdateProject={async () => undefined} onUpdateModules={async () => undefined} onRefresh={async () => undefined} />);
     expect(within(screen.getByRole("article", { name: "Annotate readiness" })).queryByRole("link")).toBeNull();
-    expect(within(screen.getByRole("article", { name: "Run predictions readiness" })).queryByRole("link")).toBeNull();
+    expect(screen.queryByRole("article", { name: "Run predictions readiness" })).toBeNull();
     expect(within(screen.getByRole("article", { name: "Train readiness" })).getByRole("link", { name: /Train model/ })).toBeTruthy();
     expect(screen.queryByRole("link", { name: /Import PMIDs/ })).toBeNull();
   });

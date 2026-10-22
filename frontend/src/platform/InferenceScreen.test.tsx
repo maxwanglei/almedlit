@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import InferenceScreen from "./InferenceScreen";
 import { EMPTY_PLATFORM_PROJECT_DATA, type PlatformProjectData } from "./types";
 import type { PredictionRun } from "./predictionApi";
+import { publishSessionChange } from "@/auth/session";
 
 const mocks = vi.hoisted(() => ({ list: vi.fn(), create: vi.fn(), results: vi.fn(), review: vi.fn(), retry: vi.fn(), download: vi.fn() }));
 vi.mock("./predictionApi", () => ({
@@ -40,9 +41,25 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
-const mount = (overrides: Partial<React.ComponentProps<typeof InferenceScreen>> = {}) => render(<InferenceScreen projectId={7} data={data} currentUserId={1} canReview onOpenRound={vi.fn()} onRefresh={vi.fn().mockResolvedValue(undefined)} {...overrides} />);
+const mount = (overrides: Partial<React.ComponentProps<typeof InferenceScreen>> = {}) => render(<InferenceScreen projectId={7} data={data} currentUserId={1} canReview onNavigate={(path) => window.history.pushState({}, "", path)} onOpenRound={vi.fn()} onRefresh={vi.fn().mockResolvedValue(undefined)} {...overrides} />);
 
 describe("Standalone inference", () => {
+  it("discards a late created prediction after logout", async () => {
+    sessionStorage.setItem("prediction-draft:7", JSON.stringify({ name: run.name, datasetVersionId: 22, modelVersionId: 81, step: 2 }));
+    let resolveCreate!: (value: PredictionRun) => void;
+    mocks.create.mockReturnValue(new Promise<PredictionRun>((resolve) => { resolveCreate = resolve; }));
+    const onNavigate = vi.fn();
+    const rendered = mount({ onNavigate });
+    await screen.findByText("No prediction runs yet");
+    fireEvent.click(screen.getByRole("button", { name: "Run predictions" }));
+    expect(mocks.create).toHaveBeenCalledTimes(1);
+    publishSessionChange(false);
+    rendered.unmount();
+    await act(async () => { resolveCreate(run); });
+    expect(onNavigate).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem("prediction-draft:7")).toBeNull();
+  });
+
   it("announces export failures instead of downloading an error response", async () => {
     window.history.replaceState({}, "", "/projects/7/inference?predictionRunId=91");
     mocks.list.mockResolvedValue([run]);
@@ -134,4 +151,56 @@ describe("Standalone inference", () => {
     });
     expect(screen.queryByText("First paper")).toBeNull();
   });
+});
+
+it("opens a created review round even if the project summary cannot refresh", async () => {
+  mocks.list.mockResolvedValue([run]);
+  mocks.review.mockResolvedValue({ round_id: 55, item_count: 1, excluded_submitted: 0, excluded_protected: 0 });
+  const onOpenRound = vi.fn();
+  mount({ onOpenRound, onRefresh: vi.fn().mockRejectedValue(new Error("Summary offline")) });
+  fireEvent.click(await screen.findByRole("button", { name: "View results" }));
+  await screen.findByText("First paper");
+  fireEvent.click(screen.getByRole("button", { name: "Select eligible results on this page" }));
+  fireEvent.click(screen.getByRole("button", { name: "Create review round" }));
+  await waitFor(() => expect(onOpenRound).toHaveBeenCalledWith(55));
+});
+it("restarts dataset review when a source link overrides a saved wizard dataset", async () => {
+  sessionStorage.setItem("prediction-draft:7", JSON.stringify({ name: "Old source prediction", datasetVersionId: 999, modelVersionId: 81, step: 2, request: { key: "old", fingerprint: "old" } }));
+  window.history.replaceState({}, "", "/projects/7/inference?datasetVersionId=22");
+  mount();
+  await screen.findByText("No prediction runs yet");
+  expect(screen.getByLabelText("Source dataset")).toHaveProperty("value", "22");
+  expect(screen.queryByRole("button", { name: "Run predictions" })).toBeNull();
+});
+it("offers retry for planned runs", async () => {
+  mocks.list.mockResolvedValue([{ ...run, status: "planned" }]);
+  mount();
+  expect(await screen.findByRole("button", { name: "Retry run" })).toBeTruthy();
+});
+it("clears the transient refresh notice after status polling recovers", async () => {
+  vi.useFakeTimers();
+  mocks.list.mockResolvedValue([{ ...run, status: "running" }]);
+  mount();
+  await act(async () => undefined);
+  mocks.list.mockRejectedValueOnce(new Error("Temporary network failure"));
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+  expect(screen.getByText(/Status could not be refreshed/)).toBeTruthy();
+  await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+  expect(screen.queryByText(/Status could not be refreshed/)).toBeNull();
+});
+
+it("selects a run through the router callback", async () => {
+  const onNavigate = vi.fn();
+  mocks.list.mockResolvedValue([run]);
+  mount({ onNavigate });
+  fireEvent.click(await screen.findByRole("button", { name: "View results" }));
+  expect(onNavigate).toHaveBeenCalledWith("/projects/7/inference?predictionRunId=91");
+});
+
+it("does not call a failed prediction-run request an empty list", async () => {
+  mocks.list.mockRejectedValue(new Error("Prediction service offline"));
+  mount();
+  expect((await screen.findByRole("alert")).textContent).toContain("Prediction service offline");
+  expect(screen.queryByText("No prediction runs yet")).toBeNull();
+  expect(screen.getByRole("button", { name: "Refresh status" })).toBeTruthy();
 });

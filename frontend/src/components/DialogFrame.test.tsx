@@ -86,4 +86,28 @@ describe("DialogFrame", () => {
     expect(screen.getByRole("dialog", { name: "Shared dialog" })).toBeTruthy();
     expect(dialog.getAttribute("aria-busy")).toBe("true");
   });
+
+  it("focuses the invalid field before its validation summary", async () => {
+    const { rerender } = render(
+      <DialogFrame ariaLabel="Validation" error={null} backdropClassName="backdrop" dialogClassName="dialog" onDismiss={() => undefined}>
+        <input aria-label="Name" />
+      </DialogFrame>,
+    );
+    rerender(
+      <DialogFrame ariaLabel="Validation" error="Name is required" backdropClassName="backdrop" dialogClassName="dialog" onDismiss={() => undefined}>
+        <input aria-label="Name" aria-invalid="true" />
+        <p role="alert">Name is required</p>
+      </DialogFrame>,
+    );
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Name")));
+  });
+
+  it("returns focus to a page heading when the deleted trigger is gone", async () => {
+    const { rerender } = render(<main><h1>Items</h1><button type="button">Delete</button></main>);
+    screen.getByRole("button", { name: "Delete" }).focus();
+    rerender(<main><h1>Items</h1><button type="button">Delete</button><DialogFrame ariaLabel="Delete" backdropClassName="backdrop" dialogClassName="dialog" onDismiss={() => undefined}><button>Cancel</button></DialogFrame></main>);
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Cancel" })));
+    rerender(<main><h1>Items</h1></main>);
+    expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Items" }));
+  });
 });

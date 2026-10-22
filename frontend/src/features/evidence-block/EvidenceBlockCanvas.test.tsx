@@ -360,6 +360,36 @@ afterEach(() => {
 });
 
 describe("EvidenceBlockCanvas", () => {
+  it("deletes an evidence block immediately and keeps Undo available", async () => {
+    const user = userEvent.setup();
+    api.deleteAnnotation.mockResolvedValue(undefined);
+    api.listEvidenceCommands.mockResolvedValue([{
+      command_group_key: "deleted-block", operation: "delete", status: "applied",
+      project_id: 1, document_id: 41, target_version_id: 101, structure_version_id: 201,
+      guideline_version_id: 301, actor_user_id: 2, created_at: "2026-07-15T12:00:00Z",
+    }]);
+    api.undoEvidenceCommand.mockResolvedValue({ affected_annotation_ids: [901] });
+    renderCanvas(ASSIGNMENT, [annotation()]);
+    await user.click(await screen.findByRole("button", { name: /Sentences 1–2/ }));
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(api.deleteAnnotation).toHaveBeenCalledWith(901, 1));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    await user.click(await screen.findByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(api.undoEvidenceCommand).toHaveBeenCalledWith("deleted-block"));
+  });
+
+  it("accepts a prediction without inheriting a selected human block's metadata", async () => {
+    const user = userEvent.setup();
+    api.listInferenceRuns.mockResolvedValue([INFERENCE_RUN]);
+    api.listInferencePredictions.mockResolvedValue([prediction(1000)]);
+    api.reviewInferencePrediction.mockResolvedValue({ resulting_annotation_id: null });
+    renderCanvas(ASSIGNMENT, [annotation()]);
+    await user.click(await screen.findByRole("button", { name: /Sentences 1–2/ }));
+    expect(screen.getByLabelText<HTMLTextAreaElement>("Note").value).toBe("Useful");
+    await user.click(await screen.findByRole("button", { name: "Accept prediction 1000" }));
+    await waitFor(() => expect(api.reviewInferencePrediction).toHaveBeenCalledWith(1000, expect.objectContaining({ action: "accept", labels: [], note: null })));
+  });
+
   it("keeps annotation usable without requesting inference in an annotate workspace", async () => {
     api.listInferenceRuns.mockRejectedValue(new Error("Capability 'inference' is not enabled"));
     const setError = vi.fn();
@@ -503,7 +533,7 @@ describe("EvidenceBlockCanvas", () => {
       Array.from({ length: 100 }, (_, index) => prediction(1100 + index)),
     ));
 
-    expect(screen.getByText("1 model candidates")).toBeTruthy();
+    expect(screen.getByText("1 model candidate")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Accept prediction 2000" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Accept prediction 1100" })).toBeNull();
     expect(api.listInferencePredictions).toHaveBeenCalledTimes(3);
@@ -637,7 +667,7 @@ describe("EvidenceBlockCanvas", () => {
   it("renders a submitted assignment as read-only", async () => {
     renderCanvas({ ...ASSIGNMENT, status: "submitted" });
     await screen.findByRole("button", { name: /Sentence 1, unreviewed/i });
-    expect(screen.getByText("submitted assignment · read-only")).toBeTruthy();
+    expect(screen.getByText("Submitted task · read-only")).toBeTruthy();
     expect((screen.getByRole("button", { name: "Create block" }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByLabelText("Note") as HTMLInputElement).disabled).toBe(true);
   });
@@ -705,7 +735,7 @@ describe("EvidenceBlockCanvas", () => {
 
     await screen.findByRole("button", { name: /Sentence 1, unreviewed/i });
 
-    expect(screen.getByText("submitted assignment · read-only")).toBeTruthy();
+    expect(screen.getByText("Submitted task · read-only")).toBeTruthy();
     expect((screen.getByLabelText("Note") as HTMLInputElement).disabled).toBe(true);
     expect(onActiveAssignmentChange).not.toHaveBeenCalled();
     unmount();
@@ -744,7 +774,7 @@ describe("EvidenceBlockCanvas", () => {
     );
     await screen.findByRole("button", { name: /Sentence 1, unreviewed/i });
     expect((screen.getByLabelText("Evidence target") as HTMLSelectElement).value).toBe("101");
-    expect(screen.getByText("submitted assignment · read-only")).toBeTruthy();
+    expect(screen.getByText("Submitted task · read-only")).toBeTruthy();
 
     rerender(<EvidenceBlockCanvas {...props} selectedAssignmentId={second.id} />);
     await waitFor(() =>
@@ -754,7 +784,7 @@ describe("EvidenceBlockCanvas", () => {
 
     rerender(<EvidenceBlockCanvas {...props} selectedAssignmentId={submittedSecond.id} />);
     expect((screen.getByLabelText("Evidence target") as HTMLSelectElement).value).toBe("102");
-    expect(screen.getByText("submitted assignment · read-only")).toBeTruthy();
+    expect(screen.getByText("Submitted task · read-only")).toBeTruthy();
     expect((screen.getByLabelText("Note") as HTMLInputElement).disabled).toBe(true);
     expect(props.onActiveAssignmentChange).not.toHaveBeenCalled();
   });
@@ -812,7 +842,7 @@ describe("EvidenceBlockCanvas", () => {
     renderCanvas({ ...ASSIGNMENT, status: "submitted" }, [], vi.fn(), true);
 
     expect(
-      await screen.findByText("Finished task · read-only"),
+      await screen.findByText("Submitted task · read-only"),
     ).toBeTruthy();
     expect(
       screen.getByRole("option", { name: "No targets configured" }),
@@ -885,7 +915,7 @@ describe("EvidenceBlockCanvas", () => {
     renderCanvas(unrelatedAssignment);
 
     await screen.findByRole("button", { name: /Sentence 1, unreviewed/i });
-    expect(screen.getByText("closed assignment · read-only")).toBeTruthy();
+    expect(screen.getByText("Closed task · read-only")).toBeTruthy();
     expect((screen.getByLabelText("Note") as HTMLInputElement).disabled).toBe(true);
   });
 
@@ -914,7 +944,7 @@ describe("EvidenceBlockCanvas", () => {
 
     renderCanvas(ASSIGNMENT, [aliceBlock, bobBlock]);
 
-    expect(await screen.findByText("1 blocks")).toBeTruthy();
+    expect(await screen.findByText("1 block")).toBeTruthy();
     expect(screen.getByText("Useful")).toBeTruthy();
     expect(screen.queryByText("Bob only")).toBeNull();
   });

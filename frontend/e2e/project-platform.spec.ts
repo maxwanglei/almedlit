@@ -68,7 +68,7 @@ async function expectRouteIdentity(
     )
     .toBe(expectedLocation);
   await expect(destinationHeading).toBeVisible();
-  await expect(page).toHaveTitle(`${options.title ?? heading} | AL-MedLit`);
+  await expect(page).toHaveTitle(`${options.title ?? heading}${expectedLocation.startsWith("/projects/1/") ? " | Evidence Review Demo" : ""} | AL-MedLit`);
   if (options.focused) {
     await expect(destinationHeading).toBeFocused();
   }
@@ -151,7 +151,7 @@ test("Trainer receives cumulative global modules while project navigation stays 
       exact: true,
     }),
   ).toHaveCount(0);
-  await expect(page.getByRole("link", { name: "Workspace Settings" })).toHaveCount(
+  await expect(page.getByRole("link", { name: "Workspace settings" })).toHaveCount(
     0,
   );
   await expect(
@@ -223,7 +223,7 @@ test("individual owner receives every released workspace module", async ({
     }),
   ).toHaveCount(0);
   await expect(
-    page.getByRole("link", { name: "Workspace Settings", exact: true }),
+    page.getByRole("link", { name: "Workspace settings", exact: true }),
   ).toBeVisible();
   await expect(
     page.getByRole("combobox", { name: "Workspace" }),
@@ -244,7 +244,7 @@ test("New Training chooses project context before entering the five-step wizard"
 
   await expect(
     page.getByRole("button", {
-      name: "Step 1 of 5: Task & Data",
+      name: "Step 1 of 5: Task & data",
       exact: true,
     }),
   ).toHaveAttribute("aria-current", "step");
@@ -328,7 +328,7 @@ test("workspace switching reloads effective access without a not-found transitio
   await expect(workspacePicker).toHaveValue("1");
   await expect(
     workspacePicker.getByRole("option", {
-      name: "Evidence Team · Model Trainer",
+      name: "Evidence Team · Model trainer",
     }),
   ).toHaveCount(1);
   await expect(
@@ -338,6 +338,10 @@ test("workspace switching reloads effective access without a not-found transitio
   ).toHaveCount(1);
 
   await workspacePicker.selectOption("2");
+  await expect(page).toHaveURL(/\/training$/);
+  await expect(page.getByRole("button", { name: "Switch workspace" })).toBeVisible();
+  await page.getByRole("button", { name: "Switch workspace" }).focus();
+  await page.keyboard.press("Enter");
   await expect
     .poll(() =>
       page.evaluate(
@@ -375,7 +379,7 @@ test("manager scores a dataset, selects by uncertainty, and opens the prioritize
   await page.emulateMedia({ reducedMotion: "reduce" });
   await page.goto("/projects/1/rounds");
 
-  await expectRouteIdentity(page, "/projects/1/rounds", "Team & Rounds");
+  await expectRouteIdentity(page, "/projects/1/rounds", "Team & rounds");
   await expect(page.getByRole("heading", { name: "Model scoring" })).toBeVisible();
   await page.getByRole("button", { name: "Score with model" }).click();
 

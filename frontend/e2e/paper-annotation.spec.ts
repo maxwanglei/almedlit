@@ -220,8 +220,8 @@ test("saved classification and token NER setup share the original paper editor w
 
   await page.getByRole("button", { name: /^Back to My Work/ }).click();
   await expectUnifiedMyWork(page);
-  await expect(firstPaper).toContainText("Paper relevance: Draft");
-  await expect(firstPaper).toContainText("Drug entities: Draft");
+  await expect(firstPaper).toContainText("Paper relevance: In progress");
+  await expect(firstPaper).toContainText("Drug entities: In progress");
   await expect(page.locator(".paper-progress-summary")).toContainText("0 / 2");
   await firstPaper.click();
   await page.reload();
@@ -239,7 +239,7 @@ test("saved classification and token NER setup share the original paper editor w
       // A submitted classification stays selected while NER remains editable.
       await expect(page.getByRole("combobox", { name: "Task", exact: true })).toHaveValue("1001");
       await expect(page.getByRole("button", { name: /^Drug/ }).first()).toBeEnabled();
-      await page.getByRole("button", { name: "Edit this paper task", exact: true }).click();
+      await page.getByRole("button", { name: "Reopen this paper task", exact: true }).click();
       await page.getByRole("dialog").getByRole("button", { name: "Reopen and edit", exact: true }).click();
       await expect(page.getByRole("button", { name: "Submit task for this paper", exact: true })).toBeEnabled();
       const classificationHistory = state.decisions.filter((decision) => decision.round_item_id === 1001);
@@ -263,7 +263,7 @@ test("saved classification and token NER setup share the original paper editor w
   await expect(page.locator(".paper-progress-summary")).toContainText("1 / 2");
   await page.goto("/my-work/rounds/1?view=annotate&document=41");
   await expect(page.getByRole("heading", { name: "Drug entities", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Edit this paper task", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Reopen this paper task", exact: true })).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("classification-and-ner-saved.png"), fullPage: true });
   const accessibility = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa"]).analyze();
   expect(accessibility.violations).toEqual([]);

@@ -41,7 +41,7 @@ export default function QualityScreen({
   return (
     <div className="platform-page">
       <PlatformPageHeader
-        title="Quality & Review"
+        title="Quality & review"
         description="Review round readiness, adjudication state, and quality evidence without exposing private annotator work."
       />
 
@@ -98,11 +98,11 @@ export default function QualityScreen({
                       <td data-label="Status" data-priority="status">
                         <PlatformStatus value={round.status} />
                       </td>
-                      <td data-label="Task">v{round.task_version_id}</td>
-                      <td data-label="Dataset">v{round.dataset_version_id}</td>
+                      <td data-label="Task">{data.taskVersions.find((version) => version.id === round.task_version_id) ? `v${data.taskVersions.find((version) => version.id === round.task_version_id)?.version_number}` : "Version unavailable"}</td>
+                      <td data-label="Dataset">{data.datasetVersions.find((version) => version.id === round.dataset_version_id) ? `v${data.datasetVersions.find((version) => version.id === round.dataset_version_id)?.version_number}` : "Version unavailable"}</td>
                       <td data-label="Guideline">
                         {round.guideline_revision_id
-                          ? `v${round.guideline_revision_id}`
+                          ? data.guidelineRevisions.find((revision) => revision.id === round.guideline_revision_id) ? `Revision ${data.guidelineRevisions.find((revision) => revision.id === round.guideline_revision_id)?.version_number}` : "Revision unavailable"
                           : "Not pinned"}
                       </td>
                     </tr>

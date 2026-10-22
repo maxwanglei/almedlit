@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { NativeInput, NativeSelect, NativeTextarea } from "@/components/NativeField";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@astryxdesign/core/Button";
 
 import {
@@ -92,11 +93,15 @@ export default function EvidenceAdjudicationPanel({
   const [customEnd, setCustomEnd] = useState("");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
+  const [rangeError, setRangeError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
 
+  const comparisonRequest = useRef(0);
+  const activeScope = useRef("");
   const selectedScope =
     scopes.find((scope) => scopeKey(scope) === selectedScopeKey) ?? null;
+  activeScope.current = `${projectId}:${selectedScope ? scopeKey(selectedScope) : ""}`;
 
   useEffect(() => {
     setSelectedScopeKey((current) =>
@@ -109,14 +114,21 @@ export default function EvidenceAdjudicationPanel({
   }, [scopes]);
 
   useEffect(() => {
+    comparisonRequest.current += 1;
+    setBusy(false);
     setComparison(null);
     setSelectedAnnotationIds([]);
     setError(null);
+    setRangeError(null);
     setStatus(null);
-  }, [selectedScopeKey]);
+    return () => { comparisonRequest.current += 1; };
+  }, [projectId, selectedScopeKey]);
 
   async function loadComparison(): Promise<void> {
     if (!selectedScope) return;
+    const request = ++comparisonRequest.current;
+    const scope = activeScope.current;
+    const isCurrent = (): boolean => request === comparisonRequest.current && scope === activeScope.current;
     setBusy(true);
     setError(null);
     setStatus(null);
@@ -128,6 +140,7 @@ export default function EvidenceAdjudicationPanel({
         selectedScope.structureVersionId,
         selectedScope.guidelineVersionId,
       );
+      if (!isCurrent()) return;
       setComparison(result);
       setSelectedAnnotationIds((current) =>
         current.filter((id) =>
@@ -137,6 +150,7 @@ export default function EvidenceAdjudicationPanel({
         ),
       );
     } catch (caught) {
+      if (!isCurrent()) return;
       setComparison(null);
       setError(
         caught instanceof Error
@@ -144,7 +158,7 @@ export default function EvidenceAdjudicationPanel({
           : "The evidence comparison could not be loaded.",
       );
     } finally {
-      setBusy(false);
+      if (isCurrent()) setBusy(false);
     }
   }
 
@@ -161,6 +175,8 @@ export default function EvidenceAdjudicationPanel({
       setError("Load a comparison before creating gold evidence.");
       return;
     }
+    const operationScope = activeScope.current;
+    const isCurrentScope = (): boolean => operationScope === activeScope.current;
     const effectiveStrategy: Strategy = allowSoloGold ? "custom" : strategy;
     const selectedBlocks = comparison.blocks.filter((block) =>
       selectedAnnotationIds.includes(block.annotation_id),
@@ -196,12 +212,15 @@ export default function EvidenceAdjudicationPanel({
         endOrdinal < startOrdinal
       )
     ) {
-      setError("Enter valid start and end sentence ordinals in ascending order.");
+      setRangeError("Enter valid start and end sentence ordinals in ascending order.");
+      const invalidStart = customStart.trim() === "" || !Number.isSafeInteger(startOrdinal) || startOrdinal < 0;
+      document.getElementById(invalidStart ? "gold-start-ordinal" : "gold-end-ordinal")?.focus();
       return;
     }
 
     setBusy(true);
     setError(null);
+    setRangeError(null);
     setStatus(null);
     try {
       let startSentenceId: number | null = null;
@@ -227,6 +246,7 @@ export default function EvidenceAdjudicationPanel({
         startSentenceId = start.id;
         endSentenceId = end.id;
       }
+      if (!isCurrentScope()) return;
       const created = await adjudicateEvidence(
         projectId,
         selectedScope.documentId,
@@ -244,19 +264,20 @@ export default function EvidenceAdjudicationPanel({
           solo_gold: allowSoloGold,
         },
       );
+      if (!isCurrentScope()) return;
       setStatus(`Gold evidence block #${created.id} created`);
       setSelectedAnnotationIds([]);
       setNote("");
       await loadComparison();
-      setStatus(`Gold evidence block #${created.id} created`);
+      if (isCurrentScope()) setStatus(`Gold evidence block #${created.id} created`);
     } catch (caught) {
-      setError(
+      if (isCurrentScope()) setError(
         caught instanceof Error
           ? caught.message
           : "Gold evidence could not be created.",
       );
     } finally {
-      setBusy(false);
+      if (isCurrentScope()) setBusy(false);
     }
   }
 
@@ -277,19 +298,17 @@ export default function EvidenceAdjudicationPanel({
           <div className="platform-form-grid">
             <label>
               <span>Review scope</span>
-              <select
+              <NativeSelect
                 value={selectedScopeKey}
                 disabled={busy}
                 onChange={(event) => setSelectedScopeKey(event.target.value)}
               >
                 {scopes.map((scope) => (
                   <option key={scopeKey(scope)} value={scopeKey(scope)}>
-                    {documentName(documents, scope.documentId)} · target v
-                    {scope.targetVersionId} · guideline v
-                    {scope.guidelineVersionId}
+                    {`${documentName(documents, scope.documentId)} · target ID ${scope.targetVersionId} · guideline ID ${scope.guidelineVersionId}`}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </label>
             <div className="platform-field-action">
               <Button
@@ -301,7 +320,7 @@ export default function EvidenceAdjudicationPanel({
           </div>
 
           {error ? (
-            <p className="platform-form-warning" role="alert">{error}</p>
+            <p className="platform-dialog-error" role="alert">{error}</p>
           ) : null}
           {status ? (
             <p className="platform-form-success" role="status">{status}</p>
@@ -331,7 +350,7 @@ export default function EvidenceAdjudicationPanel({
                       return (
                         <tr key={block.annotation_id}>
                           <td data-label="Use">
-                            <input
+                            <NativeInput
                               type="checkbox"
                               aria-label={`Use evidence block ${block.annotation_id}`}
                               checked={selectedAnnotationIds.includes(
@@ -368,7 +387,7 @@ export default function EvidenceAdjudicationPanel({
               <div className="platform-form-grid">
                 <label>
                   <span>Gold boundary</span>
-                  <select
+                  <NativeSelect
                     value={allowSoloGold ? "custom" : strategy}
                     disabled={busy || allowSoloGold}
                     onChange={(event) =>
@@ -380,31 +399,38 @@ export default function EvidenceAdjudicationPanel({
                     <option value="union">Union</option>
                     <option value="intersection">Intersection</option>
                     <option value="custom">Custom</option>
-                  </select>
+                  </NativeSelect>
                 </label>
                 {allowSoloGold || strategy === "custom" ? (
                   <>
                     <label>
                       <span>Start sentence ordinal</span>
-                      <input
+                      <NativeInput
                         inputMode="numeric"
+                        id="gold-start-ordinal"
+                        aria-invalid={Boolean(rangeError)}
+                        aria-describedby={rangeError ? "gold-range-error" : undefined}
                         value={customStart}
-                        onChange={(event) => setCustomStart(event.target.value)}
+                        onChange={(event) => { setCustomStart(event.target.value); setRangeError(null); }}
                       />
                     </label>
                     <label>
                       <span>End sentence ordinal</span>
-                      <input
+                      <NativeInput
                         inputMode="numeric"
+                        id="gold-end-ordinal"
+                        aria-invalid={Boolean(rangeError)}
+                        aria-describedby={rangeError ? "gold-range-error" : undefined}
                         value={customEnd}
-                        onChange={(event) => setCustomEnd(event.target.value)}
+                        onChange={(event) => { setCustomEnd(event.target.value); setRangeError(null); }}
                       />
                     </label>
+                    {rangeError ? <p id="gold-range-error" className="platform-dialog-error platform-form-wide" role="alert">{rangeError}</p> : null}
                   </>
                 ) : null}
                 <label className="platform-form-wide">
                   <span>Gold note</span>
-                  <textarea
+                  <NativeTextarea
                     rows={3}
                     value={note}
                     onChange={(event) => setNote(event.target.value)}

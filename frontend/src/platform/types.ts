@@ -83,7 +83,7 @@ export interface LabelSetVersion extends VersionedResource {
   task_version_id: number;
   parent_version_id: number | null;
   name: string;
-  source_kind: "imported" | "human" | "adjudicated" | "derived";
+  source_kind: "imported" | "human" | "adjudicated" | "derived" | "composed";
   composition_policy: "replace" | "inherit" | "exclude";
   labels: Record<string, unknown>;
   version_number: number;
@@ -523,7 +523,7 @@ export interface ExecutionEnvironment extends VersionedResource {
 export interface StoragePolicy extends VersionedResource {
   project_id: number;
   name: string;
-  backend: "s3" | "minio" | "local";
+  backend: "minio" | "local";
   artifact_prefix: string;
   retention_class: string;
   encryption: Record<string, unknown>;

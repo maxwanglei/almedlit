@@ -60,7 +60,7 @@ export function personalAssignmentStatusLabel(
     case "submitted":
     case "adjudicated":
     case "completed":
-      return "Finished";
+      return "Submitted";
     case "adjudication_ready":
       return "Ready to review";
     case "blocked":
@@ -95,7 +95,7 @@ export function personalDocumentStatusLabel(
     case "partial":
       return "In progress";
     case "done":
-      return "Finished";
+      return "Submitted";
     case "review":
       return "Ready to review";
     case "blocked":

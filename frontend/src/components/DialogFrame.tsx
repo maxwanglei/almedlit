@@ -98,6 +98,8 @@ export default function DialogFrame({
       document.activeElement instanceof HTMLElement
         ? document.activeElement
         : null;
+    const returnRegion = trigger?.closest("main, [role='main'], section") ??
+      document.querySelector("main, [role='main']");
     lockBodyScroll();
     const frame = window.requestAnimationFrame(() => {
       const dialog = dialogRef.current;
@@ -114,7 +116,17 @@ export default function DialogFrame({
     return () => {
       window.cancelAnimationFrame(frame);
       unlockBodyScroll();
-      if (trigger?.isConnected) trigger.focus();
+      if (trigger?.isConnected) {
+        trigger.focus();
+      } else {
+        const fallback = returnRegion?.isConnected
+          ? returnRegion.querySelector<HTMLElement>("h1, h2, button:not([disabled]), a[href]") ?? returnRegion
+          : document.querySelector<HTMLElement>("main h1, [role='main'] h1, main, [role='main']");
+        if (fallback instanceof HTMLElement) {
+          if (!fallback.hasAttribute("tabindex")) fallback.setAttribute("tabindex", "-1");
+          fallback.focus();
+        }
+      }
     };
   }, [initialFocusRef, initialFocusSelector, open]);
 
@@ -125,6 +137,7 @@ export default function DialogFrame({
 
     const frame = window.requestAnimationFrame(() => {
       const target =
+        dialogRef.current?.querySelector<HTMLElement>("[aria-invalid='true'], input:invalid, select:invalid, textarea:invalid") ??
         dialogRef.current?.querySelector<HTMLElement>(errorFocusSelector) ??
         document.querySelector<HTMLElement>(errorFocusSelector);
       if (!target) return;

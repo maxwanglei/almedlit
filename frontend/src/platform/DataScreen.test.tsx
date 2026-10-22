@@ -34,7 +34,7 @@ describe("Source annotation progress", () => {
     render(<DataScreen data={data} legacyDocumentCount={0} onCreate={vi.fn()} />);
     await screen.findByText("2/3 submitted");
     expect(mocks.request).toHaveBeenCalledWith("/projects/7/datasets/annotation-progress");
-    expect(screen.getByText("No saved label layer")).toBeTruthy();
+    expect(screen.getByText("No saved label set")).toBeTruthy();
   });
 
   it("keeps source actions usable when optional progress fails", async () => {

@@ -180,7 +180,7 @@ function documentText(element: HTMLElement): string | null {
   return copy.textContent;
 }
 
-function selectText(body: HTMLElement, target: string): void {
+function selectText(body: HTMLElement, target: string, input: "mouse" | "keyboard" = "mouse"): void {
   const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
   let node = walker.nextNode();
   while (node && !node.textContent?.includes(target)) node = walker.nextNode();
@@ -194,7 +194,8 @@ function selectText(body: HTMLElement, target: string): void {
   });
   window.getSelection()!.removeAllRanges();
   window.getSelection()!.addRange(range);
-  fireEvent.mouseUp(body);
+  if (input === "keyboard") fireEvent.keyUp(body, { key: "ArrowRight", shiftKey: true });
+  else fireEvent.mouseUp(body);
 }
 
 beforeEach(() => {
@@ -253,6 +254,28 @@ describe("AnnotatorWorkspace legacy API Unicode offsets", () => {
     expect(within(sentenceBodies(container)[0]).getByRole("button", { name: `Disease: ${selectedText}` })).toBeTruthy();
   });
 
+  it("creates a span from keyboard text selection without a mouse event", async () => {
+    const text = "𝑃 😀 disease responded.";
+    const { container } = render(<Harness text={text} sentences={[[0, Array.from(text).length]]} />);
+    selectText(sentenceBodies(container)[0], "disease", "keyboard");
+    fireEvent.click(screen.getByRole("button", { name: /^Disease\s*D$/ }));
+    await waitFor(() => expect(mocks.createAnnotation).toHaveBeenCalledWith(expect.objectContaining({
+      start_offset: 4, end_offset: 11, text_span: "disease",
+    })));
+  });
+
+  it("confirms span deletion before calling the API and allows cancellation", async () => {
+    const text = "𝑃 😀 disease responded.";
+    const { container } = render(<Harness text={text} sentences={[[0, Array.from(text).length]]} annotations={[annotation()]} />);
+    fireEvent.click(within(sentenceBodies(container)[0]).getByRole("button", { name: "Disease: disease" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Delete annotation" }));
+    expect(mocks.deleteAnnotation).not.toHaveBeenCalled();
+    const dialog = screen.getByRole("alertdialog", { name: "Delete annotation?" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(mocks.deleteAnnotation).not.toHaveBeenCalled();
+  });
+
   it("saves a second-sentence selection after a highlighted Unicode prefix without counting its badge", async () => {
     const first = "𝑃 😀 improved.";
     const second = "Next 𝑛 😀 disease.";
@@ -293,8 +316,8 @@ describe("AnnotatorWorkspace legacy API Unicode offsets", () => {
       sentences={segmented ? [[0, start - 1], [start, Array.from(text).length]] : []} />);
     const bodies = sentenceBodies(container);
     const sentenceSection = bodies[bodies.length - 1].closest<HTMLElement>(".aw-sentence")!;
-    fireEvent.click(within(sentenceSection).getByRole("button", { name: "+ label" }));
-    fireEvent.click(screen.getByRole("button", { name: /^Finding\s*1$/ }));
+    fireEvent.click(within(sentenceSection).getByRole("button", { name: /^Add label for sentence/ }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /^Finding\s*1$/ }));
 
     await waitFor(() => expect(mocks.createAnnotation).toHaveBeenCalledWith(expect.objectContaining({
       annotation_type: "sentence_label",
@@ -302,7 +325,7 @@ describe("AnnotatorWorkspace legacy API Unicode offsets", () => {
       end_offset: Array.from(text).length,
       text_span: sentence,
     })));
-    expect(within(sentenceSection).getByRole("button", { name: "Finding" })).toBeTruthy();
+    expect(within(sentenceSection).getByRole("button", { name: /^Change label for sentence.*, Finding$/ })).toBeTruthy();
   });
 
   it("preserves ASCII selections and the whole-document fallback", async () => {

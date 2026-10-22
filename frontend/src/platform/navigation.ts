@@ -64,7 +64,7 @@ export const PROJECT_ROUTE_REGISTRY = [
     releaseState: "released",
   },
   {
-    id: "inference", label: "Inference", title: "Inference", level: "project",
+    id: "inference", label: "Predictions", title: "Predictions", level: "project",
     requiredRoles: PROJECT_ROLES, requiredCapability: "inference", backendModule: "models", releaseState: "released",
   },
   {
@@ -79,8 +79,8 @@ export const PROJECT_ROUTE_REGISTRY = [
   },
   {
     id: "rounds",
-    label: "Team & Rounds",
-    title: "Team & Rounds",
+    label: "Team & rounds",
+    title: "Team & rounds",
     level: "project",
     requiredRoles: PROJECT_ROLES,
     requiredCapability: "annotation",
@@ -89,8 +89,8 @@ export const PROJECT_ROUTE_REGISTRY = [
   },
   {
     id: "quality",
-    label: "Quality & Review",
-    title: "Quality & Review",
+    label: "Quality & review",
+    title: "Quality & review",
     level: "project",
     requiredRoles: PROJECT_MANAGERS,
     requiredCapability: "annotation",
@@ -133,12 +133,12 @@ export const PROJECT_ROUTE_ALIASES = {
   learning: {
     tab: "overview",
     kind: "planned",
-    notice: "Learning Loop is planned and is now summarized on Project overview.",
+    notice: "Active learning is planned. See the research loop roadmap on Project overview.",
   },
   loop: {
     tab: "overview",
     kind: "planned",
-    notice: "Learning Loop is planned and is now summarized on Project overview.",
+    notice: "Active learning is planned. See the research loop roadmap on Project overview.",
   },
   guidelines: {
     tab: "overview",
@@ -160,33 +160,26 @@ const PROJECT_MODULE_DEPENDENCIES: Partial<
   guidelines: ["data", "annotate"],
 };
 
+const PROJECT_MODULE_REQUIREMENTS = {
+  data: ["annotation", "training", "inference", "active_learning", "co_learning", "lineage"],
+  annotate: ["annotation"],
+  learning: ["active_learning", "co_learning"],
+  train: ["training"],
+  models: ["training", "inference", "lineage"],
+  guidelines: ["co_learning"],
+  activity: ["lineage"],
+} satisfies Record<ProjectModule, readonly string[]>;
+
+const PROJECT_MODULES = Object.keys(PROJECT_MODULE_REQUIREMENTS).filter(
+  (module): module is ProjectModule => module in PROJECT_MODULE_REQUIREMENTS,
+);
+
 export function configuredProjectModules(project: Project): Set<ProjectModule> {
   const configured = project.settings.modules;
-  if (!Array.isArray(configured)) {
-    return new Set([
-      "data",
-      "annotate",
-      "learning",
-      "train",
-      "models",
-      "guidelines",
-      "activity",
-    ]);
-  }
-  const known = new Set<ProjectModule>([
-    "data",
-    "annotate",
-    "learning",
-    "train",
-    "models",
-    "guidelines",
-    "activity",
-  ]);
+  if (configured === undefined || configured === null) return new Set(PROJECT_MODULES);
+  if (!Array.isArray(configured)) return new Set();
   const selected = new Set<ProjectModule>(
-    configured.filter(
-      (value): value is ProjectModule =>
-        typeof value === "string" && known.has(value as ProjectModule),
-    ),
+    PROJECT_MODULES.filter((module) => configured.includes(module)),
   );
   let changed = true;
   while (changed) {
@@ -206,10 +199,18 @@ export function configuredProjectModules(project: Project): Set<ProjectModule> {
 export function projectSupportsSection(
   project: Project,
   tab: ProjectPlatformTab,
+  effectiveCapabilities: readonly string[],
 ): boolean {
-  if (tab === "inference") return configuredProjectModules(project).has("data") && configuredProjectModules(project).has("models");
+  const selected = configuredProjectModules(project);
+  const available = new Set([...selected].filter((module) =>
+    PROJECT_MODULE_REQUIREMENTS[module].some((capability) => effectiveCapabilities.includes(capability)),
+  ));
+  const effective = new Set([...available].filter((module) =>
+    (PROJECT_MODULE_DEPENDENCIES[module] ?? []).every((dependency) => available.has(dependency)),
+  ));
+  if (tab === "inference") return effective.has("data") && effective.has("models");
   const module = projectRouteDefinition(tab).backendModule;
-  return module === null || configuredProjectModules(project).has(module);
+  return module === null || effective.has(module);
 }
 
 export function projectRouteDefinition(

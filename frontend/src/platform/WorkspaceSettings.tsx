@@ -1,7 +1,10 @@
+import { NativeSelect } from "@/components/NativeField";
+import ValidatedForm from "@/components/ValidatedForm";
+import LoadingState from "@/components/LoadingState";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
-import { Check, Copy, RefreshCw, RotateCw, Trash2, UserRoundPlus, X } from "lucide-react";
+import { Check, Copy, RefreshCw, RotateCw, Trash2, UserRoundPlus, UserRoundX } from "lucide-react";
 
 import {
   approveJoinRequest,
@@ -20,6 +23,11 @@ import {
   type WorkspaceCapabilities,
 } from "@/api/client";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import {
+  WORKSPACE_PRESET_LABELS,
+  WORKSPACE_ROLE_OPTIONS as ROLE_OPTIONS,
+  workspaceRoleLabel,
+} from "@/lib/workspacePresentation";
 import type {
   WorkspaceJoinRequest,
   WorkspaceGovernance,
@@ -33,39 +41,30 @@ import {
   PlatformPageHeader,
   PlatformSection,
   PlatformStatus,
+  formatCount,
+  formatDateTime,
+  formatStatus,
 } from "./components";
-
-const ROLE_OPTIONS: Array<{ value: WorkspaceRole; label: string }> = [
-  { value: "annotator", label: "Annotator" },
-  { value: "trainer", label: "Model Trainer" },
-  { value: "manager", label: "Manager" },
-  { value: "admin", label: "Administrator" },
-];
 
 const CAPABILITY_PRESETS = [
   {
     value: "annotate",
-    label: "Annotate",
     description: "Data and human annotation.",
   },
   {
     value: "train",
-    label: "Train Models",
-    description: "Training and Models without Annotation.",
+    description: "Model training and the model registry without annotation.",
   },
   {
     value: "annotate_train",
-    label: "Annotate + Train",
-    description: "Annotation, model training, inference, and export.",
+    description: "Annotation, model training, predictions, and export.",
   },
   {
     value: "annotate_train_al",
-    label: "Annotate + Train + Active Learning",
     description: "Includes the planned active-learning capability.",
   },
   {
     value: "full",
-    label: "Full",
     description: "Every capability supported by this deployment.",
   },
 ] as const;
@@ -77,13 +76,13 @@ function memberName(member: WorkspaceMember): string {
 function formatExpiryMinutes(minutes: number): string {
   if (minutes % 1_440 === 0) {
     const days = minutes / 1_440;
-    return `${days} ${days === 1 ? "day" : "days"}`;
+    return formatCount(days, "day");
   }
   if (minutes % 60 === 0) {
     const hours = minutes / 60;
-    return `${hours} ${hours === 1 ? "hour" : "hours"}`;
+    return formatCount(hours, "hour");
   }
-  return `${minutes} minutes`;
+  return formatCount(minutes, "minute");
 }
 
 export default function WorkspaceSettings({
@@ -118,6 +117,8 @@ export default function WorkspaceSettings({
   const [inviteToRevoke, setInviteToRevoke] =
     useState<WorkspaceInviteSummary | null>(null);
   const [rotateJoinCode, setRotateJoinCode] = useState(false);
+  const [roleToChange, setRoleToChange] = useState<{ member: WorkspaceMember; role: WorkspaceRole } | null>(null);
+  const [requestToReject, setRequestToReject] = useState<WorkspaceJoinRequest | null>(null);
   const [memberToRemove, setMemberToRemove] =
     useState<WorkspaceMember | null>(null);
   const [loading, setLoading] = useState(true);
@@ -188,6 +189,8 @@ export default function WorkspaceSettings({
     setInviteToRevoke(null);
     setRotateJoinCode(false);
     setMemberToRemove(null);
+    setRoleToChange(null);
+    setRequestToReject(null);
     setStatus(null);
     setBusy(false);
     void load();
@@ -250,12 +253,13 @@ export default function WorkspaceSettings({
         role,
       );
       if (!isCurrentRequest()) return;
+      setRoleToChange(null);
       setMembers((current) =>
         current.map((item) =>
           item.user_id === updated.user_id ? updated : item,
         ),
       );
-    }, `${memberName(member)} is now ${ROLE_OPTIONS.find((item) => item.value === role)?.label}.`);
+    }, `${memberName(member)} is now ${workspaceRoleLabel(role, workspaceKind)}.`);
   }
 
   async function removeMember(): Promise<void> {
@@ -340,6 +344,7 @@ export default function WorkspaceSettings({
       if (!isCurrentRequest()) return;
       setMembers(nextMembers);
       setJoinRequests(nextRequests);
+      setRequestToReject(null);
     }, approve ? "Join request approved." : "Join request rejected.");
   }
 
@@ -363,7 +368,7 @@ export default function WorkspaceSettings({
                 />
               ) : null}
               <Button
-                label="Refresh"
+                label="Refresh" tooltip="Refresh"
                 icon={<RefreshCw size={17} />}
                 isIconOnly
                 variant="ghost"
@@ -389,10 +394,7 @@ export default function WorkspaceSettings({
         ) : null}
 
         {loading ? (
-          <div className="platform-loading" role="status" aria-live="polite">
-            <span aria-hidden="true" />
-            Loading workspace settings…
-          </div>
+          <LoadingState label="Loading workspace settings…" />
         ) : (
           <>
             <PlatformSection
@@ -402,7 +404,7 @@ export default function WorkspaceSettings({
               <div className="workspace-capability-settings">
                 <label>
                   <span>Capability preset</span>
-                  <select
+                  <NativeSelect
                     value={preset ?? ""}
                     disabled={loading || busy || capabilities === null}
                     onChange={(event) => setPreset(event.target.value)}
@@ -411,10 +413,10 @@ export default function WorkspaceSettings({
                     {capabilities?.preset === "custom" ? <option value="custom" disabled>Custom</option> : null}
                     {CAPABILITY_PRESETS.map((option) => (
                       <option key={option.value} value={option.value}>
-                        {option.label}
+                        {WORKSPACE_PRESET_LABELS[option.value]}
                       </option>
                     ))}
-                  </select>
+                  </NativeSelect>
                   <small>
                     {CAPABILITY_PRESETS.find((item) => item.value === preset)
                       ?.description ?? "Custom workspace capability policy."}
@@ -434,13 +436,14 @@ export default function WorkspaceSettings({
                 >
                   {capabilities.effective.map((capability) => (
                     <span key={capability}>
-                      <PlatformStatus value={capability} />
+                      {formatStatus(capability)}
                     </span>
                   ))}
                   {Object.entries(capabilities.blocked).map(
                     ([capability, reason]) => (
-                      <span key={capability} title={reason}>
-                        <PlatformStatus value={`${capability} unavailable`} />
+                      <span key={capability}>
+                        <span>{formatStatus(capability)} unavailable</span>
+                        <span className="platform-footnote">{reason}</span>
                       </span>
                     ),
                   )}
@@ -494,18 +497,16 @@ export default function WorkspaceSettings({
                             </td>
                             <td data-label="Effective role">
                               {workspaceKind === "individual" ? (
-                                <strong>Owner</strong>
+                                <strong>{workspaceRoleLabel(member.role, workspaceKind)}</strong>
                               ) : (
-                                <select
+                                <NativeSelect
                                   aria-label={`Role for ${memberName(member)}`}
                                   value={member.role}
                                   disabled={busy || isCurrentUser}
-                                  onChange={(event) =>
-                                    void changeRole(
-                                      member,
-                                      event.target.value as WorkspaceRole,
-                                    )
-                                  }
+                                  onChange={(event) => {
+                                    const option = ROLE_OPTIONS.find((item) => item.value === event.target.value);
+                                    if (option) { setError(null); setRoleToChange({ member, role: option.value }); }
+                                  }}
                                 >
                                   {ROLE_OPTIONS.map((option) => (
                                     <option
@@ -515,13 +516,13 @@ export default function WorkspaceSettings({
                                       {option.label}
                                     </option>
                                   ))}
-                                </select>
+                                </NativeSelect>
                               )}
                             </td>
                             {workspaceKind === "team" ? (
                               <td data-label="Action" data-priority="action">
                                 <Button
-                                  label={`Remove ${memberName(member)}`}
+                                  label={`Remove ${memberName(member)}`} tooltip={`Remove ${memberName(member)}`}
                                   icon={<Trash2 size={16} />}
                                   isIconOnly
                                   variant="ghost"
@@ -563,7 +564,7 @@ export default function WorkspaceSettings({
                     <div className="workspace-share-value">
                       <code>{governance.join_code}</code>
                       <Button
-                        label="Copy join code"
+                        label="Copy join code" tooltip="Copy join code"
                         icon={<Copy size={16} aria-hidden="true" />}
                         isIconOnly
                         variant="ghost"
@@ -581,7 +582,7 @@ export default function WorkspaceSettings({
                   title="Invitations"
                   description="Create a single-use, role-bounded link or revoke an unused link."
                 >
-                  <form
+                  <ValidatedForm
                     className="workspace-invite-form"
                     onSubmit={(event) => {
                       event.preventDefault();
@@ -590,23 +591,24 @@ export default function WorkspaceSettings({
                   >
                     <label>
                       <span>Initial role</span>
-                      <select
+                      <NativeSelect
                         value={inviteRole}
                         disabled={busy}
-                        onChange={(event) =>
-                          setInviteRole(event.target.value as WorkspaceRole)
-                        }
+                        onChange={(event) => {
+                          const option = ROLE_OPTIONS.find((item) => item.value === event.target.value);
+                          if (option) setInviteRole(option.value);
+                        }}
                       >
                         {ROLE_OPTIONS.map((option) => (
                           <option key={option.value} value={option.value}>
                             {option.label}
                           </option>
                         ))}
-                      </select>
+                      </NativeSelect>
                     </label>
                     <label>
                       <span>Expires</span>
-                      <select
+                      <NativeSelect
                         value={inviteExpiry}
                         disabled={busy}
                         onChange={(event) => setInviteExpiry(event.target.value)}
@@ -620,7 +622,7 @@ export default function WorkspaceSettings({
                         <option value="1440">24 hours</option>
                         <option value="10080">7 days</option>
                         <option value="43200">30 days</option>
-                      </select>
+                      </NativeSelect>
                     </label>
                     <Button
                       label="Create invitation"
@@ -628,7 +630,7 @@ export default function WorkspaceSettings({
                       type="submit"
                       isDisabled={busy}
                     />
-                  </form>
+                  </ValidatedForm>
                   {createdInvite ? (
                     <div
                       id={inviteTokenId}
@@ -639,7 +641,7 @@ export default function WorkspaceSettings({
                       <div className="workspace-share-value">
                         <code>{`${window.location.origin}/invites#token=${encodeURIComponent(createdInvite.token)}`}</code>
                         <Button
-                          label="Copy invitation link"
+                          label="Copy invitation link" tooltip="Copy invitation link"
                           icon={<Copy size={16} aria-hidden="true" />}
                           isIconOnly
                           variant="ghost"
@@ -673,17 +675,15 @@ export default function WorkspaceSettings({
                         <tbody>
                           {invites.map((invite) => (
                             <tr key={invite.id}>
-                              <td data-label="Role"><PlatformStatus value={invite.role} /></td>
+                              <td data-label="Role">{workspaceRoleLabel(invite.role)}</td>
                               <td data-label="Created by">{invite.created_by_username}</td>
                               <td data-label="Expires">
-                                {invite.expires_at
-                                  ? new Date(invite.expires_at).toLocaleString()
-                                  : "No expiry"}
+                                {formatDateTime(invite.expires_at, "No expiry")}
                               </td>
                               <td data-label="Action" data-priority="action">
                                 <Button
-                                  label={`Revoke ${invite.role} invitation`}
-                                  icon={<X size={16} aria-hidden="true" />}
+                                  label={`Revoke ${workspaceRoleLabel(invite.role).toLowerCase()} invitation`} tooltip={`Revoke ${workspaceRoleLabel(invite.role).toLowerCase()} invitation`}
+                                  icon={<Trash2 size={16} aria-hidden="true" />}
                                   isIconOnly
                                   variant="ghost"
                                   isDisabled={busy}
@@ -718,7 +718,7 @@ export default function WorkspaceSettings({
                           </div>
                           <div>
                             <Button
-                              label={`Approve request from ${request.username}`}
+                              label={`Approve request from ${request.username}`} tooltip={`Approve request from ${request.username}`}
                               icon={<Check size={16} />}
                               isIconOnly
                               variant="ghost"
@@ -726,12 +726,12 @@ export default function WorkspaceSettings({
                               onClick={() => void decideRequest(request, true)}
                             />
                             <Button
-                              label={`Reject request from ${request.username}`}
-                              icon={<X size={16} />}
+                              label={`Reject request from ${request.username}`} tooltip={`Reject request from ${request.username}`}
+                              icon={<UserRoundX size={16} aria-hidden="true" />}
                               isIconOnly
                               variant="ghost"
                               isDisabled={busy}
-                              onClick={() => void decideRequest(request, false)}
+                              onClick={() => { setError(null); setRequestToReject(request); }}
                             />
                           </div>
                         </li>
@@ -749,6 +749,8 @@ export default function WorkspaceSettings({
         )}
       </div>
 
+      <ConfirmDialog open={roleToChange !== null} title="Change member role?" description={roleToChange ? `${memberName(roleToChange.member)} will become ${workspaceRoleLabel(roleToChange.role, workspaceKind).toLowerCase()}. Their workspace permissions change immediately.` : ""} confirmLabel="Change role" busy={busy} error={error} onCancel={() => { setRoleToChange(null); setError(null); }} onConfirm={async () => { if (roleToChange) await changeRole(roleToChange.member, roleToChange.role); }} />
+      <ConfirmDialog open={requestToReject !== null} title="Reject join request?" description={requestToReject ? `${requestToReject.username} will not join this workspace. They must send another request to be considered again.` : ""} confirmLabel="Reject request" busy={busy} error={error} onCancel={() => { setRequestToReject(null); setError(null); }} onConfirm={async () => { if (requestToReject) await decideRequest(requestToReject, false); }} />
       <ConfirmDialog
         open={memberToRemove !== null}
         title="Remove workspace member?"
@@ -759,6 +761,7 @@ export default function WorkspaceSettings({
         }
         confirmLabel="Remove member"
         busy={busy}
+        error={error}
         onCancel={() => setMemberToRemove(null)}
         onConfirm={removeMember}
       />
@@ -768,6 +771,7 @@ export default function WorkspaceSettings({
         description="This invitation link will stop working immediately. Existing members are not affected."
         confirmLabel="Revoke invitation"
         busy={busy}
+        error={error}
         onCancel={() => setInviteToRevoke(null)}
         onConfirm={revokeInvite}
       />
@@ -777,6 +781,7 @@ export default function WorkspaceSettings({
         description="The current code will stop accepting new requests. Pending requests are not affected."
         confirmLabel="Rotate code"
         busy={busy}
+        error={error}
         onCancel={() => setRotateJoinCode(false)}
         onConfirm={rotateCode}
       />

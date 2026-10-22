@@ -1,5 +1,8 @@
+import { NativeSelect } from "@/components/NativeField";
+import LoadingState from "@/components/LoadingState";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { ANNOTATION_LABEL_COLORS } from "@/lib/annotationPalette";
 import type * as legacyApi from "@/api/client";
 import { useSearchState } from "@/hooks/useSearchState";
 import AnnotatorWorkspace from "@/pages/AnnotatorWorkspace";
@@ -21,8 +24,6 @@ export interface PaperAnnotationApi {
   reopenPersonalTaskAssignment: typeof legacyApi.reopenPersonalTaskAssignment;
   setDocumentLabel: (documentId: number, label: string) => Promise<Annotation>;
 }
-
-const COLORS = ["#4d6e5b", "#8e3a3a", "#4a5a8a", "#8a6d2a", "#6a4a7a"];
 
 /** Only contracts the existing paper editor can represent without transforming inputs. */
 export function paperRoundAnnotationType(context: RoundWorkContext): PaperTaskType | null {
@@ -89,7 +90,7 @@ function projectedTask(round: LoadedPaperRound, index: number): AnnotationWorkbe
   const type = paperRoundAnnotationType(round.context)!;
   return { id: round.context.task_version.id, project_id: round.context.project.id, annotation_type: type,
     display_name: round.context.task.name, description: `Round: ${round.context.round.name}`, enabled: true, sort_order: index,
-    labels: taskLabels(round.context).map((name, labelIndex) => ({ name, color: COLORS[labelIndex % COLORS.length], description: null })),
+    labels: taskLabels(round.context).map((name, labelIndex) => ({ name, color: ANNOTATION_LABEL_COLORS[labelIndex % ANNOTATION_LABEL_COLORS.length], description: null })),
     settings: { round_id: round.context.round.id, dataset_version_id: round.context.round.dataset_version_id }, annotation_type_spec: taskSpec(type) };
 }
 
@@ -142,7 +143,7 @@ export function projectPaperRoundWork(rounds: LoadedPaperRound[], userId: number
         annotator_user_id: userId, annotator_id: annotatorId, model_checkpoint_id: null, guideline_version_id: null,
         structure_version_id: null, head_annotation_id: null, tail_annotation_id: null,
         evidence: {}, attributes: { round_item_id: item.id, round_id: round.context.round.id, decision_id: latest.id, entity_index: index, dataset_item_id: item.dataset_item_id },
-        revision: latest.id, created_at: latest.created_at ?? "", updated_at: latest.created_at ?? "",
+        created_at: latest.created_at ?? "", updated_at: latest.created_at ?? "",
         });
       });
     }
@@ -230,7 +231,7 @@ export function createPaperRoundAnnotationApi(options: {
     const itemId = Number(before.attributes.round_item_id);
     return serial(itemId, async () => {
       const currentAnnotation = findAnnotation(id);
-      if (currentAnnotation.revision !== before.revision) throw new Error("This annotation changed. Refresh the paper before editing it.");
+      if (currentAnnotation.attributes.decision_id !== before.attributes.decision_id) throw new Error("This annotation changed. Refresh the paper before editing it.");
       const { round, item } = locate(itemId);
       const entities = [...entitiesOf(ownLatest(round, itemId, userId)?.output)];
       const index = Number(currentAnnotation.attributes.entity_index);
@@ -247,7 +248,7 @@ export function createPaperRoundAnnotationApi(options: {
     const itemId = Number(before.attributes.round_item_id);
     await serial(itemId, async () => {
       const currentAnnotation = findAnnotation(id);
-      if (currentAnnotation.revision !== before.revision) throw new Error("This annotation changed. Refresh the paper before editing it.");
+      if (currentAnnotation.attributes.decision_id !== before.attributes.decision_id) throw new Error("This annotation changed. Refresh the paper before editing it.");
       const { round } = locate(itemId);
       const entities = entitiesOf(ownLatest(round, itemId, userId)?.output).filter((_, index) => index !== Number(currentAnnotation.attributes.entity_index));
       await save(itemId, { entities });
@@ -301,7 +302,8 @@ export default function PaperRoundWorkspace({ context, contexts, currentUserId, 
   const roundsRef = useRef(rounds);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [editorError, setEditorError] = useState<string | null>(null);
   const [selectedDocumentId, setSelectedDocumentId] = useState<number | null>(null);
   const [genericRound, setGenericRound] = useState(false);
   const [searchParams, updateSearch] = useSearchState();
@@ -310,10 +312,12 @@ export default function PaperRoundWorkspace({ context, contexts, currentUserId, 
   const classificationTaskVersionId = Number(searchParams.get("classificationTaskVersionId"));
   const entityTaskVersionId = Number(searchParams.get("entityTaskVersionId"));
   const annotationId = useMemo(createPaperAnnotationIds, [context.round.id]);
-  const revision = useRef(0);
-  const updateRounds = useCallback((next: LoadedPaperRound[]) => { revision.current += 1; roundsRef.current = next; setRounds(next); }, []);
+  const loadRevision = useRef(0);
+  const mutationRevision = useRef(0);
+  const updateRounds = useCallback((next: LoadedPaperRound[]) => { mutationRevision.current += 1; roundsRef.current = next; setRounds(next); }, []);
   const reload = useCallback(async () => {
-    const startedAt = ++revision.current;
+    const startedAt = ++loadRevision.current;
+    const mutationsAtStart = mutationRevision.current;
     try {
       if (!selectedContextsRef.current.length) throw new Error("This round cannot use the paper editor. It needs a supported paper task and an unassisted open round.");
       const loaded = await Promise.all(selectedContextsRef.current.map(async (item) => ({ context: item, work: await loadRoundWork(item.project.id, item.round) })));
@@ -325,19 +329,27 @@ export default function PaperRoundWorkspace({ context, contexts, currentUserId, 
         if (!Number.isInteger(source.payload.document_id) || Number(source.payload.document_id) <= 0 || typeof source.payload.text !== "string") externalSource = true;
       }
       if (externalSource) {
-        if (startedAt === revision.current) { setGenericRound(true); setError(null); }
+        if (startedAt === loadRevision.current) { setGenericRound(true); setLoadError(null); }
         return;
       }
       const loadedProjection = projectPaperRoundWork(loaded, currentUserId, annotatorId, annotationId);
-      if (startedAt === revision.current) {
+      if (startedAt === loadRevision.current) {
         const requestedDocument = loadedProjection.documents.find((document) => document.id === requestedDocumentRef.current);
         setSelectedDocumentId((current) => requestedDocument?.id ?? (loadedProjection.documents.some((document) => document.id === current) ? current : loadedProjection.documents[0]?.id ?? null));
-        roundsRef.current = loaded; setRounds(loaded); setGenericRound(false); setError(null);
+        const current = mutationsAtStart === mutationRevision.current ? loaded : loaded.map((round) => {
+          const local = roundsRef.current.find((candidate) => candidate.context.round.id === round.context.round.id);
+          if (!local) return round;
+          return { ...round, work: { ...round.work,
+            decisions: [...new Map([...round.work.decisions, ...local.work.decisions].map((decision) => [decision.id, decision])).values()],
+            submissions: [...new Map([...round.work.submissions, ...local.work.submissions].map((submission) => [submission.id, submission])).values()],
+          } };
+        });
+        roundsRef.current = current; setRounds(current); setGenericRound(false); setLoadError(null);
       }
-    } catch (caught) { if (startedAt === revision.current) setError(caught instanceof Error ? caught.message : "Could not load saved paper annotations."); }
-    finally { if (startedAt === revision.current) setLoading(false); }
+    } catch (caught) { if (startedAt === loadRevision.current) setLoadError(caught instanceof Error ? caught.message : "Could not load saved paper annotations."); }
+    finally { if (startedAt === loadRevision.current) setLoading(false); }
   }, [annotationId, annotatorId, currentUserId, context.project.id, context.round.id, context.round.dataset_version_id]);
-  useEffect(() => { setLoading(true); setRounds([]); roundsRef.current = []; setGenericRound(false); void reload(); return () => { revision.current += 1; }; }, [loadKey, reload]);
+  useEffect(() => { setEditorError(null); setLoading(true); setRounds([]); roundsRef.current = []; setGenericRound(false); void reload(); return () => { loadRevision.current += 1; }; }, [loadKey, reload]);
 
   // The paper editor has one panel per annotation family. Extra tasks remain explicitly selectable.
   const visibleRounds = useMemo(() => (["doc_label", "entity"] as const).flatMap((type) => {
@@ -367,17 +379,18 @@ export default function PaperRoundWorkspace({ context, contexts, currentUserId, 
   if (genericRound && !loading) return <RoundWorkbench round={context.round} task={context.task_version} currentUserId={currentUserId} canManage={canManage} onClose={onClose} onRefresh={reload} />;
 
   return <div className="paper-round-workspace">
-    {error ? <div role="alert" className="platform-error">{error}<button type="button" onClick={() => { setLoading(true); void reload(); }}>Retry loading papers</button></div> : null}
-    {loading ? <p role="status">Loading saved papers and task decisions…</p> : null}
+    {loadError ? <div role="alert" className="platform-error">{loadError}<button type="button" onClick={() => { setLoading(true); void reload(); }}>Retry loading papers</button></div> : null}
+    {editorError ? <p role="alert" className="platform-error">{editorError}</p> : null}
+    {loading ? <LoadingState label="Loading saved papers and task decisions…" /> : null}
     {!loading && rounds.length > 0 ? <>
       <div className="platform-form-grid">{(["doc_label", "entity"] as const).map((type) => {
         const available = rounds.filter((round) => paperRoundAnnotationType(round.context) === type);
-        return available.length > 1 ? <label key={type}>{type === "entity" ? "Entity task" : "Classification task"}<select disabled={busy} value={visibleRounds.find((round) => paperRoundAnnotationType(round.context) === type)?.context.task_version.id} onChange={(event) => updateSearch({ [type === "doc_label" ? "classificationTaskVersionId" : "entityTaskVersionId"]: Number(event.target.value), assignment: null })}>{available.map((round) => <option key={round.context.round.id} value={round.context.task_version.id}>{round.context.task.name} — {round.context.round.name}</option>)}</select></label> : null;
+        return available.length > 1 ? <label key={type}>{type === "entity" ? "Entity task" : "Classification task"}<NativeSelect disabled={busy} value={visibleRounds.find((round) => paperRoundAnnotationType(round.context) === type)?.context.task_version.id} onChange={(event) => updateSearch({ [type === "doc_label" ? "classificationTaskVersionId" : "entityTaskVersionId"]: Number(event.target.value), assignment: null })}>{available.map((round) => <option key={round.context.round.id} value={round.context.task_version.id}>{round.context.task.name} — {round.context.round.name}</option>)}</NativeSelect></label> : null;
       })}</div>
       <AnnotatorWorkspace projects={[project]} selectedProject={project} selectedProjectId={project.id} setSelectedProjectId={() => undefined}
         documents={projection.documents} assignments={projection.assignments} annotatorId={annotatorId} projectProgress={null}
         selectedDocumentId={selectedDocumentId} setSelectedDocumentId={setSelectedDocumentId} workbench={workbench} setWorkbench={() => undefined}
-        busy={busy} setBusy={setBusy} setError={setError} refreshProjectData={reload} refreshWorkbench={async () => undefined}
+        busy={busy} setBusy={setBusy} setError={setEditorError} refreshProjectData={reload} refreshWorkbench={async () => undefined}
         allowAssignmentlessSubmit annotationApi={annotationApi} defaultView={defaultView} onOpenProjectTab={onOpenProjectTasks}
         overviewControls={overviewControls ?? <p>{context.project.name}</p>} taskInventory={taskInventory}
         onBackToMyWork={defaultView === "annotate" ? onClose : undefined} canManageTasks={canManage} />

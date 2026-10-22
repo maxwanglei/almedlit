@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import TrainingDatasetBuilder, { inheritedTrainingSource } from "./TrainingDatasetBuilder";
 import { EMPTY_PLATFORM_PROJECT_DATA, type PlatformProjectData, type AnnotationRound } from "./types";
 import type { TrainingPreview } from "./trainingPreparationApi";
+import { publishSessionChange } from "@/auth/session";
 
 const mocks = vi.hoisted(() => ({ preview: vi.fn(), prepare: vi.fn() }));
 vi.mock("./trainingPreparationApi", () => ({ previewTrainingDataset: mocks.preview, prepareTrainingDataset: mocks.prepare }));
@@ -155,4 +156,81 @@ it("keeps imported label sets out of project annotation mode", async () => {
   await user.click(screen.getByRole("radio", { name: "Import external labeled data" }));
   await user.click(screen.getByRole("radio", { name: "Use project annotations" }));
   expect(screen.getByLabelText("Labels from")).toHaveProperty("value", "round:21");
+});
+
+it("shows a failed parent continuation and retries without creating another version", async () => {
+  const user = userEvent.setup();
+  mocks.prepare.mockResolvedValue({ training_dataset_version: { id: 33, name: "Prepared", version_number: 1 } });
+  const onCreated = vi.fn().mockRejectedValueOnce(new Error("Summary unavailable")).mockResolvedValue(undefined);
+  render(<TrainingDatasetBuilder projectId={7} data={data} onImport={vi.fn()} onCreated={onCreated} onCancel={vi.fn()} />);
+  await user.type(screen.getByLabelText("Training dataset name"), "Prepared");
+  await user.click(screen.getByRole("button", { name: "Preview training dataset" }));
+  await user.click(await screen.findByRole("button", { name: "Create training dataset" }));
+  expect((await screen.findByRole("alert")).textContent).toContain("Summary unavailable");
+  await user.click(screen.getByRole("button", { name: "Retry opening saved dataset" }));
+  await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(2));
+  expect(mocks.prepare).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(sessionStorage.getItem("al-medlit:training-preparation:7:new:all")).toBeNull());
+});
+it.each([false, true])("preserves a replacement draft after a saved continuation resolves, session changed=%s", async (changeSession) => {
+  const user = userEvent.setup();
+  let resolveContinuation!: () => void;
+  const continuation = new Promise<void>((resolve) => { resolveContinuation = resolve; });
+  const onCreated = vi.fn(() => continuation);
+  const key = "al-medlit:training-preparation:7:new:all";
+  sessionStorage.setItem(key, JSON.stringify({ saved: { id: 33, name: "Prepared", version_number: 1 } }));
+  const mounted = render(<TrainingDatasetBuilder projectId={7} data={data} onImport={vi.fn()} onCreated={onCreated} onCancel={vi.fn()} />);
+  await user.click(screen.getByRole("button", { name: "Open saved dataset" }));
+  expect(onCreated).toHaveBeenCalledTimes(1);
+  if (changeSession) publishSessionChange(false);
+  mounted.unmount();
+  const replacement = JSON.stringify({ draft: { name: "Another user's dataset" } });
+  sessionStorage.setItem(key, replacement);
+  await act(async () => { resolveContinuation(); await continuation; });
+  expect(sessionStorage.getItem(key)).toBe(replacement);
+});
+it("clears its saved draft after a successful same-session navigation unmounts the builder", async () => {
+  const user = userEvent.setup();
+  const key = "al-medlit:training-preparation:7:new:all";
+  sessionStorage.setItem(key, JSON.stringify({ saved: { id: 33, name: "Prepared", version_number: 1 } }));
+  const mounted = render(<TrainingDatasetBuilder projectId={7} data={data} onImport={vi.fn()} onCreated={async () => { mounted.unmount(); }} onCancel={vi.fn()} />);
+  await user.click(screen.getByRole("button", { name: "Open saved dataset" }));
+  expect(sessionStorage.getItem(key)).toBeNull();
+});
+it("does not restore a cleared session draft when an in-flight save completes before unmount", async () => {
+  const user = userEvent.setup();
+  let resolveSave!: (value: { training_dataset_version: { id: number; name: string; version_number: number } }) => void;
+  const save = new Promise<{ training_dataset_version: { id: number; name: string; version_number: number } }>((resolve) => { resolveSave = resolve; });
+  mocks.prepare.mockReturnValueOnce(save);
+  const onCreated = vi.fn(async () => undefined);
+  render(<TrainingDatasetBuilder projectId={7} data={data} onImport={vi.fn()} onCreated={onCreated} onCancel={vi.fn()} />);
+  await user.type(screen.getByLabelText("Training dataset name"), "Prepared");
+  await user.click(screen.getByRole("button", { name: "Preview training dataset" }));
+  await user.click(await screen.findByRole("button", { name: "Create training dataset" }));
+  expect(mocks.prepare).toHaveBeenCalledTimes(1);
+  publishSessionChange(false);
+  await act(async () => { resolveSave({ training_dataset_version: { id: 33, name: "Prepared", version_number: 1 } }); await save; });
+  expect(onCreated).not.toHaveBeenCalled();
+  expect(sessionStorage.getItem("al-medlit:training-preparation:7:new:all")).toBeNull();
+});
+it("prevents duplicate source selections before preview", async () => {
+  const user = userEvent.setup();
+  render(<TrainingDatasetBuilder projectId={7} data={data} onImport={vi.fn()} onCreated={async () => undefined} onCancel={vi.fn()} />);
+  await user.click(screen.getByRole("button", { name: "Add another source" }));
+  const sourceSelectors = screen.getAllByLabelText("Source dataset version");
+  expect(sourceSelectors[1].querySelector('option[value="11"]')).toHaveProperty("disabled", true);
+});
+it("limits the source list to thirty before preview", async () => {
+  render(<TrainingDatasetBuilder projectId={7} data={data} onImport={vi.fn()} onCreated={async () => undefined} onCancel={vi.fn()} />);
+  const add = screen.getByRole("button", { name: "Add another source" });
+  for (let index = 1; index < 30; index += 1) fireEvent.click(add);
+  expect(screen.getByRole("button", { name: "Add another source" })).toHaveProperty("disabled", true);
+});
+it("shows a global preview issue without a source-one prefix", async () => {
+  const user = userEvent.setup();
+  mocks.preview.mockResolvedValue({ ...preview, issues: [{ code: "global", message: "Global failure", source_index: null }] });
+  render(<TrainingDatasetBuilder projectId={7} data={data} onImport={vi.fn()} onCreated={async () => undefined} onCancel={vi.fn()} />);
+  await user.type(screen.getByLabelText("Training dataset name"), "Prepared");
+  await user.click(screen.getByRole("button", { name: "Preview training dataset" }));
+  expect((await screen.findByText("Global failure")).textContent).toBe("Global failure");
 });

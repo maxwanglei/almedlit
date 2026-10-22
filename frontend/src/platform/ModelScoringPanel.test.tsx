@@ -63,6 +63,20 @@ afterEach(() => {
 });
 
 describe("ModelScoringPanel", () => {
+  it("shows the domain dataset version number instead of the database ID", () => {
+    const data = projectData(feedbackRun("failed"));
+    data.datasetVersions = [{
+      id: 22, project_id: 7, dataset_id: 8, version_number: 3, source_uri: null,
+      source_revision: "source", source_format: "jsonl", data_schema: {}, provenance: {},
+      license_info: {}, content_hash: "hash", item_count: 1, artifact_package_id: null,
+    }];
+    const rendered = render(<ModelScoringPanel projectId={7} data={data} onCreate={vi.fn()} onRefresh={vi.fn()} />);
+    expect(screen.getByRole("cell", { name: "v3" })).toBeTruthy();
+    expect(screen.queryByRole("cell", { name: "v22" })).toBeNull();
+    rendered.rerender(<ModelScoringPanel projectId={7} data={{ ...data, datasetVersions: [] }} onCreate={vi.fn()} onRefresh={vi.fn()} />);
+    expect(screen.getByRole("cell", { name: "Dataset version ID 22" })).toBeTruthy();
+  });
+
   it("polls the single-run endpoint and cleans up when unmounted", async () => {
     mocks.getFeedbackRun.mockResolvedValue(feedbackRun("running"));
     const onRefresh = vi.fn().mockResolvedValue(undefined);
@@ -127,4 +141,16 @@ describe("ModelScoringPanel", () => {
     expect(screen.getByText("Dataset item has no input text")).toBeTruthy();
     expect(mocks.getFeedbackRun).not.toHaveBeenCalled();
   });
+});
+
+it("keeps the two-minute deadline when parent refresh callbacks change", async () => {
+  mocks.getFeedbackRun.mockResolvedValue(feedbackRun("running"));
+  const data = projectData(feedbackRun());
+  const props = { projectId: 7, data, onCreate: vi.fn() };
+  const mounted = render(<ModelScoringPanel {...props} onRefresh={async () => undefined} />);
+  for (let tick = 0; tick < 12; tick += 1) {
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    mounted.rerender(<ModelScoringPanel {...props} onRefresh={async () => undefined} />);
+  }
+  expect(screen.getByText(/Automatic updates paused/)).toBeTruthy();
 });

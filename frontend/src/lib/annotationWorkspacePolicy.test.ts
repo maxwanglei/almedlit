@@ -126,12 +126,12 @@ describe("annotation workspace assignment policy", () => {
 
   it("uses personal language for task and document states", () => {
     expect(personalAssignmentStatusLabel("assigned")).toBe("To do");
-    expect(personalAssignmentStatusLabel("submitted")).toBe("Finished");
+    expect(personalAssignmentStatusLabel("submitted")).toBe("Submitted");
     expect(personalAssignmentStatusLabel("blocked")).toBe("Needs attention");
 
     expect(personalDocumentStatusLabel("todo")).toBe("To do");
     expect(personalDocumentStatusLabel("partial")).toBe("In progress");
-    expect(personalDocumentStatusLabel("done")).toBe("Finished");
+    expect(personalDocumentStatusLabel("done")).toBe("Submitted");
 
     expect(personalDocumentAction("todo")).toBe("Start");
     expect(personalDocumentAction("partial")).toBe("Continue");

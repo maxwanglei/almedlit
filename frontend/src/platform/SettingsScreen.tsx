@@ -1,5 +1,8 @@
+import { NativeInput, NativeSelect, NativeTextarea } from "@/components/NativeField";
 import { useEffect, useState } from "react";
 import { Button } from "@astryxdesign/core/Button";
+
+import ConfirmDialog from "@/components/ConfirmDialog";
 
 import type {
   AnnotationValidationMode,
@@ -7,7 +10,7 @@ import type {
   ProjectUpdate,
 } from "@/types/api";
 
-import { PlatformPageHeader, PlatformSection } from "./components";
+import { PlatformPageHeader, PlatformSection, formatStatus } from "./components";
 import type { PlatformProjectData, ProjectModule } from "./types";
 
 type ReleasedProjectModule = Exclude<ProjectModule, "learning" | "guidelines">;
@@ -17,9 +20,9 @@ const MODULE_OPTIONS: Array<{
   label: string;
   description: string;
 }> = [
-  { id: "data", label: "Data", description: "Versioned source data and label layers." },
+  { id: "data", label: "Data", description: "Versioned source data and label sets." },
   { id: "annotate", label: "Annotation", description: "Tasks, rounds, and human decisions." },
-  { id: "train", label: "Training", description: "Independent Training workspace access." },
+  { id: "train", label: "Training", description: "Independent training workspace access." },
   { id: "models", label: "Models", description: "Named model identities and versions." },
   { id: "activity", label: "Activity", description: "Project lineage and released activity." },
 ];
@@ -69,9 +72,8 @@ export default function SettingsScreen({
   const [evaluationSplit, setEvaluationSplit] = useState(
     String(project.settings.default_evaluation_split ?? "validation"),
   );
-  const [exportFormat, setExportFormat] = useState(
-    String(project.settings.default_export_format ?? "jsonl"),
-  );
+  const [moduleToDisable, setModuleToDisable] = useState<ReleasedProjectModule | null>(null);
+  const [nameTouched, setNameTouched] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
   const workspaceCapabilities = new Set(data.projectModules.workspace_capabilities);
@@ -89,12 +91,34 @@ export default function SettingsScreen({
     setEvaluationSplit(
       String(project.settings.default_evaluation_split ?? "validation"),
     );
-    setExportFormat(
-      String(project.settings.default_export_format ?? "jsonl"),
-    );
+    setMessage(null);
+    setLocalError(null);
+    setNameTouched(false);
+    setModuleToDisable(null);
   }, [project]);
 
+  async function updateModules(module: ReleasedProjectModule, enabled: boolean): Promise<void> {
+    const selected = new Set(data.projectModules.selected);
+    if (enabled) {
+      selected.add(module);
+    } else {
+      selected.delete(module);
+      for (const dependent of MODULE_DEPENDENTS[module] ?? []) selected.delete(dependent);
+    }
+    setMessage(null);
+    setLocalError(null);
+    try {
+      await onUpdateModules([...selected]);
+      setMessage("Project modules saved.");
+      setModuleToDisable(null);
+    } catch (caught) {
+      setLocalError(caught instanceof Error ? caught.message : "Project modules could not be saved.");
+    }
+  }
+
   async function saveIdentity(): Promise<void> {
+    setNameTouched(true);
+    if (!name.trim()) return;
     setMessage(null);
     setLocalError(null);
     try {
@@ -127,10 +151,9 @@ export default function SettingsScreen({
             ? Number(storagePolicyId)
             : null,
           default_evaluation_split: evaluationSplit,
-          default_export_format: exportFormat,
         },
       });
-      setMessage("Training and export defaults saved.");
+      setMessage("Training defaults saved.");
     } catch (caught) {
       setLocalError(
         caught instanceof Error
@@ -161,15 +184,20 @@ export default function SettingsScreen({
         <div className="platform-settings-form">
           <label>
             <span>Project name</span>
-            <input
+            <NativeInput
               value={name}
               maxLength={255}
+              required
+              aria-invalid={nameTouched && !name.trim() ? true : undefined}
+              aria-describedby={nameTouched && !name.trim() ? "project-name-error" : undefined}
+              onBlur={() => setNameTouched(true)}
               onChange={(event) => setName(event.target.value)}
             />
+            {nameTouched && !name.trim() ? <small id="project-name-error" aria-hidden="true">Enter a project name.</small> : null}
           </label>
           <label>
             <span>Description</span>
-            <textarea
+            <NativeTextarea
               value={description}
               rows={3}
               onChange={(event) => setDescription(event.target.value)}
@@ -177,7 +205,7 @@ export default function SettingsScreen({
           </label>
           <label>
             <span>Annotation validation</span>
-            <select
+            <NativeSelect
               value={validationMode}
               onChange={(event) =>
                 setValidationMode(event.target.value as AnnotationValidationMode)
@@ -185,7 +213,7 @@ export default function SettingsScreen({
             >
               <option value="relaxed">Relaxed</option>
               <option value="strict">Strict</option>
-            </select>
+            </NativeSelect>
           </label>
           <div className="platform-settings-actions">
             <Button
@@ -211,33 +239,16 @@ export default function SettingsScreen({
             );
             return (
               <label key={module.id}>
-                <input
+                <NativeInput
                   type="checkbox"
                   checked={checked}
                   disabled={!available}
                   onChange={(event) => {
-                    const selected = new Set(
-                      data.projectModules.selected.filter(released),
-                    );
-                    if (event.target.checked) {
-                      selected.add(module.id);
-                    } else {
-                      selected.delete(module.id);
-                      for (const dependent of MODULE_DEPENDENTS[module.id] ?? []) {
-                        selected.delete(dependent);
-                      }
+                    if (event.target.checked) void updateModules(module.id, true);
+                    else {
+                      setLocalError(null);
+                      setModuleToDisable(module.id);
                     }
-                    setMessage(null);
-                    setLocalError(null);
-                    void onUpdateModules([...selected])
-                      .then(() => setMessage("Project modules saved."))
-                      .catch((caught: unknown) =>
-                        setLocalError(
-                          caught instanceof Error
-                            ? caught.message
-                            : "Project modules could not be saved.",
-                        ),
-                      );
                   }}
                 />
                 <span>
@@ -269,65 +280,55 @@ export default function SettingsScreen({
           </div>
           <div>
             <dt>Modules</dt>
-            <dd>{data.projectModules.selected.length} selected for this project</dd>
+            <dd>{data.projectModules.selected.filter(released).length} selected for this project</dd>
           </div>
         </dl>
       </PlatformSection>
 
       <PlatformSection
-        title="Training and export defaults"
+        title="Training defaults"
         description="These defaults prefill project-linked workflows; a Trainer may still choose another available runtime or policy."
       >
         <div className="platform-settings-form">
           <label>
             <span>Default runtime</span>
-            <select
+            <NativeSelect
               value={environmentId}
               onChange={(event) => setEnvironmentId(event.target.value)}
             >
               <option value="">Choose in Training</option>
               {data.environments.map((environment) => (
                 <option key={environment.id} value={environment.id}>
-                  {environment.name} · {environment.status}
+                  {environment.name} · {formatStatus(environment.status)}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
           </label>
           <label>
             <span>Default storage policy</span>
-            <select
+            <NativeSelect
               value={storagePolicyId}
               onChange={(event) => setStoragePolicyId(event.target.value)}
             >
               <option value="">Choose in Training</option>
               {data.storagePolicies.map((policy) => (
                 <option key={policy.id} value={policy.id}>
-                  {policy.name} · {policy.backend}
+                  {policy.name} · {formatStatus(policy.backend)}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
           </label>
           <label>
             <span>Default evaluation split</span>
-            <select
+            <NativeSelect
               value={evaluationSplit}
               onChange={(event) => setEvaluationSplit(event.target.value)}
             >
               <option value="validation">Validation</option>
               <option value="test">Protected test</option>
-            </select>
+            </NativeSelect>
           </label>
-          <label>
-            <span>Default export format</span>
-            <select
-              value={exportFormat}
-              onChange={(event) => setExportFormat(event.target.value)}
-            >
-              <option value="jsonl">JSONL</option>
-              <option value="csv">CSV</option>
-              <option value="parquet">Parquet</option>
-            </select>
-          </label>
+
           <div className="platform-settings-actions">
             <Button
               label={busy ? "Saving…" : "Save defaults"}
@@ -338,6 +339,16 @@ export default function SettingsScreen({
           </div>
         </div>
       </PlatformSection>
+      <ConfirmDialog
+        open={moduleToDisable !== null}
+        title="Disable project module?"
+        description={moduleToDisable ? `Disable ${MODULE_OPTIONS.find((module) => module.id === moduleToDisable)?.label.toLowerCase()} for this project? Dependent modules will also be disabled. Existing scientific records remain saved.` : ""}
+        confirmLabel="Disable module"
+        busy={busy}
+        error={localError}
+        onCancel={() => { setModuleToDisable(null); setLocalError(null); }}
+        onConfirm={async () => { if (moduleToDisable) await updateModules(moduleToDisable, false); }}
+      />
     </div>
   );
 }

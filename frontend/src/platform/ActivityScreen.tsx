@@ -3,6 +3,8 @@ import {
   PlatformPageHeader,
   PlatformSection,
   PlatformStatus,
+  formatDateTime,
+  formatCount,
 } from "./components";
 import type { PlatformProjectData } from "./types";
 
@@ -38,7 +40,7 @@ export default function ActivityScreen({
       id: `evaluation:${evaluation.id}`,
       when: evaluation.updated_at ?? evaluation.created_at,
       kind: "Model evaluation",
-      name: `${evaluation.split_name} · ${evaluation.row_count} records`,
+      name: `${evaluation.split_name} · ${formatCount(evaluation.row_count, "record")}`,
       status: evaluation.status,
     })),
   ].sort((left, right) => String(right.when ?? "").localeCompare(String(left.when ?? "")));
@@ -55,7 +57,7 @@ export default function ActivityScreen({
             {items.map((item) => (
               <div key={item.id}>
                 <time dateTime={item.when ?? undefined}>
-                  {item.when ? new Date(item.when).toLocaleString() : "Time unavailable"}
+                  {item.when ? formatDateTime(item.when) : "Time unavailable"}
                 </time>
                 <span>{item.kind}</span>
                 <strong>{item.name}</strong>

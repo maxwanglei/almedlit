@@ -166,20 +166,27 @@ interface ScopeCommit {
   pickerVisible: boolean;
 }
 
-function Harness({ initialDocumentId = 1, onCommit = () => undefined }: {
+function Harness({ initialDocumentId = 1, onCommit = () => undefined, busy = false, constrained = false, allowReverse = false }: {
+  allowReverse?: boolean;
+  busy?: boolean;
+  constrained?: boolean;
   initialDocumentId?: number;
   onCommit?: (commit: ScopeCommit) => void;
 }): React.ReactElement {
   const [documentId, setDocumentId] = useState<number | null>(initialDocumentId);
-  const [annotations, setAnnotations] = useState(initialAnnotations);
+  const [annotations, setAnnotations] = useState<Annotation[]>(constrained ? [
+    ...initialAnnotations.map((item) => item.id === 102 ? { ...item, label: "Drug" } : item),
+    { ...initialAnnotations[0], id: 301, annotation_type: "relation", label: "Associated", start_offset: null, end_offset: null, text_span: null, head_annotation_id: 101, tail_annotation_id: 102 },
+  ] : initialAnnotations);
+  const workspaceTasks = constrained ? [entityTask, { ...relationTask, settings: { relation_constraints: { Associated: { head: allowReverse ? ["Disease", "Drug"] : ["Disease"], tail: allowReverse ? ["Disease", "Drug"] : ["Drug"] } } } }] : tasks;
   const documentItem = documents.find((item) => item.id === documentId)!;
   const workbench: AnnotationWorkbench = {
     project,
     document: documentItem,
     active_guideline: null,
     guideline_versions_by_id: {},
-    tasks,
-    annotation_type_specs: tasks.map((task) => task.annotation_type_spec),
+    tasks: workspaceTasks,
+    annotation_type_specs: workspaceTasks.map((task) => task.annotation_type_spec),
     annotations: annotations.filter((item) => item.document_id === documentId),
     assignments: assignments.filter((item) => item.document_id === documentId),
     correction_locked_annotation_ids: [],
@@ -194,7 +201,7 @@ function Harness({ initialDocumentId = 1, onCommit = () => undefined }: {
         projects={[project]} selectedProject={project} selectedProjectId={1}
         setSelectedProjectId={vi.fn()} documents={documents} assignments={assignments}
         annotatorId="max" projectProgress={null} selectedDocumentId={documentId} setSelectedDocumentId={setDocumentId}
-        workbench={workbench} setWorkbench={() => undefined} busy={false} setBusy={vi.fn()} setError={vi.fn()}
+        workbench={workbench} setWorkbench={() => undefined} busy={busy} setBusy={vi.fn()} setError={vi.fn()}
         refreshProjectData={async () => undefined} refreshWorkbench={async () => undefined}
         annotationApi={annotationApi} defaultView="annotate"
       />
@@ -208,7 +215,7 @@ function workspaceUrl(documentId: number, assignmentId: number): string {
 
 function startRelation(text = "Alpha"): void {
   fireEvent.contextMenu(within(screen.getByRole("tabpanel", { name: "Document" })).getByRole("button", { name: `Disease: ${text}` }));
-  fireEvent.click(screen.getByRole("button", { name: "Start relation from here" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Start relation from here" }));
   expect(screen.getByText(/Linking from/)).toBeTruthy();
 }
 
@@ -274,7 +281,7 @@ describe("relation state across workspace scopes", () => {
     render(<Harness onCommit={onCommit} />);
     startRelation();
     fireEvent.click(within(screen.getByRole("tabpanel", { name: "Document" })).getByRole("button", { name: "Disease: Beta" }));
-    expect(screen.getByRole("button", { name: "Close relation picker" })).toBeTruthy();
+    expect(screen.getByRole("menu", { name: "Relation labels" })).toBeTruthy();
 
     fireEvent.change(screen.getByRole("combobox", { name: "Assignment to submit" }), { target: { value: "14" } });
 
@@ -285,4 +292,40 @@ describe("relation state across workspace scopes", () => {
     expect(within(screen.getByRole("tabpanel", { name: "Document" })).getByRole("button", { name: "Disease: Beta" })).toBeTruthy();
     expect(mocks.createAnnotation).not.toHaveBeenCalled();
   });
+});
+
+it("disables the primary resume action while document work is busy", () => {
+  window.history.replaceState(null, "", "/annotator/workbench?project=1&document=1&view=progress");
+  render(<Harness busy />);
+  expect(screen.getByRole<HTMLButtonElement>("button", { name: "Start annotating" }).disabled).toBe(true);
+});
+
+it("keeps content-relative relation arcs stable without rendering on scroll", () => {
+  const onCommit = vi.fn();
+  const { container } = render(<Harness onCommit={onCommit} constrained />);
+  const reader = container.querySelector<HTMLDivElement>(".aw-reading")!;
+  const path = container.querySelector(".aw-arc-hit")!.getAttribute("d");
+  onCommit.mockClear();
+  fireEvent.scroll(reader, { target: { scrollTop: 200 } });
+  expect(onCommit).not.toHaveBeenCalled();
+  expect(container.querySelector(".aw-arc-hit")!.getAttribute("d")).toBe(path);
+});
+
+it("does not offer a direction swap that violates endpoint constraints", async () => {
+  render(<Harness constrained />);
+  fireEvent.click(await screen.findByRole("button", { name: "Relation Associated" }));
+  const swap = screen.getByRole<HTMLButtonElement>("menuitem", { name: "Swap direction" });
+  expect(swap.disabled).toBe(true);
+  fireEvent.click(swap);
+  expect(mocks.updateAnnotation).not.toHaveBeenCalled();
+});
+
+it("allows a direction swap when both endpoint labels satisfy the reversed rule", async () => {
+  mocks.updateAnnotation.mockResolvedValue({ ...initialAnnotations[0], id: 301, annotation_type: "relation", label: "Associated", head_annotation_id: 102, tail_annotation_id: 101 });
+  render(<Harness constrained allowReverse />);
+  fireEvent.click(await screen.findByRole("button", { name: "Relation Associated" }));
+  const swap = screen.getByRole<HTMLButtonElement>("menuitem", { name: "Swap direction" });
+  expect(swap.disabled).toBe(false);
+  fireEvent.click(swap);
+  await waitFor(() => expect(mocks.updateAnnotation).toHaveBeenCalledWith(301, { head_annotation_id: 102, tail_annotation_id: 101 }));
 });

@@ -3,6 +3,7 @@ import { expect, test } from "@playwright/test";
 test("filled login fields stay inside one rounded control shell", async ({
   page,
 }) => {
+  await page.route("**/api/auth/me", (route) => route.fulfill({ status: 401, json: { detail: "Sign in required" } }));
   await page.goto("/login");
   await page.getByLabel("Username").fill("testteam");
   await page.getByLabel("Password").fill("correct-horse-battery-staple");

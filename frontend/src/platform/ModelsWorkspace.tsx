@@ -1,7 +1,11 @@
+import { NativeInput, NativeSelect } from "@/components/NativeField";
+import ValidatedForm from "@/components/ValidatedForm";
+import LoadingState from "@/components/LoadingState";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@astryxdesign/core/Button";
 
 import type { Project } from "@/types/api";
+import { baseModelLineage, baseModelName, creatorName, metricSummary } from "./modelPresentation";
 
 import {
   findWorkspaceModel,
@@ -45,71 +49,6 @@ function errorMessage(error: unknown): string {
     : "Unable to load the model registry.";
 }
 
-function baseModelName(baseModel: Record<string, unknown>): string {
-  for (const key of ["display_name", "source_model_id", "model_id", "name"]) {
-    const value = baseModel[key];
-    if (typeof value === "string" && value.trim()) return value;
-  }
-  return Object.keys(baseModel).length ? "Recorded in manifest" : "From scratch";
-}
-
-function baseModelLineage(baseModel: Record<string, unknown>): {
-  asset: string;
-  source: string;
-  revision: string;
-} {
-  const first = (...keys: string[]): string | null => {
-    for (const key of keys) {
-      const value = baseModel[key];
-      if (
-        (typeof value === "string" || typeof value === "number") &&
-        String(value).trim()
-      ) {
-        return String(value);
-      }
-    }
-    return null;
-  };
-  const empty = Object.keys(baseModel).length === 0;
-  return {
-    asset:
-      first("base_model_asset_id", "asset_id", "id") ??
-      (empty ? "Not required" : "Not recorded"),
-    source:
-      first("source_model_id", "source", "model_id", "name") ??
-      (empty ? "From scratch" : "Not recorded"),
-    revision:
-      first("exact_revision", "revision", "commit") ??
-      (empty ? "Not applicable" : "Not recorded"),
-  };
-}
-
-function metricSummary(metrics: Record<string, number | null>): string {
-  const values = Object.entries(metrics)
-    .filter((entry): entry is [string, number] => typeof entry[1] === "number")
-    .slice(0, 3)
-    .map(([name, value]) => `${formatStatus(name)} ${value.toFixed(3)}`);
-  return values.join(" · ") || "No aggregate metrics";
-}
-
-function creatorName(model: WorkspaceModel): string {
-  return (
-    model.creator_display_name?.trim() ||
-    model.creator_username?.trim() ||
-    (model.created_by_user_id ? `User ${model.created_by_user_id}` : "System")
-  );
-}
-
-function versionCreatorName(version: ModelVersion): string {
-  return (
-    version.creator_display_name?.trim() ||
-    version.creator_username?.trim() ||
-    (version.created_by_user_id
-      ? `User ${version.created_by_user_id}`
-      : "System")
-  );
-}
-
 function sourceDatasetVersion(version: ModelVersion): string {
   if (version.source_dataset_version_number !== null &&
       version.source_dataset_version_number !== undefined) {
@@ -145,7 +84,7 @@ function taskName(
     : undefined;
   return (
     task?.name ??
-    taskVersion?.task_kind.replace(/_/g, " ") ??
+    (taskVersion ? formatStatus(taskVersion.task_kind) : undefined) ??
     `Task version ${version.task_version_id}`
   );
 }
@@ -246,11 +185,11 @@ function ModelRegistry({
       <PlatformPageHeader
         title="Models"
         description="Workspace-wide named model identities with immutable versions and evaluation lineage."
-        actionLabel="Train model"
-        onAction={() => onNavigate("/training/new")}
+        actionLabel={page.items.length ? "Train model" : undefined}
+        onAction={() => onNavigate(`/training/new${initialProjectId ? `?projectId=${initialProjectId}` : ""}`)}
       />
       <PlatformSection title="Registry filters">
-        <form
+        <ValidatedForm
           className="platform-form-grid"
           onSubmit={(event) => {
             event.preventDefault();
@@ -259,17 +198,13 @@ function ModelRegistry({
         >
           <label>
             <span>Project</span>
-            <select
+            <NativeSelect
               value={filters.projectId ?? ""}
-              onChange={(event) =>
-                setFilters((current) => ({
-                  ...current,
-                  projectId: event.target.value
-                    ? Number(event.target.value)
-                    : undefined,
-                  cursor: undefined,
-                }))
-              }
+              onChange={(event) => {
+                const id = event.target.value ? Number(event.target.value) : undefined;
+                setFilters((current) => ({ ...current, projectId: id, cursor: undefined }));
+                onNavigate(`/models${id ? `?projectId=${id}` : ""}`, "replace");
+              }}
             >
               <option value="">All model projects</option>
               {projects.map((project) => (
@@ -277,11 +212,11 @@ function ModelRegistry({
                   {project.name}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
           </label>
           <label>
             <span>Lifecycle status</span>
-            <select
+            <NativeSelect
               value={filters.status ?? ""}
               onChange={(event) =>
                 setFilters((current) => ({
@@ -295,11 +230,11 @@ function ModelRegistry({
               <option value="candidate">Candidate</option>
               <option value="active">Active</option>
               <option value="archived">Archived</option>
-            </select>
+            </NativeSelect>
           </label>
           <label>
             <span>Model family</span>
-            <input
+            <NativeInput
               type="text"
               list="model-registry-family-options"
               value={filters.family ?? ""}
@@ -327,7 +262,7 @@ function ModelRegistry({
               isDisabled={loading}
             />
           </div>
-        </form>
+        </ValidatedForm>
       </PlatformSection>
       {error ? <p className="platform-form-warning" role="alert">{error}</p> : null}
       <PlatformSection
@@ -335,7 +270,9 @@ function ModelRegistry({
         description="Project remains the provenance owner while this registry spans the active workspace."
       >
         {loading && !page.items.length ? (
-          <p className="platform-inline-empty" role="status">Loading models…</p>
+          <LoadingState label="Loading models…" />
+        ) : error && !page.items.length ? (
+          <Button label="Retry loading models" onClick={() => void load(appliedFilters.current)} />
         ) : page.items.length ? (
           <div
             className="platform-table-scroll platform-table-scroll--summary"
@@ -400,10 +337,7 @@ function ModelRegistry({
                             ? formatStatus(version.training_method)
                             : "Not trained"}
                         </span>
-                        <span>
-                          Asset: {baseModel.asset} · Source: {baseModel.source} ·
-                          Revision: {baseModel.revision}
-                        </span>
+                        <details><summary>Base model details</summary><p>{`Asset: ${baseModel.asset} · Source: ${baseModel.source} · Revision: ${baseModel.revision}`}</p></details>
                       </td>
                       <td data-label="Task and data">
                         {model.task_name ?? "Not bound"}
@@ -443,7 +377,7 @@ function ModelRegistry({
                         {creatorName(model)}
                         <span>
                           {version
-                            ? `Latest version: ${versionCreatorName(version)}`
+                            ? `Latest version: ${creatorName(version)}`
                             : "No version creator"}
                         </span>
                       </td>
@@ -469,7 +403,7 @@ function ModelRegistry({
           <PlatformEmpty
             title="No named models"
             detail="Launch a training run with a stable model name to create its first immutable version."
-            actionLabel="Train first model"
+            actionLabel="Train model"
             onAction={() => onNavigate("/training/new")}
           />
         )}
@@ -504,6 +438,7 @@ function ModelDetail({
   const [data, setData] = useState(EMPTY_PLATFORM_PROJECT_DATA);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [loadGeneration, setLoadGeneration] = useState(0);
 
   useEffect(() => {
     let active = true;
@@ -537,7 +472,7 @@ function ModelDetail({
     return () => {
       active = false;
     };
-  }, [modelId, projects, workspaceId]);
+  }, [loadGeneration, modelId, projects, workspaceId]);
 
   if (loading) {
     return (
@@ -548,6 +483,13 @@ function ModelDetail({
         />
       </div>
     );
+  }
+  if (error) {
+    return <div className="platform-page">
+      <PlatformPageHeader title="Model could not be loaded" description="Model details are unavailable. Try loading them again." actionLabel="Retry loading model" onAction={() => setLoadGeneration((current) => current + 1)} />
+      <p role="alert" className="platform-form-warning">{error}</p>
+      <Button label="Back to models" onClick={() => onNavigate("/models")} />
+    </div>;
   }
   if (!model) {
     return (
@@ -587,7 +529,7 @@ function ModelDetail({
       <PlatformPageHeader
         title={model.name}
         description={`${model.project_name} · named model identity`}
-        actionLabel="Train next version"
+        actionLabel={versions.length ? "Train model" : undefined}
         onAction={() =>
           onNavigate(`/training/new?projectId=${model.project_id}`)
         }
@@ -662,10 +604,7 @@ function ModelDetail({
                       <td data-label="Base model and method">
                         {baseModelName(version.base_model)}
                         <span>{formatStatus(version.training_method)}</span>
-                        <span>
-                          Asset: {baseModel.asset} · Source: {baseModel.source} ·
-                          Revision: {baseModel.revision}
-                        </span>
+                        <details><summary>Base model details</summary><p>{`Asset: ${baseModel.asset} · Source: ${baseModel.source} · Revision: ${baseModel.revision}`}</p></details>
                       </td>
                       <td data-label="Task">{taskName(data, version)}</td>
                       <td data-label="Training data">
@@ -679,7 +618,7 @@ function ModelDetail({
                             "Storage policy not linked"}
                         </span>
                       </td>
-                      <td data-label="Creator">{versionCreatorName(version)}</td>
+                      <td data-label="Creator">{creatorName(version)}</td>
                       <td data-label="Evaluation">
                         {evaluation ? (
                           <>
@@ -802,7 +741,7 @@ function ModelVersionDetail({
               {version.storage_policy_name ?? "Not linked to a training run"}
             </dd>
           </div>
-          <div><dt>Creator</dt><dd>{versionCreatorName(version)}</dd></div>
+          <div><dt>Creator</dt><dd>{creatorName(version)}</dd></div>
           <div>
             <dt>Training run</dt>
             <dd>{version.training_run_id ?? "Not linked"}</dd>
@@ -821,9 +760,7 @@ function ModelVersionDetail({
             <dt>Parent version</dt>
             <dd>{version.parent_version_id ?? "None"}</dd>
           </div>
-          <div><dt>Runtime digest</dt><dd><code>{version.runtime_digest}</code></dd></div>
-          <div><dt>Code digest</dt><dd><code>{version.code_digest ?? "Not recorded"}</code></dd></div>
-          <div><dt>Content hash</dt><dd><code>{version.content_hash}</code></dd></div>
+          <div><dt>Technical provenance</dt><dd><details><summary>View digests</summary><p>Runtime digest <code>{version.runtime_digest}</code></p><p>Code digest <code>{version.code_digest ?? "Not recorded"}</code></p><p>Content hash <code>{version.content_hash}</code></p></details></dd></div>
           <div>
             <dt>Evaluation</dt>
             <dd>
@@ -833,6 +770,7 @@ function ModelVersionDetail({
                   <span className="platform-review-detail">
                     {evaluation.split_name} · {metricSummary(evaluation.metrics)}
                   </span>
+                  {evaluation.status_reason ? <p>{evaluation.status_reason}</p> : null}
                 </>
               ) : (
                 "Not evaluated"
@@ -842,9 +780,7 @@ function ModelVersionDetail({
         </dl>
       </PlatformSection>
       <PlatformSection title="Parameters">
-        <pre className="platform-code-block">
-          {JSON.stringify(version.parameters, null, 2)}
-        </pre>
+        <details><summary>View parameters</summary><pre className="platform-code-block">{JSON.stringify(version.parameters, null, 2)}</pre></details>
       </PlatformSection>
     </div>
   );

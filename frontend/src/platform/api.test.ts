@@ -6,6 +6,7 @@ import { expandEffectiveRoles } from "@/navigation/AccessContext";
 import type { WorkspaceRole } from "@/types/api";
 
 import {
+  addRoundDecision,
   createDatasetWithVersion,
   createExecutionEnvironment,
   createFeedbackRun,
@@ -91,6 +92,20 @@ beforeEach(() => {
 });
 
 describe("platform API orchestration", () => {
+  it.each(["overview", "models"] as const)("loads a models-only project's %s without data routes", async (scope) => {
+    mocks.request.mockImplementation(async (path: string) => {
+      if (path === "/projects/7/modules") return { project_id: 7, selected: ["models"], effective: ["models"], workspace_capabilities: ["inference"] };
+      if (path === "/models?project_id=7") return [{ id: 81 }];
+      if (path === "/models/versions?project_id=7&registered_model_id=81") return [{ id: 82, registered_model_id: 81 }];
+      if (path === "/models/81/versions/82/evaluations?project_id=7") return [];
+      throw new Error(`403 unavailable module for ${path}`);
+    });
+    const data = await loadPlatformProject(7, scope);
+    expect(data.models).toEqual([{ id: 81 }]);
+    expect(data.taskDefinitions).toEqual([]);
+    expect(data.trainingDatasets).toEqual([]);
+  });
+
   it("loads task continuation and source setup context on Tasks", async () => {
     mocks.request.mockImplementation(async (path: string) => {
       if (path === "/projects/7/modules") return { project_id: 7, selected: ["data", "annotate"], effective: ["data", "annotate"], workspace_capabilities: ["annotation"] };
@@ -1434,4 +1449,11 @@ describe("platform API orchestration", () => {
     expect(bodyOf(runs[0])).toMatchObject({ registered_model_id: 81, idempotency_key: "unchanged-draft" });
     expect(mocks.request.mock.calls.filter(([path]) => path === "/models")).toHaveLength(1);
   });
+});
+
+it("sends assisted annotation and its feedback disposition in one request", async () => {
+  mocks.request.mockResolvedValue({ id: 501 });
+  await addRoundDecision(7, { roundItemId: 410, output: "Relevant", supersedesDecisionId: null, decisionKind: "annotation", isInitialCheckpoint: false, rationale: "", feedbackDecision: { exposureId: 701, decision: "accepted" } });
+  expect(mocks.request).toHaveBeenCalledTimes(1);
+  expect(mocks.request).toHaveBeenCalledWith("/rounds/decisions", expect.objectContaining({ method: "POST", body: JSON.stringify({ project_id: 7, round_item_id: 410, supersedes_decision_id: null, output: "Relevant", decision_kind: "annotation", is_initial_checkpoint: false, rationale: null, feedback_decision: { exposure_id: 701, decision: "accepted" } }) }));
 });

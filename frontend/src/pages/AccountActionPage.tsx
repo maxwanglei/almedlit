@@ -1,3 +1,4 @@
+import LoadingState from "@/components/LoadingState";
 import {
   useEffect,
   useRef,
@@ -177,9 +178,7 @@ export default function AccountActionPage({
           </div>
 
           {loading ? (
-            <div className="status" role="status" aria-live="polite">
-              Checking account link…
-            </div>
+            <LoadingState label="Checking account link…" />
           ) : null}
 
           {!loading && (previewError !== null || !preview || !copy) ? (

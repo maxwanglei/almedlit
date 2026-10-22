@@ -1,3 +1,4 @@
+import LoadingState from "@/components/LoadingState";
 import { useEffect, useId, useMemo, useState } from "react";
 
 import { request } from "@/api/client";
@@ -91,7 +92,7 @@ export default function MyWorkTaskInventory({ project, contexts, canReadAllTasks
     <header>
       <h2 id={headingId}>{canReadAllTasks ? "Annotation tasks" : "Assigned annotation tasks"} <span>{savedTaskCount}</span></h2>
     </header>
-    {loading ? <p role="status">Loading saved annotation tasks…</p> : null}
+    {loading ? <LoadingState label="Loading saved annotation tasks…" /> : null}
     {error ? <p role="alert">{error} <button type="button" onClick={() => setAttempt((current) => current + 1)}>Retry loading tasks</button></p> : null}
     <div className="paper-task-list">
       {definitions.map((task) => {
@@ -117,6 +118,6 @@ export default function MyWorkTaskInventory({ project, contexts, canReadAllTasks
         <div className="paper-task-actions"><PlatformRouteLink className="paper-task-action" href={`/my-work?project=${projectId}&view=annotate&task=${task.id}`} onNavigate={() => onNavigate(`/my-work?project=${projectId}&view=annotate&task=${task.id}`)}>Open {task.display_name}</PlatformRouteLink></div>
       </article>)}
     </div>
-    {!loading && !error && savedTaskCount === 0 ? <p>No annotation tasks have been saved for this project.</p> : null}
+    {!loading && !error && savedTaskCount === 0 ? <p>{canReadAllTasks ? "No annotation tasks have been saved for this project." : "No annotation rounds are assigned to you for this project."}</p> : null}
   </section>;
 }

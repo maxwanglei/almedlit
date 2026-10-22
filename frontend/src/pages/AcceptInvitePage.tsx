@@ -1,3 +1,4 @@
+import LoadingState from "@/components/LoadingState";
 import { useEffect, useRef, useState } from "react";
 import type {
   ComponentType,
@@ -162,9 +163,7 @@ export default function AcceptInvitePage({
   function renderBody(): ReactElement {
     if (loading) {
       return (
-        <div className="status" role="status" aria-live="polite">
-          Loading invite…
-        </div>
+        <LoadingState label="Loading invite…" />
       );
     }
 

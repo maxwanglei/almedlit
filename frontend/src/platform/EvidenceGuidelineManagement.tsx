@@ -1,3 +1,5 @@
+import { NativeInput, NativeTextarea } from "@/components/NativeField";
+import ValidatedForm from "@/components/ValidatedForm";
 import { useState } from "react";
 import type { FormEvent } from "react";
 
@@ -106,15 +108,15 @@ function GuidelineManagementForm({
         </div>
       ) : <p className="platform-inline-empty">No active evidence guideline.</p>}
 
-      <form className="platform-dialog-form" aria-label="Create evidence guideline" onSubmit={(event) => void saveGuideline(event)}>
+      <ValidatedForm className="platform-dialog-form" aria-label="Create evidence guideline" onSubmit={(event) => void saveGuideline(event)}>
         <label>
           <span>Guideline version</span>
-          <input required maxLength={50} value={versionLabel} disabled={pending || refreshError}
+          <NativeInput required maxLength={50} value={versionLabel} disabled={pending || refreshError}
             placeholder="v1" onChange={(event) => setVersionLabel(event.target.value)} />
         </label>
         <label>
           <span>Guideline text</span>
-          <textarea required rows={6} value={markdown} disabled={pending || refreshError}
+          <NativeTextarea required rows={6} value={markdown} disabled={pending || refreshError}
             onChange={(event) => setMarkdown(event.target.value)} />
         </label>
         {error ? <p className="platform-form-warning" role="alert">{error}</p> : null}
@@ -123,7 +125,7 @@ function GuidelineManagementForm({
             {saving ? "Creating guideline…" : "Create active guideline"}
           </button>
         </div>
-      </form>
+      </ValidatedForm>
       {savedGuideline ? (
         <p role="status">
           {activeGuideline?.id === savedGuideline.id

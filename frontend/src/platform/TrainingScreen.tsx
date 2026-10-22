@@ -1,5 +1,6 @@
+import { formatTaskKind } from "@/lib/taskPresentation";
+import { NativeInput, NativeSelect, NativeTextarea } from "@/components/NativeField";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Badge } from "@astryxdesign/core/Badge";
 import { Button } from "@astryxdesign/core/Button";
 
 import type { BaseModelAsset } from "@/types/api";
@@ -9,6 +10,8 @@ import {
   PlatformPageHeader,
   PlatformSection,
   PlatformStatus,
+  formatStatus,
+  shortHash,
 } from "./components";
 import type {
   PlatformProjectData,
@@ -53,11 +56,11 @@ export function resolveInitialTrainingDataset(
 }
 
 const STEPS = [
-  "Task & Data",
-  "Model & Recipe",
+  "Task & data",
+  "Model & recipe",
   "Environment",
-  "Evaluation & Storage",
-  "Review & Launch",
+  "Evaluation & storage",
+  "Review",
 ];
 
 function defaultConfig(recipe: TrainingRecipeDescriptor | undefined): Record<string, unknown> {
@@ -477,6 +480,14 @@ export default function TrainingScreen({
     }
   }, [step, configError]);
 
+  const [modelNameTouched, setModelNameTouched] = useState(false);
+  const stepHeadingRef = useRef<HTMLHeadingElement>(null);
+  const previousStepRef = useRef(step);
+  useEffect(() => {
+    if (previousStepRef.current !== step && document.activeElement !== configInputRef.current) stepHeadingRef.current?.focus();
+    previousStepRef.current = step;
+  }, [step]);
+
   const configurationValidation = useMemo(
     () => parseTrainingConfiguration(configText),
     [configText],
@@ -518,6 +529,10 @@ export default function TrainingScreen({
   ].every(Boolean);
 
   function navigateToStep(nextStep: number): void {
+    if (nextStep > step && !stepReady.slice(0, nextStep).every(Boolean)) {
+      if (!configurationValidation.config && nextStep > 1) parsedConfig(true);
+      return;
+    }
     if (nextStep > 1 && !parsedConfig(true)) return;
     setStep(nextStep);
   }
@@ -561,6 +576,7 @@ export default function TrainingScreen({
             key={label}
             type="button"
             aria-current={step === index ? "step" : undefined}
+            disabled={busy || (index > step && !stepReady.slice(0, index).every(Boolean))}
             onClick={() => navigateToStep(index)}
           >
             <span aria-hidden="true">{index + 1}</span>
@@ -575,7 +591,7 @@ export default function TrainingScreen({
         {step === 0 ? (
           <>
             <div className="platform-section-header">
-              <div><h2>Task & Data</h2><p>Versions are pinned when the run launches.</p></div>
+              <div><h2 ref={stepHeadingRef} tabIndex={-1}>Task &amp; data</h2><p>Versions are pinned when the run launches.</p></div>
             </div>
             {requestedDatasetNeedsPreparation ? (
               <div className="platform-form-warning" role="status">
@@ -600,17 +616,17 @@ export default function TrainingScreen({
               <div className="platform-form-grid">
                 <label>
                   <span>Task version</span>
-                  <select value={taskVersionId} onChange={(event) => setTaskVersionId(Number(event.target.value))}>
+                  <NativeSelect value={taskVersionId} onChange={(event) => setTaskVersionId(Number(event.target.value))}>
                     {data.taskVersions.map((task) => (
                       <option key={task.id} value={task.id}>
-                        {task.task_kind.replace(/_/g, " ")} · v{task.version_number}
+                        {data.taskDefinitions.find((definition) => definition.id === task.task_definition_id)?.name ?? `Task ${task.task_definition_id}`} · {formatTaskKind(task.task_kind, task.annotation_ui?.preset)} · v{task.version_number}
                       </option>
                     ))}
-                  </select>
+                  </NativeSelect>
                 </label>
                 <label>
                   <span>Training dataset</span>
-                  <select
+                  <NativeSelect
                     value={trainingDatasetVersionId}
                     onChange={(event) => setTrainingDatasetVersionId(Number(event.target.value))}
                   >
@@ -620,9 +636,9 @@ export default function TrainingScreen({
                     {data.trainingDatasets
                       .filter((dataset) => dataset.task_version_id === taskVersionId)
                       .map((dataset) => (
-                        <option key={dataset.id} value={dataset.id}>{dataset.name}</option>
+                        <option key={dataset.id} value={dataset.id}>{dataset.name} · v{dataset.version_number ?? 1}</option>
                       ))}
-                  </select>
+                  </NativeSelect>
                 </label>
               </div>
             ) : (
@@ -641,21 +657,25 @@ export default function TrainingScreen({
         {step === 1 ? (
           <>
             <div className="platform-section-header">
-              <div><h2>Model & Recipe</h2><p>The model name remains stable while each run creates a new version.</p></div>
+              <div><h2 ref={stepHeadingRef} tabIndex={-1}>Model &amp; recipe</h2><p>The model name remains stable while each run creates a new version.</p></div>
             </div>
             <div className="platform-form-grid">
               <label>
                 <span>Model name</span>
-                <input
+                <NativeInput
                   value={modelName}
                   maxLength={255}
                   placeholder="e.g. Sentiment baseline"
                   aria-label="Model name"
+                  required
+                  aria-invalid={modelNameTouched && !modelName.trim() ? true : undefined}
+                  onBlur={() => setModelNameTouched(true)}
                   aria-describedby={
-                    existingModel ? "training-model-reuse" : undefined
+                    modelNameTouched && !modelName.trim() ? "training-model-name-error" : existingModel ? "training-model-reuse" : undefined
                   }
                   onChange={(event) => setModelName(event.target.value)}
                 />
+                {modelNameTouched && !modelName.trim() ? <small id="training-model-name-error" aria-hidden="true">Enter a model name.</small> : null}
                 {existingModel ? (
                   <small
                     id="training-model-reuse"
@@ -669,24 +689,25 @@ export default function TrainingScreen({
               </label>
               <label>
                 <span>Training recipe</span>
-                <select
+                <NativeSelect
                   value={recipeKey}
                   onChange={(event) => {
                     const next = data.recipes.find((item) => item.key === event.target.value);
                     setRecipeKey(event.target.value);
                     setBaseModelAssetId(0);
                     setConfigText(JSON.stringify(defaultConfig(next), null, 2));
+                    setConfigError(null);
                   }}
                 >
                   {compatibleRecipes.map((item) => (
                     <option key={item.key} value={item.key}>{item.label}</option>
                   ))}
-                </select>
+                </NativeSelect>
               </label>
               {baseModelRequired ? (
                 <label>
                   <span>Immutable base model</span>
-                  <select
+                  <NativeSelect
                     required
                     value={baseModelAssetId}
                     disabled={!availableBaseModels.length}
@@ -701,7 +722,7 @@ export default function TrainingScreen({
                         {item.source_model_id} · Revision {item.exact_revision}
                       </option>
                     ))}
-                  </select>
+                  </NativeSelect>
                   {!availableBaseModels.length ? (
                     <small>
                       No ready base model matches this recipe and task.
@@ -716,14 +737,14 @@ export default function TrainingScreen({
                   <strong>{recipe.label}</strong>
                   <p>{recipe.description}</p>
                 </div>
-                <Badge label={recipe.model_family.replace(/_/g, " ")} variant="info" />
-                <Badge label={recipe.parameterization} variant="neutral" />
+                <span>{formatStatus(recipe.model_family)}</span>
+                <span>{formatStatus(recipe.parameterization)}</span>
               </div>
             ) : (
               <p className="platform-inline-empty">No compatible recipe is registered.</p>
             )}
             <label className="platform-switch-row">
-              <input
+              <NativeInput
                 type="checkbox"
                 checked={advanced}
                 onChange={(event) => {
@@ -744,7 +765,7 @@ export default function TrainingScreen({
             {advanced ? (
               <label className="platform-json-field">
                 <span>Recipe configuration</span>
-                <textarea
+                <NativeTextarea
                   ref={configInputRef}
                   value={configText}
                   rows={14}
@@ -760,7 +781,7 @@ export default function TrainingScreen({
                   aria-invalid={configError ? "true" : undefined}
                   aria-describedby={configError ? "training-config-error" : undefined}
                 />
-                {configError ? <small id="training-config-error" role="alert">{configError}</small> : null}
+                {configError ? <small id="training-config-error" aria-hidden="true">{configError}</small> : null}
               </label>
             ) : null}
           </>
@@ -769,7 +790,7 @@ export default function TrainingScreen({
         {step === 2 ? (
           <>
             <div className="platform-section-header">
-              <div><h2>Execution environment</h2><p>Only verified, image-bound runtimes can launch.</p></div>
+              <div><h2 ref={stepHeadingRef} tabIndex={-1}>Environment</h2><p>Only verified, image-bound runtimes can launch.</p></div>
             </div>
             {data.environments.length ? (
               <div className="platform-option-list" role="radiogroup" aria-label="Execution environment">
@@ -778,7 +799,7 @@ export default function TrainingScreen({
                   const selectable = compatible && item.status === "available";
                   return (
                     <label key={item.id} data-disabled={!selectable}>
-                      <input
+                      <NativeInput
                         type="radio"
                         name="environment"
                         value={item.id}
@@ -822,33 +843,33 @@ export default function TrainingScreen({
         {step === 3 ? (
           <>
             <div className="platform-section-header">
-              <div><h2>Evaluation & Storage</h2><p>Protected test data remains outside selection and tuning.</p></div>
+              <div><h2 ref={stepHeadingRef} tabIndex={-1}>Evaluation &amp; storage</h2><p>Protected test data remains outside selection and tuning.</p></div>
             </div>
             <div className="platform-form-grid">
               <label>
                 <span>Storage policy</span>
-                <select value={storagePolicyId} onChange={(event) => setStoragePolicyId(Number(event.target.value))}>
+                <NativeSelect value={storagePolicyId} onChange={(event) => setStoragePolicyId(Number(event.target.value))}>
                   <option value={0}>Choose storage</option>
                   {data.storagePolicies.map((item) => (
                     <option key={item.id} value={item.id}>
                       {item.name} · {item.backend}
                     </option>
                   ))}
-                </select>
+                </NativeSelect>
               </label>
               <label>
                 <span>Evaluation split</span>
-                <select
+                <NativeSelect
                   value={evaluationSplit}
                   onChange={(event) => setEvaluationSplit(event.target.value)}
                 >
                   <option value="validation">Validation</option>
                   <option value="test">Protected test</option>
-                </select>
+                </NativeSelect>
               </label>
               <label>
                 <span>Random seed</span>
-                <input
+                <NativeInput
                   type="number"
                   inputMode="numeric"
                   value={seed}
@@ -858,7 +879,7 @@ export default function TrainingScreen({
             </div>
             {storage ? (
               <div className="platform-storage-summary">
-                <PlatformStatus value={storage.backend} />
+                <span>{formatStatus(storage.backend)}</span>
                 <span>Artifact prefix: {storage.artifact_prefix}</span>
                 <span>Retention: {storage.retention_class}</span>
                 <span>{storageEncryptionLabel(storage.encryption)}</span>
@@ -878,7 +899,7 @@ export default function TrainingScreen({
         {step === 4 ? (
           <>
             <div className="platform-section-header">
-              <div><h2>Review & Launch</h2><p>The run manifest will pin every selection below.</p></div>
+              <div><h2 ref={stepHeadingRef} tabIndex={-1}>Review</h2><p>The run manifest will pin every selection below.</p></div>
             </div>
             <dl className="platform-review-grid">
               {contextLabel ? (
@@ -896,7 +917,7 @@ export default function TrainingScreen({
                 <dt>Task</dt>
                 <dd>
                   {taskVersion
-                    ? `${taskVersion.task_kind.replace(/_/g, " ")} · v${taskVersion.version_number}`
+                    ? `${formatTaskKind(taskVersion.task_kind, taskVersion.annotation_ui?.preset)} · v${taskVersion.version_number}`
                     : "Not selected"}
                 </dd>
               </div>
@@ -948,7 +969,7 @@ export default function TrainingScreen({
                       <span className="platform-review-detail">
                         {environment.environment_class}
                         {environment.image_digest
-                          ? ` · ${environment.image_digest.slice(0, 19)}…`
+                          ? ` · ${shortHash(environment.image_digest)}…`
                           : ""}
                       </span>
                     </>
@@ -998,9 +1019,9 @@ export default function TrainingScreen({
 
         <div className="platform-wizard-actions">
           <Button
-            label="Previous"
+            label="Back"
             isDisabled={step === 0 || busy}
-            onClick={() => setStep((current) => Math.max(0, current - 1))}
+            onClick={() => navigateToStep(Math.max(0, step - 1))}
           />
           {step < STEPS.length - 1 ? (
             <Button

@@ -1,3 +1,4 @@
+import { formatTaskKind } from "@/lib/taskPresentation";
 import {
   PlatformEmpty,
   PlatformPageHeader,
@@ -5,23 +6,9 @@ import {
   PlatformStatus,
   shortHash,
 } from "./components";
+import { baseModelName, metricSummary } from "./modelPresentation";
+
 import type { PlatformProjectData } from "./types";
-
-function baseModelName(baseModel: Record<string, unknown>): string {
-  for (const key of ["display_name", "source_model_id", "model_id", "name"]) {
-    const value = baseModel[key];
-    if (typeof value === "string" && value.trim()) return value;
-  }
-  return "From scratch";
-}
-
-function metricSummary(metrics: Record<string, number | null>): string {
-  const values = Object.entries(metrics)
-    .filter((entry): entry is [string, number] => typeof entry[1] === "number")
-    .slice(0, 2)
-    .map(([name, value]) => `${name.replace(/_/g, " ")} ${value.toFixed(3)}`);
-  return values.join(" · ");
-}
 
 export default function ModelsScreen({
   data,
@@ -124,7 +111,7 @@ export default function ModelsScreen({
                         <td data-label="Base model">{baseModelName(version.base_model)}</td>
                         <td data-label="Training method">{version.training_method.replace(/_/g, " ")}</td>
                         <td data-label="Task">
-                          {task?.name ?? taskVersion?.task_kind.replace(/_/g, " ") ?? "Unknown"}
+                          {task?.name ?? (taskVersion ? formatTaskKind(taskVersion.task_kind, taskVersion.annotation_ui?.preset) : undefined) ?? "Unknown"}
                           {taskVersion ? <span>Task v{taskVersion.version_number}</span> : null}
                         </td>
                         <td data-label="Dataset">{trainingDataset?.name ?? "External"}</td>
@@ -156,7 +143,7 @@ export default function ModelsScreen({
           <PlatformEmpty
             title="No named models"
             detail="Choose a name during training so every resulting version has a clear identity."
-            actionLabel="Train first model"
+            actionLabel="Train model"
             onAction={onTrain}
           />
         )}

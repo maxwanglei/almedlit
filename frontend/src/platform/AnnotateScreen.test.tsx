@@ -145,7 +145,7 @@ describe("AnnotateScreen", () => {
     );
 
     expect(
-      screen.getByRole("heading", { level: 1, name: "Team & Rounds" }),
+      screen.getByRole("heading", { level: 1, name: "Team & rounds" }),
     ).toBeTruthy();
     expect(screen.queryByText("Assistance policy")).toBeNull();
     expect(screen.queryByRole("columnheader", { name: /assistance/i })).toBeNull();
@@ -195,4 +195,12 @@ describe("AnnotateScreen", () => {
     fireEvent.click(screen.getByRole("button", { name: "Score with model" }));
     expect(onCreateScore).toHaveBeenCalledTimes(1);
   });
+});
+
+it("displays pinned version numbers rather than database IDs", () => {
+  render(<AnnotateScreen view="rounds" data={projectData()} onCreateRound={vi.fn()} onCreateTask={vi.fn()} onOpenRound={vi.fn()} currentUserId={7} canManage />);
+  expect(screen.getByRole("cell", { name: "v3" })).toBeTruthy();
+  expect(screen.getByRole("cell", { name: "v2" })).toBeTruthy();
+  expect(screen.queryByText("v22")).toBeNull();
+  expect(screen.queryByText("v12")).toBeNull();
 });

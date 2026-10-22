@@ -251,7 +251,6 @@ export interface Annotation {
   tail_annotation_id: number | null;
   evidence: Record<string, unknown>;
   attributes: Record<string, unknown>;
-  revision?: number;
   evidence_block?: EvidenceBlockPayloadV1 | null;
   created_at: string;
   updated_at: string;
@@ -385,7 +384,7 @@ export interface EvidenceReviewInterval {
 
 export interface EvidenceReviewEvent {
   id: number;
-  action: "mark_reviewed" | "reopen";
+  action: "mark_reviewed" | "reopen" | "boundary_mutation" | "undo" | "redo";
   start_sentence_ordinal: number;
   end_sentence_ordinal: number;
   actor_user_id?: number | null;
@@ -941,6 +940,8 @@ export interface InferenceRun {
   failure_reason: string | null;
   metrics: Record<string, unknown>;
 }
+
+export type InferenceRunSummary = Pick<InferenceRun, "id" | "project_id" | "name" | "target_version_ids" | "status">;
 
 export interface InferenceWindow {
   id: number;

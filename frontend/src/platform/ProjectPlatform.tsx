@@ -1,4 +1,7 @@
+import { NativeSelect } from "@/components/NativeField";
+import LoadingState from "@/components/LoadingState";
 import { useEffect, type ReactNode } from "react";
+import { Button } from "@astryxdesign/core/Button";
 import { Banner } from "@astryxdesign/core/Banner";
 
 import { shouldHandleSpaClick } from "@/components/ModuleSwitcher";
@@ -173,7 +176,7 @@ export default function ProjectPlatform({
           activeTab={sourceTab}
           onTabChange={(next) => onNavigate(`/projects/${project.id}/data?tab=${next}`)}
           onImport={canManageSources ? openImport : undefined}
-          onAnnotate={canManageAnnotation ? (dataset, version) => onNavigate(`/projects/${project.id}/data?tab=source&flow=import&datasetId=${dataset.id}&datasetVersionId=${version.id}${queryId("taskVersionId") ? `&taskVersionId=${queryId("taskVersionId")}` : ""}`) : undefined}
+          onAnnotate={canManageAnnotation && effectiveModules.has("annotate") ? (dataset, version) => onNavigate(`/projects/${project.id}/data?tab=source&flow=import&datasetId=${dataset.id}&datasetVersionId=${version.id}${queryId("taskVersionId") ? `&taskVersionId=${queryId("taskVersionId")}` : ""}`) : undefined}
           onPredict={canInfer ? (version) => onNavigate(`/projects/${project.id}/inference?datasetVersionId=${version.id}`) : undefined}
           onCreateTraining={effectiveModules.has("train") ? () => onNavigate(`/training/data?projectId=${project.id}&flow=prepare`) : undefined}
           onTrain={(version) => onNavigate(`/training/new?projectId=${project.id}&trainingDatasetVersionId=${version.id}`)}
@@ -190,7 +193,7 @@ export default function ProjectPlatform({
       );
       break;
     case "inference":
-      content = <InferenceScreen projectId={project.id} data={data} currentUserId={currentUserId} canReview={canManageAnnotation && effectiveModules.has("annotate")} onOpenRound={onOpenRound} onRefresh={onRefresh} onImport={canManageSources ? () => openImport() : () => onDialogChange("dataset")} onOpenModels={() => onNavigate(`/models?projectId=${project.id}`)} />;
+      content = <InferenceScreen projectId={project.id} data={data} currentUserId={currentUserId} canReview={canManageAnnotation && effectiveModules.has("annotate")} onOpenRound={onOpenRound} onNavigate={onNavigate} onRefresh={onRefresh} onImport={canManageSources ? () => openImport() : () => onDialogChange("dataset")} onOpenModels={canPerform(access, "models:read") ? () => onNavigate(`/models?projectId=${project.id}`) : undefined} />;
       break;
     case "tasks":
       content = (
@@ -220,6 +223,8 @@ export default function ProjectPlatform({
       break;
     case "rounds":
       content = (
+        <>
+        {canPerform(access, "learning:score") && !effectiveModules.has("learning") ? <p role="status">Model scoring is planned. The active learning module is not yet available in project settings.</p> : null}
         <AnnotateScreen
           view="rounds"
           data={data}
@@ -233,6 +238,7 @@ export default function ProjectPlatform({
           onCreateScore={() => onDialogChange("feedbackScore")}
           onRefresh={onRefresh}
         />
+        </>
       );
       break;
     case "quality":
@@ -266,6 +272,7 @@ export default function ProjectPlatform({
       content = (
         <OverviewScreen
           data={data}
+          capabilities={access.effectiveCapabilities.filter((capability) => access.blockedCapabilities[capability] === undefined)}
           projectTasks={project.tasks}
           onOpenDocumentTask={openDocumentTask}
           onSetupTask={canManageAnnotation ? setupTask : undefined}
@@ -295,7 +302,7 @@ export default function ProjectPlatform({
       <div className="platform-context-bar">
         <label>
           <span>Project</span>
-          <select
+          <NativeSelect
             value={project.id}
             onChange={(event) => {
               const nextProjectId = Number(event.target.value);
@@ -305,7 +312,7 @@ export default function ProjectPlatform({
               const nextTab =
                 nextProject &&
                 canAccessProjectSection(access, tab) &&
-                projectSupportsSection(nextProject, tab)
+                projectSupportsSection(nextProject, tab, access.effectiveCapabilities.filter((capability) => access.blockedCapabilities[capability] === undefined))
                   ? tab
                   : "overview";
               onProjectSelect(nextProjectId, nextTab);
@@ -314,7 +321,7 @@ export default function ProjectPlatform({
             {projects.map((item) => (
               <option key={item.id} value={item.id}>{item.name}</option>
             ))}
-          </select>
+          </NativeSelect>
         </label>
         <div>
           <strong>{project.name}</strong>
@@ -330,11 +337,11 @@ export default function ProjectPlatform({
       <div className="platform-mobile-tab">
         <label>
           <span>Project section</span>
-          <select value={tab} onChange={(event) => navigateTab(event.target.value as ProjectPlatformTab)}>
+          <NativeSelect value={tab} onChange={(event) => navigateTab(event.target.value as ProjectPlatformTab)}>
             {visibleTabs.map((item) => (
               <option key={item.id} value={item.id}>{item.label}</option>
             ))}
-          </select>
+          </NativeSelect>
         </label>
       </div>
 
@@ -366,12 +373,9 @@ export default function ProjectPlatform({
               container="section"
             />
           ) : null}
-          {loading && !moduleConfigReady ? (
-            <div className="platform-loading" role="status" aria-live="polite">
-              <span aria-hidden="true" />
-              Loading project resources…
-            </div>
-          ) : <div key={project.id} aria-busy={loading}>{content}</div>}
+          {loading ? (
+            <LoadingState label="Loading project resources…" />
+          ) : error ? <Button label="Retry loading project" onClick={() => void onRefresh()} /> : <div key={project.id}>{content}</div>}
         </main>
       </div>
 

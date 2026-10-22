@@ -1,7 +1,11 @@
+import { NativeInput, NativeSelect } from "@/components/NativeField";
+import ValidatedForm from "@/components/ValidatedForm";
+import LoadingState from "@/components/LoadingState";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@astryxdesign/core/Button";
+import { getSessionGeneration } from "@/auth/session";
 
-import { PlatformEmpty, PlatformPageHeader, PlatformSection, PlatformStatus } from "./components";
+import { PlatformEmpty, PlatformPageHeader, PlatformSection, PlatformStatus, formatCount, formatPercent } from "./components";
 import {
   createPredictionReview, createPredictionRun, getPredictionResults, downloadPredictions,
   listPredictionRuns, predictionDownloadUrl, retryPredictionRun,
@@ -16,22 +20,25 @@ interface SavedDraft { name: string; datasetVersionId: number; modelVersionId: n
 function readDraft(projectId: number): SavedDraft {
   let stored: Partial<SavedDraft> = {};
   try { const parsed = JSON.parse(sessionStorage.getItem(draftStorageKey(projectId)) || "{}"); if (parsed && typeof parsed === "object") stored = parsed; } catch { /* A fresh draft remains usable when storage is unavailable. */ }
+  const linkedDatasetId = Number(new URLSearchParams(window.location.search).get("datasetVersionId"));
+  const changedDataset = Boolean(linkedDatasetId && linkedDatasetId !== Number(stored.datasetVersionId));
   return {
-    name: typeof stored.name === "string" ? stored.name : "",
-    datasetVersionId: Number(new URLSearchParams(window.location.search).get("datasetVersionId")) || Number(stored.datasetVersionId) || 0,
+    name: !changedDataset && typeof stored.name === "string" ? stored.name : "",
+    datasetVersionId: linkedDatasetId || Number(stored.datasetVersionId) || 0,
     modelVersionId: Number(stored.modelVersionId) || 0,
-    step: typeof stored.step === "number" && stored.step >= 0 && stored.step <= 2 ? stored.step : 0,
-    request: stored.request && typeof stored.request.key === "string" && typeof stored.request.fingerprint === "string" ? stored.request : { fingerprint: "", key: "" },
+    step: !changedDataset && typeof stored.step === "number" && stored.step >= 0 && stored.step <= 2 ? stored.step : 0,
+    request: !changedDataset && stored.request && typeof stored.request.key === "string" && typeof stored.request.fingerprint === "string" ? stored.request : { fingerprint: "", key: "" },
   };
 }
 
-export default function InferenceScreen({ projectId, data, currentUserId, canReview, onOpenRound, onRefresh, onImport, onOpenModels }: {
+export default function InferenceScreen({ projectId, data, currentUserId, canReview, onOpenRound, onRefresh, onImport, onOpenModels, onNavigate }: {
   projectId: number;
   data: PlatformProjectData;
   currentUserId: number | null;
   canReview: boolean;
   onOpenRound: (roundId: number) => void;
   onRefresh: () => Promise<void>;
+  onNavigate: (path: string) => void;
   onImport?: () => void;
   onOpenModels?: () => void;
 }): React.ReactElement {
@@ -45,6 +52,7 @@ export default function InferenceScreen({ projectId, data, currentUserId, canRev
   const busy = busyAction !== null;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [runsError, setRunsError] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
   const [page, setPage] = useState<PredictionResultPage | null>(null);
   const [offset, setOffset] = useState(0);
@@ -55,6 +63,12 @@ export default function InferenceScreen({ projectId, data, currentUserId, canRev
   const [pollGeneration, setPollGeneration] = useState(0);
   const projectRef = useRef(projectId);
   projectRef.current = projectId;
+  const sessionGeneration = useRef(getSessionGeneration()).current;
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  const isCurrent = useCallback(() => mounted.current &&
+    sessionGeneration === getSessionGeneration() && projectRef.current === projectId,
+  [projectId, sessionGeneration]);
   const createKey = useRef(readDraft(projectId).request);
   const reviewKey = useRef({ fingerprint: "", key: "" });
   const compatibleModels = useMemo(() => data.modelVersions.filter((model) =>
@@ -66,17 +80,23 @@ export default function InferenceScreen({ projectId, data, currentUserId, canRev
   const activeKey = runs.filter((item) => item.status === "planned" || item.status === "queued" || item.status === "running").map((item) => item.id).join(":");
 
   function saveDraft(next: Partial<SavedDraft> = {}): void {
+    if (!isCurrent()) return;
     try { sessionStorage.setItem(draftStorageKey(projectId), JSON.stringify({ name, datasetVersionId, modelVersionId, step, request: createKey.current, ...next })); } catch { /* Network requests remain available without browser storage. */ }
   }
   function moveStep(next: number): void { setStep(next); saveDraft({ step: next }); setError(null); }
   function saveReview(next: Record<string, unknown> = {}): void {
+    if (!isCurrent()) return;
     try { sessionStorage.setItem(`prediction-review:${projectId}:${runId}`, JSON.stringify({ name: reviewName, selected: [...selected], includeSubmitted, request: reviewKey.current, ...next })); } catch { /* Keep review usable without storage. */ }
   }
 
   const refreshRuns = useCallback(async (): Promise<void> => {
     const refreshed = await listPredictionRuns(projectId);
-    if (projectRef.current === projectId) setRuns(refreshed);
-  }, [projectId]);
+    if (isCurrent()) {
+      setRuns(refreshed);
+      setRunsError(null);
+      setNotice((current) => current === "Status could not be refreshed. Automatic updates will retry." ? "" : current);
+    }
+  }, [isCurrent, projectId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -96,7 +116,8 @@ export default function InferenceScreen({ projectId, data, currentUserId, canRev
     setPollPaused(false);
     setLoading(true);
     setError(null);
-    void refreshRuns().catch((caught) => { if (!cancelled) setError(message(caught)); }).finally(() => { if (!cancelled) setLoading(false); });
+    setRunsError(null);
+    void refreshRuns().catch((caught) => { if (!cancelled) { setError(message(caught)); setRunsError(message(caught)); } }).finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
   }, [refreshRuns, projectId]);
 
@@ -152,7 +173,7 @@ export default function InferenceScreen({ projectId, data, currentUserId, canRev
     setReviewName(`${next.name} review`.slice(0, 255));
     const url = new URL(window.location.href);
     url.searchParams.set("predictionRunId", String(next.id));
-    if (url.href !== window.location.href) window.history.pushState(window.history.state, "", url);
+    if (url.href !== window.location.href) onNavigate(`${url.pathname}${url.search}${url.hash}`);
   }
 
   async function create(): Promise<void> {
@@ -167,25 +188,25 @@ export default function InferenceScreen({ projectId, data, currentUserId, canRev
     setBusyAction("create"); setError(null);
     try {
       const created = await createPredictionRun(projectId, { ...draft, request_key: createKey.current.key });
-      if (projectRef.current !== projectId) return;
+      if (!isCurrent()) return;
       setRuns((current) => [created, ...current.filter((item) => item.id !== created.id)]);
       openRun(created);
       setName(""); createKey.current = { fingerprint: "", key: "" };
       setStep(0); saveDraft({ name: "", step: 0, request: createKey.current });
       setPollPaused(false); setPollGeneration((value) => value + 1);
       setNotice(`Prediction run “${created.name}” ${created.status === "completed" ? "completed" : "created"}.`);
-    } catch (caught) { if (projectRef.current === projectId) setError(message(caught)); }
-    finally { if (projectRef.current === projectId) setBusyAction(null); }
+    } catch (caught) { if (isCurrent()) setError(message(caught)); }
+    finally { if (isCurrent()) setBusyAction(null); }
   }
 
   async function retry(target: PredictionRun): Promise<void> {
     setBusyAction("retry"); setError(null);
     try {
       const refreshed = await retryPredictionRun(projectId, target.id);
-      if (projectRef.current !== projectId) return;
+      if (!isCurrent()) return;
       setRuns((current) => current.map((item) => item.id === refreshed.id ? refreshed : item));
       setPollPaused(false); setPollGeneration((value) => value + 1);
-    } catch (caught) { if (projectRef.current === projectId) setError(message(caught)); } finally { if (projectRef.current === projectId) setBusyAction(null); }
+    } catch (caught) { if (isCurrent()) setError(message(caught)); } finally { if (isCurrent()) setBusyAction(null); }
   }
 
   async function review(): Promise<void> {
@@ -197,11 +218,13 @@ export default function InferenceScreen({ projectId, data, currentUserId, canRev
     setBusyAction("review"); setError(null);
     try {
       const result = await createPredictionReview(projectId, run.id, { ...draft, request_key: reviewKey.current.key });
-      if (projectRef.current !== projectId) return;
-      setNotice(`Created a review round with ${result.item_count} items. ${result.excluded_protected + result.excluded_submitted} ineligible items excluded.`);
-      await onRefresh();
-      if (projectRef.current === projectId) onOpenRound(result.round_id);
-    } catch (caught) { if (projectRef.current === projectId) setError(message(caught)); } finally { if (projectRef.current === projectId) setBusyAction(null); }
+      if (!isCurrent()) return;
+      setNotice(`Created a review round with ${formatCount(result.item_count, "record")}. ${formatCount(result.excluded_protected + result.excluded_submitted, "ineligible record")} excluded.`);
+      onOpenRound(result.round_id);
+      void onRefresh().catch(() => {
+        if (isCurrent()) setNotice("The review round was created. The project summary could not refresh.");
+      });
+    } catch (caught) { if (isCurrent()) setError(message(caught)); } finally { if (isCurrent()) setBusyAction(null); }
   }
 
   const datasetName = (versionId: number): string => {
@@ -214,7 +237,7 @@ export default function InferenceScreen({ projectId, data, currentUserId, canRev
     setNotice("Preparing prediction export…");
     try {
       const blob = await downloadPredictions(projectId, run.id, format);
-      if (projectRef.current !== projectId) return;
+      if (!isCurrent()) return;
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
@@ -225,7 +248,7 @@ export default function InferenceScreen({ projectId, data, currentUserId, canRev
       setTimeout(() => URL.revokeObjectURL(url), 1_000);
       setNotice("Prediction export downloaded.");
     } catch (caught) {
-      if (projectRef.current === projectId) { setError(message(caught)); setNotice(""); }
+      if (isCurrent()) { setError(message(caught)); setNotice(""); }
     }
   }
   const modelName = (versionId: number): string => {
@@ -234,47 +257,47 @@ export default function InferenceScreen({ projectId, data, currentUserId, canRev
   };
 
   return <div className="platform-page">
-    <PlatformPageHeader title="Inference" description="Predict labels with a trained model, download results, or select examples for manual review." />
+    <PlatformPageHeader title="Predictions" description="Predict labels with a trained model, download results, or select examples for manual review." />
     {error ? <p className="platform-dialog-error" role="alert">{error}</p> : null}
     <p role="status" aria-live="polite">{notice}</p>
     <PlatformSection title="New prediction run" description="Use a TF-IDF single-label classifier trained in this project. Predictions stay separate from human annotations.">
       {!compatibleModels.length || !datasets.length ? <PlatformEmpty title={!datasets.length ? "Choose source data for predictions" : "A compatible trained model is needed"} detail={!datasets.length ? "Import a named collection of papers. Annotation and training splits are optional for predictions." : "Select a TF-IDF single-label classification model trained in this project."} actionLabel={!datasets.length && onImport ? "Import source dataset" : onOpenModels ? "Open models" : undefined} onAction={!datasets.length ? onImport : onOpenModels} /> :
-        <form className="platform-dialog-form" onSubmit={(event) => { event.preventDefault(); if (step < 2) moveStep(step + 1); else void create(); }}>
+        <ValidatedForm className="platform-dialog-form" onSubmit={(event) => { event.preventDefault(); if (step < 2) moveStep(step + 1); else void create(); }}>
           <nav className="platform-wizard-steps" aria-label="Prediction setup">{["Select dataset", "Select model", "Review"].map((label, index) => <button type="button" key={label} aria-current={step === index ? "step" : undefined} disabled={busy || (index > 0 && !datasetVersionId) || (index > 1 && (!modelVersionId || !name.trim()))} onClick={() => moveStep(index)}>{index + 1}. {label}</button>)}</nav>
           {step === 0 ? <>
-            <label><span>Source dataset</span><select required name="prediction-dataset" value={datasetVersionId || ""} onChange={(event) => { const next = Number(event.target.value); setDatasetVersionId(next); saveDraft({ datasetVersionId: next }); }}>
-              <option value="">Select a dataset</option>{datasets.map((version) => <option key={version.id} value={version.id}>{datasetName(version.id)} · {version.item_count} items</option>)}
-            </select></label>
+            <label><span>Source dataset</span><NativeSelect required name="prediction-dataset" value={datasetVersionId || ""} onChange={(event) => { const next = Number(event.target.value); setDatasetVersionId(next); saveDraft({ datasetVersionId: next }); }}>
+              <option value="">Select a dataset</option>{datasets.map((version) => <option key={version.id} value={version.id}>{datasetName(version.id)} · {formatCount(version.item_count, "record")}</option>)}
+            </NativeSelect></label>
             <p>Every example in this dataset version will receive a prediction.</p>
             {onImport ? <Button label="Import new source dataset" type="button" variant="ghost" onClick={onImport} /> : null}
           </> : step === 1 ? <>
-            <label><span>Prediction name</span><input name="prediction-name" autoComplete="off" required maxLength={255} value={name} onChange={(event) => { setName(event.target.value); saveDraft({ name: event.target.value }); }} placeholder="Tucatinib predictions…" /></label>
-            <label><span>Trained model</span><select required name="prediction-model" value={modelVersionId || ""} onChange={(event) => { const next = Number(event.target.value); setModelVersionId(next); saveDraft({ modelVersionId: next }); }}>
+            <label><span>Prediction name</span><NativeInput name="prediction-name" autoComplete="off" required maxLength={255} value={name} onChange={(event) => { setName(event.target.value); saveDraft({ name: event.target.value }); }} placeholder="Tucatinib predictions…" /></label>
+            <label><span>Trained model</span><NativeSelect required name="prediction-model" value={modelVersionId || ""} onChange={(event) => { const next = Number(event.target.value); setModelVersionId(next); saveDraft({ modelVersionId: next }); }}>
               <option value="">Select a model</option>{compatibleModels.map((version) => <option key={version.id} value={version.id}>{modelName(version.id)}</option>)}
-            </select></label>
+            </NativeSelect></label>
           </> : <dl><dt>Prediction run</dt><dd>{name}</dd><dt>Source dataset</dt><dd>{datasetName(datasetVersionId)}</dd><dt>Trained model</dt><dd>{modelName(modelVersionId)}</dd><dt>Examples to predict</dt><dd>{datasets.find((item) => item.id === datasetVersionId)?.item_count ?? 0}</dd></dl>}
           <div className="platform-dialog-actions">{step > 0 ? <Button label="Back" type="button" isDisabled={busy} onClick={() => moveStep(step - 1)} /> : null}<Button label={busyAction === "create" ? "Starting predictions…" : step === 0 ? "Continue to model" : step === 1 ? "Review predictions" : "Run predictions"} type="submit" variant="primary" isDisabled={busy} isLoading={busyAction === "create"} /></div>
-        </form>}
+        </ValidatedForm>}
     </PlatformSection>
     <PlatformSection title="Prediction runs" description="Runs keep their selected dataset and model versions." action={<Button label="Refresh status" variant="secondary" onClick={() => { setPollPaused(false); setPollGeneration((value) => value + 1); void refreshRuns().catch((caught) => setError(message(caught))); }} />}>
       {pollPaused ? <p role="status">Automatic updates paused after 2 minutes. Refresh status to resume.</p> : null}
-      {loading ? <p role="status">Loading prediction runs…</p> : runs.length ? <div className="platform-table-scroll" role="region" aria-label="Prediction runs" tabIndex={0}><table className="platform-table"><thead><tr><th scope="col">Run</th><th scope="col">Dataset</th><th scope="col">Model</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead><tbody>
-        {runs.map((item) => <tr key={item.id}><td><strong>{item.name}</strong>{item.failure_reason ? <span>{item.failure_reason}</span> : null}</td><td>{datasetName(item.dataset_version_id)}</td><td>{modelName(item.model_version_id)}</td><td><PlatformStatus value={item.status} /></td><td><div className="platform-row-actions"><Button label={item.status === "completed" ? "View results" : "View run"} size="sm" onClick={() => openRun(item)} />{item.status === "failed" || item.status === "queued" ? <Button label="Retry run" size="sm" isDisabled={busy} onClick={() => void retry(item)} /> : null}</div></td></tr>)}
-      </tbody></table></div> : <PlatformEmpty title="No prediction runs yet" detail="Choose source data and a trained model to make your first predictions." />}
+      {loading ? <LoadingState label="Loading prediction runs…" /> : runs.length ? <div className="platform-table-scroll" role="region" aria-label="Prediction runs" tabIndex={0}><table className="platform-table"><thead><tr><th scope="col">Run</th><th scope="col">Dataset</th><th scope="col">Model</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead><tbody>
+        {runs.map((item) => <tr key={item.id}><td><strong>{item.name}</strong>{item.failure_reason ? <span>{item.failure_reason}</span> : null}</td><td>{datasetName(item.dataset_version_id)}</td><td>{modelName(item.model_version_id)}</td><td><PlatformStatus value={item.status} /></td><td><div className="platform-row-actions"><Button label={item.status === "completed" ? "View results" : "View run"} size="sm" onClick={() => openRun(item)} />{item.status === "failed" || item.status === "queued" || item.status === "planned" ? <Button label="Retry run" size="sm" isDisabled={busy} onClick={() => void retry(item)} /> : null}</div></td></tr>)}
+      </tbody></table></div> : runsError ? <p>Prediction runs could not be loaded. Refresh status to try again.</p> : <PlatformEmpty title="No prediction runs yet" detail="Choose source data and a trained model to make your first predictions." />}
     </PlatformSection>
     {run ? <PlatformSection title={run.name} description={`${datasetName(run.dataset_version_id)} · ${modelName(run.model_version_id)}`}>
       {run.status !== "completed" ? <p role="status">{run.status === "failed" ? run.failure_reason ?? "Prediction failed. Retry the run." : "Predictions are being prepared. You can return to this run later."}</p> : <>
         <div className="platform-page-actions"><a className="platform-text-action" href={predictionDownloadUrl(projectId, run.id, "csv")} download onClick={(event) => { event.preventDefault(); void download("csv"); }}>Download CSV</a><a className="platform-text-action" href={predictionDownloadUrl(projectId, run.id, "jsonl")} download onClick={(event) => { event.preventDefault(); void download("jsonl"); }}>Download JSONL</a></div>
-        {canReview && currentUserId ? <label className="platform-checkbox-row platform-prediction-review-toggle"><input type="checkbox" checked={includeSubmitted} onChange={(event) => { setIncludeSubmitted(event.target.checked); setSelected(new Set()); saveReview({ includeSubmitted: event.target.checked, selected: [] }); }} /><span>Include previously submitted annotations for another review</span></label> : null}
-        {!page ? <p role="status">Loading results…</p> : <>
+        {canReview && currentUserId ? <label className="platform-checkbox-row platform-prediction-review-toggle"><NativeInput type="checkbox" checked={includeSubmitted} onChange={(event) => { setIncludeSubmitted(event.target.checked); setSelected(new Set()); saveReview({ includeSubmitted: event.target.checked, selected: [] }); }} /><span>Include previously submitted annotations for another review</span></label> : null}
+        {!page ? <LoadingState label="Loading results…" /> : <>
           <p aria-live="polite">{page.total} predictions · {selected.size} selected for review</p>
           <div className="platform-table-scroll" role="region" aria-label="Prediction results" tabIndex={0}><table className="platform-table"><thead><tr>{canReview ? <th scope="col">Select</th> : null}<th scope="col">Example</th><th scope="col">Prediction</th><th scope="col">Confidence</th><th scope="col">Review status</th></tr></thead><tbody>{page.items.map((item) => <tr key={item.dataset_item_id}>
-            {canReview ? <td><input type="checkbox" aria-label={`Review ${item.stable_key}`} checked={selected.has(item.dataset_item_id)} disabled={item.protected || (item.already_submitted && !includeSubmitted) || busy} onChange={(event) => { const next = new Set(selected); if (event.target.checked) next.add(item.dataset_item_id); else next.delete(item.dataset_item_id); setSelected(next); saveReview({ selected: [...next] }); }} /></td> : null}
-            <td><strong>{item.title}</strong><details><summary>Read example</summary><p style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{item.text}</p></details></td><td>{predictionLabel(item.prediction)}</td><td>{item.confidence === null ? "Unavailable" : new Intl.NumberFormat(undefined, { style: "percent", maximumFractionDigits: 1 }).format(item.confidence)}</td><td>{item.protected ? "Protected holdout — excluded" : item.already_submitted ? "Previously submitted" : "Available for review"}</td>
+            {canReview ? <td><NativeInput type="checkbox" aria-label={`Review ${item.stable_key}`} checked={selected.has(item.dataset_item_id)} disabled={item.protected || (item.already_submitted && !includeSubmitted) || busy} onChange={(event) => { const next = new Set(selected); if (event.target.checked) next.add(item.dataset_item_id); else next.delete(item.dataset_item_id); setSelected(next); saveReview({ selected: [...next] }); }} /></td> : null}
+            <td><strong>{item.title}</strong><details><summary>Read example</summary><p style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{item.text}</p></details></td><td>{predictionLabel(item.prediction)}</td><td>{item.confidence === null ? "Unavailable" : formatPercent(item.confidence)}</td><td>{item.protected ? "Protected holdout — excluded" : item.already_submitted ? "Previously submitted" : "Available for review"}</td>
           </tr>)}</tbody></table></div>
           <div className="platform-row-actions platform-prediction-pagination"><Button label="Previous results" isDisabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 50))} /><span>{page.total ? `${offset + 1}–${Math.min(offset + 50, page.total)} of ${page.total}` : "0 results"}</span><Button label="Next results" isDisabled={offset + 50 >= page.total} onClick={() => setOffset(offset + 50)} />{canReview ? <Button label="Select eligible results on this page" onClick={() => { const next = new Set([...selected, ...page.items.filter((item) => !item.protected && (!item.already_submitted || includeSubmitted)).map((item) => item.dataset_item_id)]); setSelected(next); saveReview({ selected: [...next] }); }} /> : null}</div>
         </>}
-        {canReview && currentUserId ? <form className="platform-dialog-form" onSubmit={(event) => { event.preventDefault(); void review(); }}><label><span>Review round name</span><input required name="prediction-review-name" autoComplete="off" maxLength={255} value={reviewName} onChange={(event) => { setReviewName(event.target.value); saveReview({ name: event.target.value }); }} /></label><p>You will review the selected original examples with model suggestions visible. Protected holdout examples remain excluded.</p><div className="platform-dialog-actions"><Button label={busyAction === "review" ? "Creating review round…" : "Create review round"} type="submit" variant="primary" isDisabled={busy} isLoading={busyAction === "review"} /></div></form> : null}
+        {canReview && currentUserId ? <ValidatedForm className="platform-dialog-form" onSubmit={(event) => { event.preventDefault(); void review(); }}><label><span>Review round name</span><NativeInput required name="prediction-review-name" autoComplete="off" maxLength={255} value={reviewName} onChange={(event) => { setReviewName(event.target.value); saveReview({ name: event.target.value }); }} /></label><p>You will review the selected original examples with model suggestions visible. Protected holdout examples remain excluded.</p><div className="platform-dialog-actions"><Button label={busyAction === "review" ? "Creating review round…" : "Create review round"} type="submit" variant="primary" isDisabled={busy} isLoading={busyAction === "review"} /></div></ValidatedForm> : null}
       </>}
     </PlatformSection> : null}
   </div>;

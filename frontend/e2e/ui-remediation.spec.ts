@@ -111,7 +111,7 @@ for (const viewport of viewports) {
       await expect(roadmap.getByRole("article")).toHaveCount(6);
       await expect(roadmap.getByRole("link")).toHaveCount(0);
       await expect(roadmap.getByRole("button")).toHaveCount(0);
-      if (viewport.width <= 760) {
+      if (viewport.width <= 900) {
         await expect(
           managerPage.getByRole("combobox", { name: "Project section" }),
         ).toHaveValue("overview");

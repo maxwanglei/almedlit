@@ -1,3 +1,6 @@
+import { NativeInput, NativeTextarea } from "@/components/NativeField";
+import ValidatedForm from "@/components/ValidatedForm";
+import LoadingState from "@/components/LoadingState";
 import { useId, useMemo, useState } from "react";
 import { Button } from "@astryxdesign/core/Button";
 import { X } from "lucide-react";
@@ -10,7 +13,7 @@ import {
   PlatformEmpty,
   PlatformPageHeader,
   PlatformRouteLink,
-  PlatformStatus,
+  formatStatus,
 } from "./components";
 
 type ProjectTemplate = "annotation" | "training" | "combined";
@@ -59,6 +62,9 @@ function projectPurpose(project: Project): "training" | "annotation" | "combined
 
 export default function ProjectsWorkspace({
   workspaceId,
+  workspaceName,
+  loadError,
+  onRetry,
   projects,
   canCreate,
   capabilities,
@@ -67,6 +73,9 @@ export default function ProjectsWorkspace({
   onProjectCreated,
 }: {
   workspaceId: number | null;
+  workspaceName?: string;
+  loadError?: string | null;
+  onRetry?: () => void;
   projects: Project[];
   canCreate: boolean;
   capabilities: readonly string[];
@@ -77,6 +86,7 @@ export default function ProjectsWorkspace({
   const dialogTitleId = useId();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [name, setName] = useState("");
+  const [nameTouched, setNameTouched] = useState(false);
   const [description, setDescription] = useState("");
   const [template, setTemplate] = useState<ProjectTemplate>("annotation");
   const [busy, setBusy] = useState(false);
@@ -104,6 +114,7 @@ export default function ProjectsWorkspace({
       );
     }
     setError(null);
+    setNameTouched(false);
     setDialogOpen(true);
   }
 
@@ -155,17 +166,19 @@ export default function ProjectsWorkspace({
         <PlatformPageHeader
           title="Projects"
           description="Scientific contexts for data, annotation, training, evaluation, and reproducible lineage."
-          actionLabel={canCreate ? "New project" : undefined}
+          actionLabel={canCreate && projects.length ? "Create project" : undefined}
           onAction={
-            canCreate ? openDialog : undefined
+            canCreate && projects.length ? openDialog : undefined
           }
         />
 
         {loading ? (
-          <div className="platform-loading" role="status" aria-live="polite">
-            <span aria-hidden="true" />
-            Loading projects…
-          </div>
+          <LoadingState label="Loading projects…" />
+        ) : loadError ? (
+          <section aria-label="Projects could not be loaded">
+            <p className="platform-form-warning" role="alert">{loadError}</p>
+            {onRetry ? <Button label="Retry loading projects" onClick={onRetry} /> : null}
+          </section>
         ) : projects.length ? (
           <div
             className="platform-table-scroll platform-table-scroll--summary projects-directory-table"
@@ -193,16 +206,10 @@ export default function ProjectsWorkspace({
                         <span>{project.description ?? "No description"}</span>
                       </td>
                       <td data-label="Purpose" data-priority="status">
-                        <PlatformStatus
-                          value={
-                            purpose === "training"
-                              ? "training only"
-                              : purpose
-                          }
-                        />
+                        <span>{formatStatus(purpose === "training" ? "training only" : purpose)}</span>
                       </td>
                       <td data-label="Tasks">{project.tasks.length + (project.workflow_task_count ?? 0)}</td>
-                      <td data-label="Workspace">#{project.workspace_id}</td>
+                      <td data-label="Workspace">{workspaceName ?? "Current workspace"}</td>
                       <td data-label="Action" data-priority="action">
                         <PlatformRouteLink
                           href={`/projects/${project.id}/overview`}
@@ -248,7 +255,7 @@ export default function ProjectsWorkspace({
               <h2 id={dialogTitleId}>Create project</h2>
             </div>
             <Button
-              label="Close"
+              label="Close" tooltip="Close"
               icon={<X size={17} />}
               isIconOnly
               variant="ghost"
@@ -261,7 +268,7 @@ export default function ProjectsWorkspace({
               {error}
             </p>
           ) : null}
-          <form
+          <ValidatedForm
             className="platform-dialog-form"
             onSubmit={(event) => {
               event.preventDefault();
@@ -270,17 +277,21 @@ export default function ProjectsWorkspace({
           >
             <label>
               <span>Project name</span>
-              <input
+              <NativeInput
                 autoFocus
+                aria-invalid={nameTouched && !name.trim() ? true : undefined}
+                aria-describedby={nameTouched && !name.trim() ? `${dialogTitleId}-name-error` : undefined}
+                onBlur={() => setNameTouched(true)}
                 required
                 maxLength={255}
                 value={name}
                 onChange={(event) => setName(event.target.value)}
               />
+              {nameTouched && !name.trim() ? <small id={`${dialogTitleId}-name-error`} aria-hidden="true">Enter a project name.</small> : null}
             </label>
             <label>
               <span>Description</span>
-              <textarea
+              <NativeTextarea
                 rows={3}
                 value={description}
                 onChange={(event) => setDescription(event.target.value)}
@@ -293,7 +304,7 @@ export default function ProjectsWorkspace({
                   const enabled = templateIsEnabled(item);
                   return (
                     <label key={item.id} data-disabled={!enabled}>
-                      <input
+                      <NativeInput
                         type="radio"
                         name="project-template"
                         value={item.id}
@@ -325,7 +336,7 @@ export default function ProjectsWorkspace({
                 }
               />
             </div>
-          </form>
+          </ValidatedForm>
         </DialogFrame>
       ) : null}
     </main>

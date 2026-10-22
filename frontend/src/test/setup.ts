@@ -13,3 +13,14 @@ if (typeof window !== "undefined" && typeof window.matchMedia !== "function") {
     }),
   });
 }
+
+if (typeof HTMLElement !== "undefined") {
+  for (const method of ["showPopover", "hidePopover"] as const) {
+    if (typeof HTMLElement.prototype[method] !== "function") {
+      Object.defineProperty(HTMLElement.prototype, method, {
+        configurable: true,
+        value() {},
+      });
+    }
+  }
+}

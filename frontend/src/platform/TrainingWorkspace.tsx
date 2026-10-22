@@ -1,7 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { NativeInput, NativeSelect, NativeTextarea } from "@/components/NativeField";
+import ValidatedForm from "@/components/ValidatedForm";
+import LoadingState from "@/components/LoadingState";
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { Button } from "@astryxdesign/core/Button";
 
+import ConfirmDialog from "@/components/ConfirmDialog";
+
 import type { Project } from "@/types/api";
+import { request } from "@/api/client";
+import { getSessionGeneration } from "@/auth/session";
 
 import {
   type TrainingLaunchAttempt,
@@ -18,6 +25,7 @@ import {
   verifyExecutionEnvironment,
 } from "./api";
 import DataScreen from "./DataScreen";
+import { baseModelLineage, baseModelName, creatorName, metricSummary } from "./modelPresentation";
 import TrainingDatasetBuilder from "./TrainingDatasetBuilder";
 import PlatformDialog from "./PlatformDialog";
 import TrainingScreen, { type TrainingLaunchDraft } from "./TrainingScreen";
@@ -29,9 +37,11 @@ import {
   PlatformSection,
   PlatformStatus,
   formatStatus,
+  formatDateTime,
 } from "./components";
 import {
   EMPTY_PLATFORM_PROJECT_DATA,
+  type ModelEvaluation,
   type WorkspaceTrainingContext,
   type WorkspaceTrainingFilters,
   type WorkspaceTrainingRun,
@@ -105,71 +115,52 @@ function parseJsonObject(value: string, label: string): Record<string, unknown> 
   return parsed as Record<string, unknown>;
 }
 
-function baseModelName(baseModel: Record<string, unknown>): string {
-  for (const key of ["display_name", "source_model_id", "model_id", "name"]) {
-    const value = baseModel[key];
-    if (typeof value === "string" && value.trim()) return value;
+function jsonObjectError(value: string, label: string): string {
+  try {
+    parseJsonObject(value, label);
+    return "";
+  } catch (caught) {
+    return errorMessage(caught, "Enter a JSON object.");
   }
-  return Object.keys(baseModel).length ? "Recorded in manifest" : "From scratch";
 }
 
-function baseModelLineage(baseModel: Record<string, unknown>): {
-  asset: string;
-  source: string;
-  revision: string;
-} {
-  const first = (...keys: string[]): string | null => {
-    for (const key of keys) {
-      const value = baseModel[key];
-      if (
-        (typeof value === "string" || typeof value === "number") &&
-        String(value).trim()
-      ) {
-        return String(value);
-      }
-    }
-    return null;
-  };
-  const empty = Object.keys(baseModel).length === 0;
-  return {
-    asset:
-      first("base_model_asset_id", "asset_id", "id") ??
-      (empty ? "Not required" : "Not recorded"),
-    source:
-      first("source_model_id", "source", "model_id", "name") ??
-      (empty ? "From scratch" : "Not recorded"),
-    revision:
-      first("exact_revision", "revision", "commit") ??
-      (empty ? "Not applicable" : "Not recorded"),
-  };
+function JsonObjectField({ label, value, onChange, rows = 4 }: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  rows?: number;
+}): React.ReactElement {
+  const errorId = useId();
+  const message = jsonObjectError(value, label);
+  return <label>
+    <span>{label} JSON</span>
+    <NativeTextarea
+      rows={rows}
+      value={value}
+      aria-invalid={message ? true : undefined}
+      aria-describedby={message ? errorId : undefined}
+      onChange={(event) => {
+        event.currentTarget.setCustomValidity(jsonObjectError(event.currentTarget.value, label));
+        onChange(event.currentTarget.value);
+      }}
+    />
+    {message ? <small id={errorId} className="platform-field-error" aria-hidden="true">{message}</small> : null}
+  </label>;
 }
 
-function metricSummary(metrics: Record<string, number | null>): string {
-  const entries = Object.entries(metrics)
-    .filter((entry): entry is [string, number] => typeof entry[1] === "number")
-    .slice(0, 3)
-    .map(([name, value]) => `${formatStatus(name)} ${value.toFixed(3)}`);
-  return entries.join(" · ") || "No aggregate metrics";
-}
-
-function creatorName(
-  run: Pick<
-    WorkspaceTrainingRun,
-    "creator_display_name" | "creator_username" | "created_by_user_id"
-  >,
-): string {
-  return (
-    run.creator_display_name?.trim() ||
-    run.creator_username?.trim() ||
-    (run.created_by_user_id ? `User ${run.created_by_user_id}` : "System")
-  );
+function revealInvalidField(event: FormEvent<HTMLFormElement>): void {
+  for (const details of event.currentTarget.querySelectorAll("details")) {
+    if (event.target instanceof Node && details.contains(event.target)) details.open = true;
+  }
 }
 
 function WorkspaceNavigation({
   current,
+  projectId,
   onNavigate,
 }: {
   current: TrainingWorkspaceView;
+  projectId?: number | null;
   onNavigate: TrainingWorkspaceProps["onNavigate"];
 }): React.ReactElement {
   return (
@@ -177,7 +168,7 @@ function WorkspaceNavigation({
       {NAV_ITEMS.map((item) => (
         <PlatformRouteLink
           key={item.view}
-          href={item.path}
+          href={`${item.path}${projectId ? `?projectId=${projectId}` : ""}`}
           className="platform-text-action"
           ariaCurrent={
             current === item.view ||
@@ -208,7 +199,7 @@ function ProjectContextPicker({
   return (
     <label>
       <span>{label}</span>
-      <select
+      <NativeSelect
         value={projectId}
         onChange={(event) => onChange(Number(event.target.value))}
       >
@@ -221,7 +212,7 @@ function ProjectContextPicker({
               : " · training-only"}
           </option>
         ))}
-      </select>
+      </NativeSelect>
     </label>
   );
 }
@@ -248,7 +239,7 @@ export default function TrainingWorkspace(
       tabIndex={-1}
     >
       <div className="platform-page">
-        <WorkspaceNavigation current={props.view} onNavigate={props.onNavigate} />
+        <WorkspaceNavigation current={props.view} projectId={props.initialProjectId} onNavigate={props.onNavigate} />
         {props.view === "runs" ? <TrainingRuns {...props} /> : null}
         {props.view === "new" ? <NewTraining {...props} /> : null}
         {props.view === "data" ? <TrainingData {...props} /> : null}
@@ -277,6 +268,7 @@ function TrainingRuns({
   });
   const [loading, setLoading] = useState(true);
   const [busyRunId, setBusyRunId] = useState<number | null>(null);
+  const [runToCancel, setRunToCancel] = useState<WorkspaceTrainingRun | null>(null);
   const [error, setError] = useState<string | null>(null);
   const loadRequestIdRef = useRef(0);
 
@@ -336,6 +328,7 @@ function TrainingRuns({
     setError(null);
     try {
       const updated = await cancelTrainingRun(run.project_id, run.id);
+      setRunToCancel(null);
       setPage((current) => ({
         ...current,
         items: current.items.map((item) =>
@@ -363,11 +356,11 @@ function TrainingRuns({
       <PlatformPageHeader
         title="Training"
         description="Workspace-wide runs across annotation and training-only projects."
-        actionLabel="New training"
-        onAction={() => onNavigate("/training/new")}
+        actionLabel={historyRuns.length ? "Train model" : undefined}
+        onAction={() => onNavigate(`/training/new${initialProjectId ? `?projectId=${initialProjectId}` : ""}`)}
       />
       <PlatformSection title="Run filters">
-        <form
+        <ValidatedForm
           className="platform-form-grid"
           onSubmit={(event) => {
             event.preventDefault();
@@ -376,17 +369,13 @@ function TrainingRuns({
         >
           <label>
             <span>Project</span>
-            <select
+            <NativeSelect
               value={filters.projectId ?? ""}
-              onChange={(event) =>
-                setFilters((current) => ({
-                  ...current,
-                  projectId: event.target.value
-                    ? Number(event.target.value)
-                    : undefined,
-                  cursor: undefined,
-                }))
-              }
+              onChange={(event) => {
+                const id = event.target.value ? Number(event.target.value) : undefined;
+                setFilters((current) => ({ ...current, projectId: id, cursor: undefined }));
+                onNavigate(`/training${id ? `?projectId=${id}` : ""}`, "replace");
+              }}
             >
               <option value="">All training projects</option>
               {projects.map((project) => (
@@ -394,11 +383,11 @@ function TrainingRuns({
                   {project.name}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
           </label>
           <label>
             <span>Status</span>
-            <select
+            <NativeSelect
               value={filters.status ?? ""}
               onChange={(event) =>
                 setFilters((current) => ({
@@ -414,11 +403,11 @@ function TrainingRuns({
               <option value="succeeded">Succeeded</option>
               <option value="failed">Failed</option>
               <option value="cancelled">Cancelled</option>
-            </select>
+            </NativeSelect>
           </label>
           <label>
             <span>Model family</span>
-            <input
+            <NativeInput
               type="text"
               list="training-run-family-options"
               value={filters.family ?? ""}
@@ -446,7 +435,7 @@ function TrainingRuns({
               isDisabled={loading}
             />
           </div>
-        </form>
+        </ValidatedForm>
       </PlatformSection>
       {error ? <p role="alert" className="platform-form-warning">{error}</p> : null}
       <PlatformSection
@@ -454,7 +443,9 @@ function TrainingRuns({
         description="Each run remains bound to its project provenance and immutable inputs."
       >
         {loading && !historyRuns.length ? (
-          <p className="platform-inline-empty" role="status">Loading training runs…</p>
+          <LoadingState label="Loading training runs…" />
+        ) : error && !historyRuns.length ? (
+          <Button label="Retry loading runs" onClick={() => void load(appliedFilters.current)} />
         ) : historyRuns.length ? (
           <div
             className="platform-table-scroll platform-table-scroll--summary"
@@ -553,7 +544,7 @@ function TrainingRuns({
                             }
                             size="sm"
                             isDisabled={busyRunId !== null}
-                            onClick={() => void cancel(run)}
+                            onClick={() => { setError(null); setRunToCancel(run); }}
                           />
                         ) : (
                           <PlatformRouteLink
@@ -575,7 +566,7 @@ function TrainingRuns({
           <PlatformEmpty
             title="No training runs"
             detail="Launch from an existing annotation project or a training-only project."
-            actionLabel="New training"
+            actionLabel="Train model"
             onAction={() => onNavigate("/training/new")}
           />
         )}
@@ -597,6 +588,7 @@ function TrainingRuns({
           </div>
         ) : null}
       </PlatformSection>
+      <ConfirmDialog open={runToCancel !== null} title="Cancel training run?" description="This stops the run. A cancelled run cannot be resumed. Launch a new run to train again." confirmLabel="Cancel run" busy={busyRunId !== null} error={error} onCancel={() => { setRunToCancel(null); setError(null); }} onConfirm={async () => { if (runToCancel) await cancel(runToCancel); }} />
     </>
   );
 }
@@ -622,6 +614,7 @@ function NewTraining({
   const [projectId, setProjectId] = useState(initialProjectId ?? 0);
   const [contextConfirmed, setContextConfirmed] = useState(false);
   const [data, setData] = useState(EMPTY_PLATFORM_PROJECT_DATA);
+  const [loadedProjectId, setLoadedProjectId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -678,6 +671,7 @@ function NewTraining({
     setContextConfirmed(false);
     setContextKind("existing");
     setData(EMPTY_PLATFORM_PROJECT_DATA);
+    setLoadedProjectId(null);
     setProjectName("");
     setProjectDescription("");
     setError(null);
@@ -699,7 +693,6 @@ function NewTraining({
       contextsWorkspaceId !== workspaceId ||
       !contexts.some((item) => item.project_id === projectId)
     ) {
-      setData(EMPTY_PLATFORM_PROJECT_DATA);
       return;
     }
     const requestId = ++projectDataRequestIdRef.current;
@@ -712,6 +705,7 @@ function NewTraining({
     void Promise.all(loaders)
       .then(([trainingData, sourceData]) => {
         if (requestId !== projectDataRequestIdRef.current) return;
+        setLoadedProjectId(projectId);
         setData(
           sourceData
             ? {
@@ -821,8 +815,7 @@ function NewTraining({
     }
   }
 
-  if (!contextConfirmed) {
-    return (
+  const contextChooser = !contextConfirmed ? (
       <>
         <PlatformPageHeader
           title="New training"
@@ -839,7 +832,7 @@ function NewTraining({
             aria-label="Training context type"
           >
             <label>
-              <input
+              <NativeInput
                 type="radio"
                 name="training-context"
                 checked={contextKind === "existing"}
@@ -860,7 +853,7 @@ function NewTraining({
               </span>
             </label>
             <label>
-              <input
+              <NativeInput
                 type="radio"
                 name="training-context"
                 checked={contextKind === "training_only"}
@@ -895,7 +888,7 @@ function NewTraining({
               label={loading ? "Loading…" : "Use selected project"}
               variant="primary"
               isDisabled={!projectId || loading}
-              onClick={() => setContextConfirmed(true)}
+              onClick={() => { setContextConfirmed(true); onNavigate(`/training/new?projectId=${projectId}`, "replace"); }}
             />
           </div>
         </PlatformSection>
@@ -904,7 +897,7 @@ function NewTraining({
           title="Create training-only project"
             description="It enables Data, Training, Models, and Activity without enabling Annotation."
           >
-            <form
+            <ValidatedForm
               className="platform-dialog-form"
               onSubmit={(event) => {
                 event.preventDefault();
@@ -913,7 +906,7 @@ function NewTraining({
             >
               <label>
                 <span>Project name</span>
-                <input
+                <NativeInput
                   required
                   maxLength={255}
                   value={projectName}
@@ -922,7 +915,7 @@ function NewTraining({
               </label>
               <label>
                 <span>Description</span>
-                <textarea
+                <NativeTextarea
                   rows={3}
                   value={projectDescription}
                   onChange={(event) =>
@@ -938,7 +931,7 @@ function NewTraining({
                   isDisabled={busy}
                 />
               </div>
-            </form>
+            </ValidatedForm>
           </PlatformSection>
         ) : null}
         {contextKind === "training_only" &&
@@ -949,10 +942,9 @@ function NewTraining({
           </p>
         ) : null}
       </>
-    );
-  }
+    ) : null;
 
-  if (loading && !data.taskVersions.length) {
+  if (contextConfirmed && loadedProjectId !== projectId && loading && !error) {
     return (
       <>
         <PlatformPageHeader
@@ -965,18 +957,20 @@ function NewTraining({
 
   return (
     <>
+      {contextChooser}
+      <div hidden={!contextConfirmed}>
       {error ? <p role="alert" className="platform-form-warning">{error}</p> : null}
       <div className="platform-section-header">
-        <p>
-          Project context: <strong>{context?.project_name ?? `Project ${projectId}`}</strong>
-        </p>
+        {context && contextsWorkspaceId === workspaceId ? <p>
+          Project context: <strong>{context.project_name}</strong>
+        </p> : null}
         <Button
           label="Change context"
           size="sm"
           onClick={() => setContextConfirmed(false)}
         />
       </div>
-      <TrainingScreen
+      {loadedProjectId === projectId ? <TrainingScreen
         key={`${trainingDraftKey(workspaceId, projectId, initialDatasetId)}:${initialTrainingDatasetVersionId ?? "none"}`}
         data={data}
         busy={busy}
@@ -1018,7 +1012,8 @@ function NewTraining({
           )
         }
         onLaunch={launch}
-      />
+      /> : null}
+      </div>
     </>
   );
 }
@@ -1029,6 +1024,7 @@ function TrainingData({
   initialProjectId,
   initialDatasetId,
   canCreateTask,
+  canCreateTrainingProject,
   initialDatasetVersionId,
   initialTaskVersionId,
   initialLabelSetVersionId,
@@ -1051,18 +1047,25 @@ function TrainingData({
   const builderOpen = new URLSearchParams(search).get("flow") === "prepare" || Boolean(initialDatasetId);
   const [loadedProjectId, setLoadedProjectId] = useState<number | null>(null);
   const [savedMessage, setSavedMessage] = useState<string | null>(null);
+  useEffect(() => {
+    if (!savedMessage) return;
+    const timer = setTimeout(() => setSavedMessage(null), 5_000);
+    return () => clearTimeout(timer);
+  }, [savedMessage]);
   const dataTab = new URLSearchParams(search).get("tab") === "source" ? "source" : "training";
   const reloadRequestIdRef = useRef(0);
+  const sessionGeneration = useRef(getSessionGeneration()).current;
   const reloadContextKey = `${workspaceId}:${contextsWorkspaceId ?? "none"}:${projectId}`;
   const reloadContextKeyRef = useRef(reloadContextKey);
   reloadContextKeyRef.current = reloadContextKey;
 
-  const reload = useCallback(async (): Promise<void> => {
-    if (reloadContextKeyRef.current !== reloadContextKey) return;
+  const reload = useCallback(async (): Promise<boolean> => {
+    if (reloadContextKeyRef.current !== reloadContextKey || sessionGeneration !== getSessionGeneration()) return false;
     const requestId = ++reloadRequestIdRef.current;
     const isCurrentRequest = (): boolean =>
       requestId === reloadRequestIdRef.current &&
-      reloadContextKey === reloadContextKeyRef.current;
+      reloadContextKey === reloadContextKeyRef.current &&
+      sessionGeneration === getSessionGeneration();
     if (
       !projectId ||
       contextsWorkspaceId !== workspaceId ||
@@ -1071,7 +1074,7 @@ function TrainingData({
       if (isCurrentRequest()) {
         setData(EMPTY_PLATFORM_PROJECT_DATA);
       }
-      return;
+      return false;
     }
     setLoading(true);
     setError(null);
@@ -1094,11 +1097,14 @@ function TrainingData({
           environments: trainingData.environments,
           storagePolicies: trainingData.storagePolicies,
         });
+        return true;
       }
+      return false;
     } catch (caught) {
       if (isCurrentRequest()) {
         setError(errorMessage(caught, "Unable to load training data."));
       }
+      throw caught;
     } finally {
       if (isCurrentRequest()) {
         setLoading(false);
@@ -1109,6 +1115,7 @@ function TrainingData({
     contextsWorkspaceId,
     projectId,
     reloadContextKey,
+    sessionGeneration,
     workspaceId,
   ]);
 
@@ -1138,11 +1145,19 @@ function TrainingData({
   }, [projects, workspaceId]);
 
   useEffect(() => {
-    void reload();
+    void reload().catch(() => undefined);
     return () => {
       reloadRequestIdRef.current += 1;
     };
   }, [reload]);
+
+  useEffect(() => {
+    if (!initialProjectId && projectId && contextsWorkspaceId === workspaceId) {
+      const params = new URLSearchParams(search);
+      params.set("projectId", String(projectId));
+      onNavigate(`/training/data?${params}`, "replace");
+    }
+  }, [contextsWorkspaceId, initialProjectId, onNavigate, projectId, search, workspaceId]);
 
   const context = contexts.find((item) => item.project_id === projectId);
 
@@ -1162,7 +1177,16 @@ function TrainingData({
 
   return (
     <>
-      {builderOpen ? <PlatformPageHeader title="Training data" description="Prepare a named training dataset from submitted annotations or external labels." /> : null}
+      <PlatformPageHeader
+        title="Training data"
+        description="Prepare and manage training datasets from submitted annotations or external labels."
+        actionLabel={!builderOpen && !loading && !error && projectId > 0 && loadedProjectId === projectId && (dataTab === "training" ? data.trainingDatasets.length > 0 : data.datasets.length > 0)
+          ? dataTab === "training" ? "Create training dataset" : "Import source data"
+          : undefined}
+        onAction={() => dataTab === "training"
+          ? onNavigate(`/training/data?projectId=${projectId}&flow=prepare`)
+          : setDialog("dataset")}
+      />
       <PlatformSection title="Project context">
         <div className="platform-form-grid">
           <ProjectContextPicker
@@ -1185,16 +1209,19 @@ function TrainingData({
         onImport={() => setDialog("dataset")} onDefineTask={canCreateTask ? () => setDialog("task") : undefined}
         onCancel={() => onNavigate(`/training/data?projectId=${projectId}&tab=training`)}
         onCreated={async (version) => {
+          if (reloadContextKeyRef.current !== reloadContextKey || sessionGeneration !== getSessionGeneration()) throw new Error("The training context changed. Your dataset remains saved in its original project.");
           setSavedMessage(`${version.name} · v${version.version_number ?? 1} saved. Choose Train model to launch training.`);
-          await reload();
+          const refreshed = await reload();
+          if (!refreshed || reloadContextKeyRef.current !== reloadContextKey || sessionGeneration !== getSessionGeneration()) throw new Error("The training context changed. Your dataset remains saved in its original project.");
           onNavigate(`/training/data?projectId=${projectId}&tab=training`);
         }} /> : null}
-      {loading && !projectId ? (
-        <p className="platform-inline-empty" role="status">Loading training contexts…</p>
-      ) : projectId ? (builderOpen ? null : (
+      {(loading || (projectId > 0 && loadedProjectId !== projectId && !error)) && !(builderOpen && loadedProjectId === projectId) ? (
+        <LoadingState label="Loading training data…" />
+      ) : error ? null : projectId ? (builderOpen ? null : (
         <DataScreen
           data={loadedProjectId === projectId ? data : EMPTY_PLATFORM_PROJECT_DATA}
           legacyDocumentCount={0}
+          showHeader={false}
           title="Training data"
           description={`Versioned source data and label composition for ${
             context?.project_name ?? `Project ${projectId}`
@@ -1220,12 +1247,15 @@ function TrainingData({
       )) : (
         <PlatformEmpty
           title="No training project"
-          detail="A manager must create a project with Training enabled before data can be imported."
+          detail={canCreateTrainingProject ? "Create a project with Training enabled before importing training data." : "Ask a workspace manager to create a project with Training enabled before importing training data."}
+          actionLabel="Open projects"
+          onAction={() => onNavigate("/projects")}
         />
       )}
       {dialog && projectId ? (
         <PlatformDialog
           kind={dialog}
+          taskPurpose="training"
           data={data}
           busy={busy}
           initialDatasetId={initialDatasetId}
@@ -1294,6 +1324,7 @@ function TrainingRuntimes({
   const [storageDefault, setStorageDefault] = useState(true);
   const [storageEncryption, setStorageEncryption] = useState("{}");
   const [storageCache, setStorageCache] = useState("{}");
+  const mutationRevision = useRef(0);
   const operationContextRef = useRef({ workspaceId, projectId });
   operationContextRef.current = { workspaceId, projectId };
 
@@ -1338,11 +1369,17 @@ function TrainingRuntimes({
       return;
     }
     let active = true;
+    const revision = mutationRevision.current;
+    setData(EMPTY_PLATFORM_PROJECT_DATA);
     setLoading(true);
     setError(null);
     void loadPlatformProject(projectId, "train", workspaceId)
       .then((result) => {
-        if (active) setData(result);
+        if (active) setData((current) => revision === mutationRevision.current ? result : {
+          ...result,
+          environments: [...new Map([...result.environments, ...current.environments].map((item) => [item.id, item])).values()],
+          storagePolicies: [...new Map([...result.storagePolicies, ...current.storagePolicies].map((item) => [item.id, item])).values()],
+        });
       })
       .catch((caught: unknown) => {
         if (active) {
@@ -1423,6 +1460,7 @@ function TrainingRuntimes({
       ) {
         return;
       }
+      mutationRevision.current += 1;
       setData((current) => ({
         ...current,
         environments: [...current.environments, environment],
@@ -1451,6 +1489,7 @@ function TrainingRuntimes({
       ) {
         return;
       }
+      mutationRevision.current += 1;
       setData((current) => ({
         ...current,
         environments: current.environments.map((item) =>
@@ -1480,6 +1519,7 @@ function TrainingRuntimes({
       ) {
         return;
       }
+      mutationRevision.current += 1;
       setData((current) => ({
         ...current,
         storagePolicies: [
@@ -1494,6 +1534,12 @@ function TrainingRuntimes({
       setStorageCache("{}");
     }, "Storage policy added.", expectedContext);
   }
+
+  useEffect(() => {
+    if (!initialProjectId && projectId && contextsWorkspaceId === workspaceId) {
+      onNavigate(`/training/runtimes?projectId=${projectId}`, "replace");
+    }
+  }, [contextsWorkspaceId, initialProjectId, onNavigate, projectId, workspaceId]);
 
   const context = contexts.find((item) => item.project_id === projectId);
   return (
@@ -1515,7 +1561,7 @@ function TrainingRuntimes({
           <ProjectContextPicker
             contexts={contexts}
             projectId={projectId}
-            onChange={setProjectId}
+            onChange={(nextProjectId) => { setProjectId(nextProjectId); onNavigate(`/training/runtimes?projectId=${nextProjectId}`, "replace"); }}
           />
         </div>
       </PlatformSection>
@@ -1531,8 +1577,9 @@ function TrainingRuntimes({
           description="Register externally prepared workers and storage. Package installation and worker preflight stay outside the browser."
         >
           <div className="platform-provision-grid">
-            <form
+            <ValidatedForm
               className="platform-dialog-form"
+              onInvalidCapture={revealInvalidField}
               onSubmit={(event) => {
                 event.preventDefault();
                 void registerRuntime();
@@ -1541,7 +1588,7 @@ function TrainingRuntimes({
               <h3>Register runtime</h3>
               <label>
                 <span>Runtime name</span>
-                <input
+                <NativeInput
                   required
                   maxLength={255}
                   value={runtimeName}
@@ -1550,7 +1597,7 @@ function TrainingRuntimes({
               </label>
               <label>
                 <span>Runtime class</span>
-                <select
+                <NativeSelect
                   value={runtimeClass}
                   onChange={(event) => setRuntimeClass(event.target.value)}
                 >
@@ -1559,11 +1606,11 @@ function TrainingRuntimes({
                   <option value="transformer-cpu">Transformer CPU</option>
                   <option value="peft-accelerator">PEFT accelerator</option>
                   <option value="qlora-cuda">QLoRA CUDA</option>
-                </select>
+                </NativeSelect>
               </label>
               <label>
                 <span>Immutable image digest</span>
-                <input
+                <NativeInput
                   required
                   minLength={64}
                   maxLength={71}
@@ -1575,22 +1622,8 @@ function TrainingRuntimes({
               </label>
               <details>
                 <summary>Runtime manifest</summary>
-                <label>
-                  <span>Package manifest JSON</span>
-                  <textarea
-                    rows={4}
-                    value={runtimePackages}
-                    onChange={(event) => setRuntimePackages(event.target.value)}
-                  />
-                </label>
-                <label>
-                  <span>Hardware constraints JSON</span>
-                  <textarea
-                    rows={4}
-                    value={runtimeHardware}
-                    onChange={(event) => setRuntimeHardware(event.target.value)}
-                  />
-                </label>
+                <JsonObjectField label="Package manifest" value={runtimePackages} onChange={setRuntimePackages} />
+                <JsonObjectField label="Hardware constraints" value={runtimeHardware} onChange={setRuntimeHardware} />
               </details>
               <Button
                 type="submit"
@@ -1598,10 +1631,11 @@ function TrainingRuntimes({
                 variant="primary"
                 isDisabled={provisioning || !projectId}
               />
-            </form>
+            </ValidatedForm>
 
-            <form
+            <ValidatedForm
               className="platform-dialog-form"
+              onInvalidCapture={revealInvalidField}
               onSubmit={(event) => {
                 event.preventDefault();
                 void recordVerification();
@@ -1610,7 +1644,7 @@ function TrainingRuntimes({
               <h3>Record worker preflight</h3>
               <label>
                 <span>Runtime</span>
-                <select
+                <NativeSelect
                   required
                   value={verificationEnvironmentId || ""}
                   onChange={(event) =>
@@ -1623,11 +1657,11 @@ function TrainingRuntimes({
                       {environment.name}
                     </option>
                   ))}
-                </select>
+                </NativeSelect>
               </label>
               <label>
                 <span>Availability</span>
-                <select
+                <NativeSelect
                   value={verificationStatus}
                   onChange={(event) =>
                     setVerificationStatus(
@@ -1637,16 +1671,9 @@ function TrainingRuntimes({
                 >
                   <option value="available">Available</option>
                   <option value="unavailable">Unavailable</option>
-                </select>
+                </NativeSelect>
               </label>
-              <label>
-                <span>Preflight report JSON</span>
-                <textarea
-                  rows={7}
-                  value={verificationReport}
-                  onChange={(event) => setVerificationReport(event.target.value)}
-                />
-              </label>
+              <JsonObjectField label="Preflight report" value={verificationReport} onChange={setVerificationReport} rows={7} />
               <Button
                 type="submit"
                 label={provisioning ? "Recording…" : "Record preflight"}
@@ -1654,10 +1681,11 @@ function TrainingRuntimes({
                   provisioning || !projectId || !verificationEnvironmentId
                 }
               />
-            </form>
+            </ValidatedForm>
 
-            <form
+            <ValidatedForm
               className="platform-dialog-form"
+              onInvalidCapture={revealInvalidField}
               onSubmit={(event) => {
                 event.preventDefault();
                 void addStoragePolicy();
@@ -1666,7 +1694,7 @@ function TrainingRuntimes({
               <h3>Add storage policy</h3>
               <label>
                 <span>Policy name</span>
-                <input
+                <NativeInput
                   required
                   maxLength={255}
                   value={storageName}
@@ -1676,7 +1704,7 @@ function TrainingRuntimes({
               <div className="platform-form-grid">
                 <label>
                   <span>Backend</span>
-                  <select
+                  <NativeSelect
                     value={storageBackend}
                     onChange={(event) =>
                       setStorageBackend(
@@ -1686,11 +1714,11 @@ function TrainingRuntimes({
                   >
                     <option value="minio">S3 / MinIO</option>
                     <option value="local">Local development</option>
-                  </select>
+                  </NativeSelect>
                 </label>
                 <label>
                   <span>Retention</span>
-                  <select
+                  <NativeSelect
                     value={retentionClass}
                     onChange={(event) =>
                       setRetentionClass(
@@ -1700,12 +1728,12 @@ function TrainingRuntimes({
                   >
                     <option value="indefinite">Indefinite</option>
                     <option value="resume_14d">Resume artifacts · 14 days</option>
-                  </select>
+                  </NativeSelect>
                 </label>
               </div>
               <label>
                 <span>Artifact prefix</span>
-                <input
+                <NativeInput
                   required
                   readOnly
                   maxLength={512}
@@ -1713,7 +1741,7 @@ function TrainingRuntimes({
                 />
               </label>
               <label className="platform-checkbox-row">
-                <input
+                <NativeInput
                   type="checkbox"
                   checked={storageDefault}
                   onChange={(event) => setStorageDefault(event.target.checked)}
@@ -1722,22 +1750,8 @@ function TrainingRuntimes({
               </label>
               <details>
                 <summary>Storage controls</summary>
-                <label>
-                  <span>Encryption settings JSON</span>
-                  <textarea
-                    rows={4}
-                    value={storageEncryption}
-                    onChange={(event) => setStorageEncryption(event.target.value)}
-                  />
-                </label>
-                <label>
-                  <span>Cache policy JSON</span>
-                  <textarea
-                    rows={4}
-                    value={storageCache}
-                    onChange={(event) => setStorageCache(event.target.value)}
-                  />
-                </label>
+                <JsonObjectField label="Encryption settings" value={storageEncryption} onChange={setStorageEncryption} />
+                <JsonObjectField label="Cache policy" value={storageCache} onChange={setStorageCache} />
               </details>
               <Button
                 type="submit"
@@ -1745,7 +1759,7 @@ function TrainingRuntimes({
                 variant="primary"
                 isDisabled={provisioning || !projectId}
               />
-            </form>
+            </ValidatedForm>
           </div>
         </PlatformSection>
       ) : null}
@@ -1756,7 +1770,7 @@ function TrainingRuntimes({
         }. Package installation is never initiated here.`}
       >
         {loading && !data.environments.length ? (
-          <p className="platform-inline-empty" role="status">Loading runtimes…</p>
+          <LoadingState label="Loading runtimes…" />
         ) : data.environments.length ? (
           <div
             className="platform-table-scroll platform-table-scroll--summary"
@@ -1784,12 +1798,10 @@ function TrainingRuntimes({
                     <td data-label="Project">{context?.project_name}</td>
                     <td data-label="Class">{environment.environment_class}</td>
                     <td data-label="Image digest">
-                      <code>{environment.image_digest ?? "Not bound"}</code>
+                      {environment.image_digest ? <details><summary>View image digest</summary><code>{environment.image_digest}</code></details> : "Not bound"}
                     </td>
                     <td data-label="Verification">
-                      {environment.verified_at
-                        ? new Date(environment.verified_at).toLocaleString()
-                        : "Not verified"}
+                      {formatDateTime(environment.verified_at, "Not verified")}
                     </td>
                     <td data-label="Status" data-priority="status">
                       <PlatformStatus value={environment.status} />
@@ -1833,7 +1845,7 @@ function TrainingRuntimes({
                     </td>
                     <td data-label="Project">{context?.project_name}</td>
                     <td data-label="Backend">{policy.backend}</td>
-                    <td data-label="Artifact prefix"><code>{policy.artifact_prefix}</code></td>
+                    <td data-label="Artifact prefix"><details><summary>View storage path</summary><code>{policy.artifact_prefix}</code></details></td>
                     <td data-label="Retention">{policy.retention_class}</td>
                     <td data-label="Default">{policy.is_default ? "Yes" : "No"}</td>
                   </tr>
@@ -1845,6 +1857,8 @@ function TrainingRuntimes({
           <PlatformEmpty
             title="No storage policy"
             detail="An administrator-managed policy is required before training can launch."
+            actionLabel={canProvisionRuntimes ? "Configure storage policy" : "Open workspace settings"}
+            onAction={canProvisionRuntimes ? () => window.document.querySelector<HTMLFormElement>(".platform-provision-grid form:last-child")?.querySelector<HTMLInputElement>("input")?.focus() : () => onNavigate("/workspace-settings")}
           />
         )}
       </PlatformSection>
@@ -1862,10 +1876,13 @@ function TrainingRunDetail({
   const [run, setRun] = useState<WorkspaceTrainingRun | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [confirmCancel, setConfirmCancel] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [evaluations, setEvaluations] = useState<ModelEvaluation[]>([]);
+  const [evaluationError, setEvaluationError] = useState<string | null>(null);
   const loadRequestIdRef = useRef(0);
 
-  const load = useCallback(async (): Promise<void> => {
+  const load = useCallback(async (background = false): Promise<void> => {
     const requestId = ++loadRequestIdRef.current;
     const isCurrentRequest = (): boolean =>
       requestId === loadRequestIdRef.current;
@@ -1877,7 +1894,7 @@ function TrainingRunDetail({
       }
       return;
     }
-    setLoading(true);
+    if (!background) setLoading(true);
     setError(null);
     try {
       const result = await findWorkspaceTrainingRun(
@@ -1885,8 +1902,16 @@ function TrainingRunDetail({
         runId,
         projects,
       );
-      if (isCurrentRequest()) {
-        setRun(result);
+      if (!isCurrentRequest()) return;
+      setRun(result);
+      setEvaluationError(null);
+      if (result) {
+        try {
+          const reports = await request<ModelEvaluation[]>(`/training-runs/${result.id}/evaluations?project_id=${result.project_id}`);
+          if (isCurrentRequest()) setEvaluations(reports);
+        } catch (caught) {
+          if (isCurrentRequest()) setEvaluationError(errorMessage(caught, "Evaluation details could not be loaded."));
+        }
       }
     } catch (caught) {
       if (isCurrentRequest()) {
@@ -1901,23 +1926,41 @@ function TrainingRunDetail({
 
   useEffect(() => {
     setRun(null);
+    setEvaluations([]);
+    setEvaluationError(null);
+    setConfirmCancel(false);
+    setBusy(false);
     void load();
     return () => {
       loadRequestIdRef.current += 1;
     };
   }, [load, workspaceId]);
 
+  const runStatus = run?.status;
+  useEffect(() => {
+    if (!runStatus || busy || !["queued", "running"].includes(runStatus)) return;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async (): Promise<void> => {
+      await load(true);
+      if (active) timer = setTimeout(() => void poll(), 3_000);
+    };
+    timer = setTimeout(() => void poll(), 3_000);
+    return () => { active = false; clearTimeout(timer); };
+  }, [busy, load, runStatus]);
+
   async function cancel(): Promise<void> {
     if (!run) return;
+    const requestId = ++loadRequestIdRef.current;
     setBusy(true);
     setError(null);
     try {
       const updated = await cancelTrainingRun(run.project_id, run.id);
-      setRun({ ...run, ...updated });
+      if (requestId === loadRequestIdRef.current) { setRun({ ...run, ...updated }); setConfirmCancel(false); }
     } catch (caught) {
-      setError(errorMessage(caught, "Unable to cancel this training run."));
+      if (requestId === loadRequestIdRef.current) setError(errorMessage(caught, "Unable to cancel this training run."));
     } finally {
-      setBusy(false);
+      if (requestId === loadRequestIdRef.current) setBusy(false);
     }
   }
 
@@ -1928,6 +1971,13 @@ function TrainingRunDetail({
         description="Loading the immutable run manifest…"
       />
     );
+  }
+  if (!run && error) {
+    return <>
+      <PlatformPageHeader title="Training run could not be loaded" description="Try loading this run again." actionLabel="Retry loading run" onAction={() => void load()} />
+      <p role="alert" className="platform-form-warning">{error}</p>
+      <Button label="Back to runs" onClick={() => onNavigate("/training")} />
+    </>;
   }
   if (!run) {
     return (
@@ -1959,12 +2009,13 @@ function TrainingRunDetail({
             <Button
               label={busy ? "Cancelling…" : "Cancel run"}
               isDisabled={busy}
-              onClick={() => void cancel()}
+              onClick={() => { setError(null); setConfirmCancel(true); }}
             />
           ) : undefined
         }
       />
       {error ? <p role="alert" className="platform-form-warning">{error}</p> : null}
+      {run.failure_reason ? <p role="alert" className="platform-form-warning">{run.failure_reason}</p> : null}
       <PlatformSection title="Run manifest">
         <dl className="platform-review-grid">
           <div><dt>Project context</dt><dd>{run.project_name}</dd></div>
@@ -1972,9 +2023,7 @@ function TrainingRunDetail({
           <div><dt>Family</dt><dd>{formatStatus(run.family)}</dd></div>
           <div><dt>Framework</dt><dd>{run.framework}</dd></div>
           <div><dt>Base model</dt><dd>{baseModelName(run.base_model)}</dd></div>
-          <div><dt>Base model asset</dt><dd>{baseModel.asset}</dd></div>
-          <div><dt>Base model source</dt><dd>{baseModel.source}</dd></div>
-          <div><dt>Base model revision</dt><dd>{baseModel.revision}</dd></div>
+          <div><dt>Base model details</dt><dd><details><summary>View provenance</summary><p>Asset {baseModel.asset} · Source {baseModel.source} · Revision <code>{baseModel.revision}</code></p></details></dd></div>
           <div><dt>Training method</dt><dd>{formatStatus(run.training_method)}</dd></div>
           <div><dt>Task</dt><dd>{run.task_name} · {formatStatus(run.task_kind)}</dd></div>
           <div>
@@ -2005,13 +2054,18 @@ function TrainingRunDetail({
           <div><dt>Creator</dt><dd>{creatorName(run)}</dd></div>
           <div><dt>Seed</dt><dd>{run.seed}</dd></div>
           <div><dt>Status</dt><dd><PlatformStatus value={run.status} /></dd></div>
+          <div><dt>Created</dt><dd>{formatDateTime(run.created_at, "Not recorded")}</dd></div>
+          <div><dt>Started</dt><dd>{formatDateTime(run.started_at, "Not started")}</dd></div>
+          <div><dt>Completed</dt><dd>{formatDateTime(run.completed_at, "Not completed")}</dd></div>
         </dl>
       </PlatformSection>
-      <PlatformSection title="Pinned configuration">
-        <pre className="platform-code-block">
-          {JSON.stringify(run.config, null, 2)}
-        </pre>
+      <PlatformSection title="Evaluation details">
+        {evaluationError ? <><p role="alert" className="platform-form-warning">{evaluationError}</p><Button label="Retry evaluation details" onClick={() => void load(true)} /></> : evaluations.length ? <ul>{evaluations.map((evaluation) => <li key={evaluation.id}><strong>{formatStatus(evaluation.split_name)}</strong> · <PlatformStatus value={evaluation.status} />{evaluation.status_reason ? <p>{evaluation.status_reason}</p> : null}<p>{metricSummary(evaluation.metrics)}</p></li>)}</ul> : <p>No evaluation reports are available for this run.</p>}
       </PlatformSection>
+      <PlatformSection title="Pinned configuration">
+        <details><summary>View configuration</summary><pre className="platform-code-block">{JSON.stringify(run.config, null, 2)}</pre></details>
+      </PlatformSection>
+      <ConfirmDialog open={confirmCancel} title="Cancel training run?" description="This stops the run. A cancelled run cannot be resumed. Launch a new run to train again." confirmLabel="Cancel run" busy={busy} error={error} onCancel={() => { setConfirmCancel(false); setError(null); }} onConfirm={cancel} />
     </>
   );
 }

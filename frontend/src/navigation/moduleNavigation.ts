@@ -131,7 +131,7 @@ export const GLOBAL_ROUTE_REGISTRY = [
 
 export const WORKSPACE_SETTINGS_DESTINATION = {
   id: "workspace-settings",
-  label: "Workspace Settings",
+  label: "Workspace settings",
   path: "/workspace-settings",
 } as const satisfies UtilityDestination;
 
@@ -184,7 +184,8 @@ export function resolveWorkspaceRoute(pathname: string): WorkspaceRoute {
   }
   if (
     normalizedPathname === "/training" ||
-    TRAINING_SECTIONS.has(normalizedPathname.slice("/training/".length)) ||
+    (normalizedPathname.startsWith("/training/") &&
+      TRAINING_SECTIONS.has(normalizedPathname.slice("/training/".length))) ||
     /^\/training\/runs\/\d+$/.test(normalizedPathname)
   ) {
     return "/training";

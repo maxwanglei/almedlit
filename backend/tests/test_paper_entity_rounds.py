@@ -279,9 +279,10 @@ def _submitted_comparison(db, scope, papers, outputs, *, task=None, persisted_ra
             # Model pre-fix immutable decisions already stored in their authors'
             # original array order. Reading them must not require a rewrite.
             decision = models.RoundAnnotationDecision(
-                **data.model_dump(), annotator_user_id=actor.id,
+                **data.model_dump(exclude={"feedback_decision"}), annotator_user_id=actor.id,
                 content_hash=_canonical_hash({
-                    **data.model_dump(exclude={"project_id"}), "annotator_user_id": actor.id,
+                    **data.model_dump(exclude={"project_id", "feedback_decision"}),
+                    "annotator_user_id": actor.id,
                 }),
             )
             db.add(decision)

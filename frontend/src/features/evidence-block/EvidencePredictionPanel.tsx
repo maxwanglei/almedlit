@@ -1,3 +1,5 @@
+import LoadingState from "@/components/LoadingState";
+import { formatCount, formatPercent, formatStatus } from "@/platform/components";
 import type {
   EvidenceCandidatePrediction,
   PredictionReviewAction,
@@ -15,10 +17,6 @@ interface EvidencePredictionPanelProps {
     action: PredictionReviewAction,
   ) => void | Promise<void>;
   onRefresh: () => void | Promise<void>;
-}
-
-function percent(value: number): string {
-  return `${Math.round(value * 100)}%`;
 }
 
 export default function EvidencePredictionPanel({
@@ -42,7 +40,7 @@ export default function EvidencePredictionPanel({
     >
       <header>
         <div>
-          <strong>{predictions.length} model candidates</strong>
+          <strong>{formatCount(predictions.length, "model candidate")}</strong>
           <span>{pendingCount} pending review</span>
         </div>
         <button type="button" onClick={() => void onRefresh()} disabled={loading || busy}>
@@ -50,7 +48,7 @@ export default function EvidencePredictionPanel({
         </button>
       </header>
       {loading ? (
-        <p className="aw-empty" role="status">Loading prediction candidates…</p>
+        <LoadingState label="Loading prediction candidates…" />
       ) : predictions.length === 0 ? (
         <p className="aw-empty">No candidates for this run, document, and target.</p>
       ) : null}
@@ -74,11 +72,11 @@ export default function EvidencePredictionPanel({
                 {prediction.end_sentence_ordinal + 1}
               </strong>
               <span>
-                {percent(prediction.block_confidence)} confidence · {percent(prediction.uncertainty)}{" "}
+                {formatPercent(prediction.block_confidence)} confidence · {formatPercent(prediction.uncertainty)}{" "}
                 uncertainty
               </span>
               <small>
-                {prediction.review_status} for you · run #{prediction.run_id} · checkpoint #{prediction.checkpoint_id}
+                {formatStatus(prediction.review_status)} for you · run #{prediction.run_id} · checkpoint #{prediction.checkpoint_id}
               </small>
             </button>
             <div className="eb-prediction-actions">

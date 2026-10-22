@@ -1,3 +1,4 @@
+import { NativeInput, NativeSelect } from "@/components/NativeField";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
@@ -19,7 +20,6 @@ import {
   updateAnnotation,
   undoEvidenceCommand,
 } from "@/api/client";
-import ConfirmDialog from "@/components/ConfirmDialog";
 import {
   isAnnotationVisibleToAnnotator,
   isHumanAnnotationOwnedBy,
@@ -27,6 +27,7 @@ import {
   personalAssignmentStatusLabel,
   preferredAssignment,
 } from "@/lib/annotationWorkspacePolicy";
+import { formatCount, formatStatus } from "@/platform/components";
 import type {
   Annotation,
   Document,
@@ -37,7 +38,7 @@ import type {
   EvidenceBlockTaskSettingsV1,
   EvidenceCandidatePrediction,
   EvidenceCommandSummary,
-  InferenceRun,
+  InferenceRunSummary,
   PredictionReviewAction,
   EvidenceReviewCoverage,
   EvidenceTarget,
@@ -352,7 +353,7 @@ export default function EvidenceBlockCanvas({
   const [selectionIntent, setSelectionIntent] = useState<"block" | "review">("block");
   const [checkedBlockIds, setCheckedBlockIds] = useState<number[]>([]);
   const [dragging, setDragging] = useState(false);
-  const [inferenceRuns, setInferenceRuns] = useState<InferenceRun[]>([]);
+  const [inferenceRuns, setInferenceRuns] = useState<InferenceRunSummary[]>([]);
   const [inferenceRunsError, setInferenceRunsError] = useState<string | null>(null);
   const [selectedInferenceRunId, setSelectedInferenceRunId] = useState<number | null>(null);
   const [predictions, setPredictions] = useState<EvidenceCandidatePrediction[]>([]);
@@ -361,7 +362,6 @@ export default function EvidenceBlockCanvas({
   const [predictionMessage, setPredictionMessage] = useState<string | null>(null);
   const [commands, setCommands] = useState<EvidenceCommandSummary[]>([]);
   const [commandLoading, setCommandLoading] = useState(false);
-  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const loadGeneration = useRef(0);
   const predictionLoadGeneration = useRef(0);
   const commandLoadGeneration = useRef(0);
@@ -734,7 +734,7 @@ export default function EvidenceBlockCanvas({
       if (!assignmentEditable) {
         setError(
           allowAssignmentlessEditing
-            ? "This task is read-only because it has already been finished."
+            ? "This task is read-only because it has already been submitted."
             : "This assignment is read-only because it has already been submitted or closed.",
         );
         return;
@@ -992,23 +992,12 @@ export default function EvidenceBlockCanvas({
   }
 
   async function removeBlock(): Promise<void> {
-    if (!selectedBlock || !selectedBlockEditable) {
-      return;
-    }
-    setDeleteDialogOpen(true);
-  }
-
-  async function confirmRemoveBlock(): Promise<void> {
-    if (!selectedBlock || !selectedBlockEditable) {
-      setDeleteDialogOpen(false);
-      return;
-    }
+    if (!selectedBlock || !selectedBlockEditable) return;
     await mutate(async () => {
       await deleteAnnotation(selectedBlock.id, selectedBlock.evidence_block?.revision);
       onAnnotationsChanged([], [selectedBlock.id]);
       selectAnnotation(null);
     });
-    setDeleteDialogOpen(false);
   }
 
   async function mergeCheckedBlocks(): Promise<void> {
@@ -1064,8 +1053,8 @@ export default function EvidenceBlockCanvas({
         action,
         start_sentence_id: replacement?.[0].id,
         end_sentence_id: replacement?.[1].id,
-        labels: action === "reject" ? [] : labels,
-        note: note.trim() || null,
+        labels: action === "modify" ? labels : [],
+        note: action === "modify" ? note.trim() || null : null,
         metadata_: { reviewed_in: "evidence_block_canvas" },
       });
       if (review.resulting_annotation_id !== null) {
@@ -1222,7 +1211,7 @@ export default function EvidenceBlockCanvas({
       <header className="eb-toolbar">
         <label>
           <span>Evidence target</span>
-          <select
+          <NativeSelect
             value={selectedTargetVersionId ?? ""}
             onChange={(event) => {
               const nextTargetVersionId = Number(event.target.value);
@@ -1249,7 +1238,7 @@ export default function EvidenceBlockCanvas({
                 {option.target.name} (v{option.versionNumber})
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </label>
         <div className="eb-target-copy">
           <span className="eb-target-text">
@@ -1275,7 +1264,7 @@ export default function EvidenceBlockCanvas({
         </div>
         <label className="eb-run-select">
           <span>Prediction run</span>
-          <select
+          <NativeSelect
             value={selectedInferenceRunId ?? ""}
             onChange={(event) => {
               setSelectedInferenceRunId(event.target.value ? Number(event.target.value) : null);
@@ -1291,7 +1280,7 @@ export default function EvidenceBlockCanvas({
                 #{run.id} · {run.name} · {run.status}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </label>
         <div className="eb-history" aria-label="Evidence command history">
           <button
@@ -1317,8 +1306,8 @@ export default function EvidenceBlockCanvas({
         {!assignmentEditable ? (
           <span className="eb-read-only" role="status">
             {allowAssignmentlessEditing
-              ? `${selectedAssignment ? personalAssignmentStatusLabel(selectedAssignment.status) : "Finished"} task · read-only`
-              : `${selectedAssignment?.status ?? "closed"} assignment · read-only`}
+              ? `${selectedAssignment ? personalAssignmentStatusLabel(selectedAssignment.status) : "Submitted"} task · read-only`
+              : `${selectedAssignment ? personalAssignmentStatusLabel(selectedAssignment.status) : "Closed"} task · read-only`}
           </span>
         ) : null}
         {inferenceEnabled && (inferenceRunsError || predictionMessage) ? (
@@ -1451,7 +1440,7 @@ export default function EvidenceBlockCanvas({
         </button>
         <label className="eb-note">
           <span>Note</span>
-          <input
+          <NativeInput
             value={note}
             onChange={(event) => setNote(event.target.value)}
             disabled={editorReadOnly}
@@ -1615,7 +1604,7 @@ export default function EvidenceBlockCanvas({
 
         <aside className="eb-block-list" aria-label="Evidence blocks and model predictions">
           <header>
-            <strong>{targetBlocks.length} blocks</strong>
+            <strong>{formatCount(targetBlocks.length, "block")}</strong>
             <span>{coverage?.fully_reviewed ? "Fully reviewed" : "Review incomplete"}</span>
           </header>
           {targetBlocks.length === 0 ? <p className="aw-empty">No blocks for this target.</p> : null}
@@ -1625,7 +1614,7 @@ export default function EvidenceBlockCanvas({
             return (
               <article className={`eb-block-card ${active ? "active" : ""} ${annotation.status}`} key={annotation.id}>
                 <label>
-                  <input
+                  <NativeInput
                     type="checkbox"
                     checked={checkedBlockIds.includes(annotation.id)}
                     disabled={
@@ -1659,7 +1648,7 @@ export default function EvidenceBlockCanvas({
                   <strong>
                     Sentences {(block.start_sentence_ordinal ?? 0) + 1}–{(block.end_sentence_ordinal ?? 0) + 1}
                   </strong>
-                  <span>{annotation.status} · {annotation.source} · revision {block.revision ?? 1}</span>
+                  <span>{annotation.status === "draft" ? "In progress" : formatStatus(annotation.status)} · {formatStatus(annotation.source)} · revision {block.revision ?? 1}</span>
                   {block.note ? <small>{block.note}</small> : null}
                 </button>
               </article>
@@ -1684,15 +1673,6 @@ export default function EvidenceBlockCanvas({
           </div>
         </aside>
       </div>
-      <ConfirmDialog
-        open={deleteDialogOpen}
-        title="Delete evidence block?"
-        description="Delete this evidence block? The change is recorded in command history and can be restored with Undo."
-        confirmLabel="Delete block"
-        busy={busy}
-        onCancel={() => setDeleteDialogOpen(false)}
-        onConfirm={confirmRemoveBlock}
-      />
     </div>
   );
 }

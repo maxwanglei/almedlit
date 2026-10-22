@@ -351,7 +351,7 @@ describe("TrainingScreen base-model selection", () => {
     fireEvent.change(configuration, { target: { value: "{" } });
 
     expect(
-      screen.getByRole("alert").textContent,
+      document.getElementById("training-config-error")?.textContent,
     ).toBe("Configuration contains invalid JSON.");
     expect(configuration.getAttribute("aria-invalid")).toBe("true");
     expect(
@@ -360,16 +360,16 @@ describe("TrainingScreen base-model selection", () => {
     ).toBe(true);
 
     await user.click(
-      screen.getByRole("button", { name: "Review & Launch" }),
+      screen.getByRole("button", { name: "Review" }),
     );
     expect(
-      screen.getByRole("heading", { name: "Model & Recipe" }),
+      screen.getByRole("heading", { name: "Model & recipe" }),
     ).toBeTruthy();
-    expect(document.activeElement).toBe(configuration);
+    expect((screen.getByRole("button", { name: "Review" }) as HTMLButtonElement).disabled).toBe(true);
 
     fireEvent.change(configuration, { target: { value: "[]" } });
     expect(
-      screen.getByRole("alert").textContent,
+      document.getElementById("training-config-error")?.textContent,
     ).toBe("Configuration must be a JSON object.");
 
     fireEvent.change(configuration, {
@@ -383,10 +383,10 @@ describe("TrainingScreen base-model selection", () => {
     ).toBe(false);
 
     await user.click(
-      screen.getByRole("button", { name: "Review & Launch" }),
+      screen.getByRole("button", { name: "Review" }),
     );
     expect(
-      screen.getByRole("heading", { name: "Review & Launch" }),
+      screen.getByRole("heading", { name: "Review" }),
     ).toBeTruthy();
   });
 
@@ -802,7 +802,7 @@ describe("TrainingScreen base-model selection", () => {
         screen.getByRole("textbox", { name: "Model name" }),
         "Older dataset baseline",
       );
-      await user.click(screen.getByRole("button", { name: "Review & Launch" }));
+      await user.click(screen.getByRole("button", { name: "Review" }));
       await user.click(screen.getByRole("button", { name: "Launch training" }));
 
       await waitFor(() =>
@@ -1028,4 +1028,31 @@ describe("TrainingScreen base-model selection", () => {
     );
     expect(onOpenTrainingData).toHaveBeenCalledTimes(1);
   });
+});
+
+it("clears invalid configuration feedback after selecting another recipe", async () => {
+  const user = userEvent.setup();
+  const second = { ...classicalRecipe, key: "linear_second", label: "Second classifier" };
+  const data = trainingData([classicalRecipe, second], []);
+  data.taskVersions = data.taskVersions.map((task) => ({ ...task, trainer_compatibility: [classicalRecipe.trainer_key] }));
+  render(<TrainingScreen data={data} busy={false} onLaunch={vi.fn()} />);
+  await user.click(await screen.findByRole("button", { name: "Continue" }));
+  await user.click(screen.getByRole("checkbox", { name: "Advanced JSON configuration" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "Recipe configuration" }), { target: { value: "{" } });
+  expect(document.getElementById("training-config-error")?.textContent).toBe("Configuration contains invalid JSON.");
+  await user.selectOptions(screen.getByLabelText("Training recipe"), "linear_second");
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+it("identifies task and dataset versions and moves focus after Continue", async () => {
+  const user = userEvent.setup();
+  const data = trainingData([classicalRecipe], []);
+  data.trainingDatasets = [{ ...data.trainingDatasets[0], version_number: 1 }, { ...data.trainingDatasets[0], id: 52, version_number: 2 }];
+  render(<TrainingScreen data={data} busy={false} onLaunch={vi.fn()} />);
+  expect(screen.getByRole("option", { name: "Abstract relevance · Classification · v3" })).toBeTruthy();
+  expect(screen.getByRole("option", { name: "Relevance training set · v1" })).toBeTruthy();
+  expect(screen.getByRole("option", { name: "Relevance training set · v2" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Review" }).hasAttribute("disabled")).toBe(true);
+  await user.click(screen.getByRole("button", { name: "Continue" }));
+  expect(document.activeElement).toBe(screen.getByRole("heading", { name: "Model & recipe" }));
 });

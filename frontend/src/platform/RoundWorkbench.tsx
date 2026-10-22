@@ -1,3 +1,4 @@
+import { NativeInput, NativeSelect, NativeTextarea } from "@/components/NativeField";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
@@ -9,11 +10,13 @@ import {
   X,
 } from "lucide-react";
 
+import ConfirmDialog from "@/components/ConfirmDialog";
+import { IconButton } from "@astryxdesign/core/IconButton";
+
 import {
   addRoundDecision,
   loadRoundWork,
   publishRoundLabelSet,
-  recordFeedbackDecision,
   revealRoundFeedback,
   submitRoundDecisions,
   transitionRound,
@@ -136,11 +139,13 @@ function AnnotationEditor({
   task,
   value,
   disabled,
+  error,
   onChange,
 }: {
   task: TaskVersion;
   value: string;
   disabled: boolean;
+  error: string | null;
   onChange: (value: string) => void;
 }): React.ReactElement {
   const values = enumValues(task);
@@ -148,7 +153,11 @@ function AnnotationEditor({
     return (
       <label className="platform-workbench-field">
         <span>Label</span>
-        <select
+        <NativeSelect
+          aria-label="Label"
+          id="round-annotation-input"
+          aria-invalid={Boolean(error)}
+          aria-describedby={error ? "round-annotation-error" : undefined}
           required
           disabled={disabled}
           value={value}
@@ -156,7 +165,8 @@ function AnnotationEditor({
         >
           <option value="">Select a label</option>
           {values.map((option) => <option key={option}>{option}</option>)}
-        </select>
+        </NativeSelect>
+        {error ? <span id="round-annotation-error" className="platform-dialog-error" role="alert">{error}</span> : null}
       </label>
     );
   }
@@ -164,14 +174,19 @@ function AnnotationEditor({
     return (
       <label className="platform-workbench-field">
         <span>Value</span>
-        <input
+        <NativeInput
           type="number"
           step="any"
+          aria-label="Value"
+          id="round-annotation-input"
+          aria-invalid={Boolean(error)}
+          aria-describedby={error ? "round-annotation-error" : undefined}
           required
           disabled={disabled}
           value={value}
           onChange={(event) => onChange(event.target.value)}
         />
+        {error ? <span id="round-annotation-error" className="platform-dialog-error" role="alert">{error}</span> : null}
       </label>
     );
   }
@@ -192,14 +207,19 @@ function AnnotationEditor({
               ? "Response"
               : "Structured annotation"}
       </span>
-      <textarea
+      <NativeTextarea
+        aria-label={task.task_kind === "classification" ? "Label" : task.task_kind === "multilabel_classification" ? "Labels, one per line" : naturalText ? "Response" : "Structured annotation"}
         rows={naturalText ? 7 : 10}
+        id="round-annotation-input"
+        aria-invalid={Boolean(error)}
+        aria-describedby={error ? "round-annotation-error" : undefined}
         required
         disabled={disabled}
         value={value}
         onChange={(event) => onChange(event.target.value)}
         spellCheck={naturalText}
       />
+      {error ? <span id="round-annotation-error" className="platform-dialog-error" role="alert">{error}</span> : null}
     </label>
   );
 }
@@ -217,7 +237,7 @@ function ItemPayload({
           <dd>
             {typeof value === "string"
               ? value
-              : JSON.stringify(value, null, 2)}
+              : typeof value === "object" && value !== null ? <details><summary>View {name.replace(/_/g, " ")}</summary><pre className="platform-code-block">{JSON.stringify(value, null, 2)}</pre></details> : String(value)}
           </dd>
         </div>
       ))}
@@ -247,6 +267,8 @@ export default function RoundWorkbench({
     useState<"human" | "adjudicated">("human");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [fieldError, setFieldError] = useState<{ field: "annotation" | "feedback"; message: string } | null>(null);
+  const [pendingAction, setPendingAction] = useState<"finalize" | "close" | "publish" | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [publishedSnapshots, setPublishedSnapshots] = useState<string[]>([]);
   const publicationKey = JSON.stringify([
@@ -324,7 +346,11 @@ export default function RoundWorkbench({
     }
   }, [round, roundIdentity]);
 
-  useEffect(() => { setMessage(null); }, [roundIdentity]);
+  useEffect(() => { setMessage(null); setPendingAction(null); }, [roundIdentity]);
+
+  useEffect(() => {
+    if (fieldError) document.getElementById(fieldError.field === "annotation" ? "round-annotation-input" : "round-feedback-input")?.focus();
+  }, [fieldError]);
 
   useEffect(() => {
     setWork(null);
@@ -341,6 +367,7 @@ export default function RoundWorkbench({
     setEditorText(editorValue(task, currentDecision?.output));
     setRationale(currentDecision?.rationale ?? "");
     setFeedbackDisposition("");
+    setFieldError(null);
     setError(null);
   }, [currentDecision, currentRoundItem?.id, task]);
 
@@ -401,15 +428,16 @@ export default function RoundWorkbench({
     try {
       output = parsedOutput(task, editorText);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Invalid annotation.");
+      setFieldError({ field: "annotation", message: caught instanceof Error ? caught.message : "Invalid annotation." });
       return;
     }
     if (currentFeedback && !feedbackDisposition) {
-      setError("Record how the feedback affected this decision.");
+      setFieldError({ field: "feedback", message: "Record how the feedback affected this decision." });
       return;
     }
     setBusy(true);
     setError(null);
+    setFieldError(null);
     setMessage(null);
     try {
       const decision = await addRoundDecision(round.project_id, {
@@ -422,15 +450,11 @@ export default function RoundWorkbench({
           round.assistance_policy === "reveal_after_first_pass" &&
           !currentFeedback,
         rationale,
+        ...(currentFeedback && feedbackDisposition ? { feedbackDecision: {
+          exposureId: currentFeedback.exposure.id,
+          decision: feedbackDisposition,
+        } } : {}),
       });
-      if (currentFeedback && feedbackDisposition) {
-        await recordFeedbackDecision(
-          round.project_id,
-          currentFeedback.exposure.id,
-          decision.id,
-          feedbackDisposition,
-        );
-      }
       setWork((current) =>
         current
           ? { ...current, decisions: [...current.decisions, decision] }
@@ -469,6 +493,7 @@ export default function RoundWorkbench({
           : current,
       );
       setMessage(`Submission ${submission.sequence} finalized.`);
+      setPendingAction(null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to submit the round.");
     } finally {
@@ -483,6 +508,7 @@ export default function RoundWorkbench({
       await transitionRound(round.project_id, round.id, "closed");
       await onRefresh();
       setMessage("Round closed.");
+      setPendingAction(null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to close the round.");
     } finally {
@@ -503,6 +529,7 @@ export default function RoundWorkbench({
       setPublishedSnapshots((current) => [...current, publicationKey]);
       await onRefresh();
       setMessage(`${labelSet.name} v${labelSet.version_number} published.`);
+      setPendingAction(null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Unable to publish labels.");
     } finally {
@@ -525,9 +552,7 @@ export default function RoundWorkbench({
         </div>
         <div className="platform-workbench-header-actions">
           <PlatformStatus value={round.status} />
-          <button type="button" onClick={onClose} title="Close workbench" aria-label="Close workbench">
-            <X size={18} aria-hidden="true" />
-          </button>
+          <IconButton label="Close workbench" tooltip="Close workbench" variant="ghost" icon={<X size={18} aria-hidden="true" />} onClick={onClose} />
         </div>
       </header>
 
@@ -572,7 +597,7 @@ export default function RoundWorkbench({
               {canManage ? (
                 <label className="platform-workbench-field">
                   <span>Decision type</span>
-                  <select
+                  <NativeSelect
                     value={decisionKind}
                     disabled={busy || (round.status !== "open" && !canAdjudicateClosedRound)}
                     onChange={(event) =>
@@ -584,18 +609,19 @@ export default function RoundWorkbench({
                     <option value="annotation" disabled={round.status === "closed"}>Annotation</option>
                     <option value="adjudication">Adjudication</option>
                     <option value="correction" disabled={round.status === "closed"}>Correction</option>
-                  </select>
+                  </NativeSelect>
                 </label>
               ) : null}
               <AnnotationEditor
                 task={task}
                 value={editorText}
                 disabled={busy || !canWriteDecision}
-                onChange={setEditorText}
+                error={fieldError?.field === "annotation" ? fieldError.message : null}
+                onChange={(value) => { setEditorText(value); setFieldError(null); }}
               />
               <label className="platform-workbench-field">
                 <span>Rationale</span>
-                <textarea
+                <NativeTextarea
                   rows={3}
                   value={rationale}
                   disabled={busy || !canWriteDecision}
@@ -611,7 +637,7 @@ export default function RoundWorkbench({
                       <span>Score {currentFeedback.candidate.score.toFixed(3)}</span>
                     ) : null}
                   </div>
-                  <pre>{JSON.stringify(currentFeedback.candidate.output, null, 2)}</pre>
+                  <details><summary>Feedback output</summary><pre className="platform-code-block">{JSON.stringify(currentFeedback.candidate.output, null, 2)}</pre></details>
                   <button
                     type="button"
                     className="platform-text-action"
@@ -625,7 +651,11 @@ export default function RoundWorkbench({
                   </button>
                   <label className="platform-workbench-field">
                     <span>Feedback decision</span>
-                    <select
+                    <NativeSelect
+                      aria-label="Feedback decision"
+                      id="round-feedback-input"
+                      aria-invalid={fieldError?.field === "feedback"}
+                      aria-describedby={fieldError?.field === "feedback" ? "round-feedback-error" : undefined}
                       value={feedbackDisposition}
                       onChange={(event) =>
                         setFeedbackDisposition(
@@ -638,7 +668,8 @@ export default function RoundWorkbench({
                       <option value="modified">Modified</option>
                       <option value="rejected">Rejected</option>
                       <option value="ignored">Ignored</option>
-                    </select>
+                    </NativeSelect>
+                    {fieldError?.field === "feedback" ? <span id="round-feedback-error" className="platform-dialog-error" role="alert">{fieldError.message}</span> : null}
                   </label>
                 </div>
               ) : null}
@@ -664,32 +695,24 @@ export default function RoundWorkbench({
 
           <footer className="platform-workbench-footer">
             <div>
-              <button
-                type="button"
-                title="Previous item"
-                aria-label="Previous item"
-                disabled={itemIndex === 0}
+              <IconButton
+                label="Previous item"
+                tooltip="Previous item"
+                icon={<ChevronLeft size={18} aria-hidden="true" />}
+                isDisabled={itemIndex === 0}
                 onClick={() => setItemIndex((current) => Math.max(0, current - 1))}
-              >
-                <ChevronLeft size={18} aria-hidden="true" />
-              </button>
-              <button
-                type="button"
-                title="Next item"
-                aria-label="Next item"
-                disabled={itemIndex >= work.roundItems.length - 1}
-                onClick={() =>
-                  setItemIndex((current) =>
-                    Math.min(work.roundItems.length - 1, current + 1),
-                  )
-                }
-              >
-                <ChevronRight size={18} aria-hidden="true" />
-              </button>
+              />
+              <IconButton
+                label="Next item"
+                tooltip="Next item"
+                icon={<ChevronRight size={18} aria-hidden="true" />}
+                isDisabled={itemIndex >= work.roundItems.length - 1}
+                onClick={() => setItemIndex((current) => Math.min(work.roundItems.length - 1, current + 1))}
+              />
             </div>
             <button
               type="button"
-              onClick={() => void submit()}
+              onClick={() => { setError(null); setPendingAction("finalize"); }}
               disabled={
                 busy ||
                 !canFinalizeDecisions ||
@@ -705,15 +728,15 @@ export default function RoundWorkbench({
           {canManage ? (
             <div className="platform-workbench-manager">
               {round.status === "open" ? (
-                <button type="button" onClick={() => void closeRound()} disabled={busy}>
+                <button type="button" onClick={() => { setError(null); setPendingAction("close"); }} disabled={busy}>
                   Close round
                 </button>
               ) : null}
               {round.status === "closed" ? (
                 <>
                   <label className="platform-workbench-field">
-                    <span>Label layer</span>
-                    <select
+                    <span>Label set source</span>
+                    <NativeSelect
                       value={labelSourceKind}
                       onChange={(event) =>
                         setLabelSourceKind(
@@ -723,11 +746,11 @@ export default function RoundWorkbench({
                     >
                       <option value="human">Human consensus</option>
                       <option value="adjudicated">Adjudicated</option>
-                    </select>
+                    </NativeSelect>
                   </label>
                   <button
                     type="button"
-                    onClick={() => void publishLabels()}
+                    onClick={() => { setError(null); setPendingAction("publish"); }}
                     disabled={busy || !work.submissions.length || publishedSnapshots.includes(publicationKey)}
                   >
                     Publish label set
@@ -740,6 +763,20 @@ export default function RoundWorkbench({
       ) : work ? (
         <p className="platform-inline-empty">This round has no materialized items.</p>
       ) : null}
+      <ConfirmDialog
+        open={pendingAction !== null}
+        title={pendingAction === "close" ? "Close round?" : pendingAction === "publish" ? "Publish label set?" : "Finalize submission?"}
+        description={pendingAction === "close" ? "Closing this round stops further annotation. This action cannot be undone." : pendingAction === "publish" ? "This publishes a permanent label set from the submitted decisions." : "This creates a permanent submission snapshot of your current decisions."}
+        confirmLabel={pendingAction === "close" ? "Close round" : pendingAction === "publish" ? "Publish label set" : "Finalize submission"}
+        busy={busy}
+        error={error}
+        onCancel={() => setPendingAction(null)}
+        onConfirm={async () => {
+          if (pendingAction === "close") await closeRound();
+          else if (pendingAction === "publish") await publishLabels();
+          else if (pendingAction === "finalize") await submit();
+        }}
+      />
     </section>
   );
 }

@@ -300,7 +300,7 @@ describe("AnnotatorWorkspace workspace language", () => {
 
   it("preserves team assignment language", () => {
     render(<Harness personal={false} />);
-    fireEvent.click(screen.getByRole("button", { name: /Annotate/ }));
+    fireEvent.click(screen.getByRole("tab", { name: /Annotate/ }));
 
     expect(
       (
@@ -310,9 +310,9 @@ describe("AnnotatorWorkspace workspace language", () => {
       ).value,
     ).toBe("10");
     expect(
-      screen.getByRole("option", { name: "Entity labels · assigned" }),
+      screen.getByRole("option", { name: "Entity labels · To do" }),
     ).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Submit assignment" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Submit task for this paper" })).toBeTruthy();
   });
 
   it("shows only observed team metrics and an honest empty activity state", () => {
@@ -409,7 +409,7 @@ describe("AnnotatorWorkspace workspace language", () => {
         assignment_id: 10,
       }),
     );
-    expect(await screen.findByText("Paper task submitted")).toBeTruthy();
+    expect(await screen.findByText("Submitted")).toBeTruthy();
     expect(
       (screen.getByRole("combobox", { name: "Task" }) as HTMLSelectElement)
         .value,
@@ -433,7 +433,7 @@ describe("AnnotatorWorkspace workspace language", () => {
     expect(
       screen.getByRole("button", { name: "Submit task for this paper" }),
     ).toBeTruthy();
-    expect(screen.queryByText("Paper task submitted")).toBeNull();
+    expect(screen.queryByText("Submitted")).toBeNull();
   });
 
   it("lets a personal user reopen a submitted paper task and edit again", async () => {
@@ -448,7 +448,7 @@ describe("AnnotatorWorkspace workspace language", () => {
     );
 
     fireEvent.click(
-      screen.getByRole("button", { name: "Edit this paper task" }),
+      screen.getByRole("button", { name: "Reopen this paper task" }),
     );
     expect(
       screen.getByRole("dialog", {
@@ -471,7 +471,7 @@ describe("AnnotatorWorkspace workspace language", () => {
       }),
     ).toBeTruthy();
     expect(
-      screen.queryByRole("button", { name: "Edit this paper task" }),
+      screen.queryByRole("button", { name: "Reopen this paper task" }),
     ).toBeNull();
   });
 });
@@ -526,8 +526,8 @@ describe("explicit assignment selection", () => {
 
       expect((screen.getByRole("combobox", { name: "Task" }) as HTMLSelectElement).value).toBe("10");
       expect(new URLSearchParams(window.location.search).get("assignment")).toBe("10");
-      expect(screen.queryByRole("button", { name: "Submit task for this paper" })).toBeNull();
-      fireEvent.click(screen.getByRole("button", { name: "Edit this paper task" }));
+      expect(screen.queryByRole("button", { name: "Submit assignment" })).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Reopen this paper task" }));
       fireEvent.click(screen.getByRole("button", { name: "Reopen and edit" }));
 
       await waitFor(() => expect(mocks.reopenPersonalTaskAssignment).toHaveBeenCalledWith(1, 10));
@@ -567,7 +567,7 @@ describe("explicit assignment selection", () => {
       annotator_id: "max",
       assignment_id: 10,
     }));
-    await screen.findByRole("button", { name: "Edit this paper task" });
+    await screen.findByRole("button", { name: "Reopen this paper task" });
 
     fireEvent.change(screen.getByRole("combobox", { name: "Evidence canvas assignment" }), {
       target: { value: "11" },
@@ -604,11 +604,11 @@ describe("explicit assignment selection", () => {
     const canvasChoice = screen.getByRole("combobox", { name: "Evidence canvas assignment" });
     expect((submissionChoice as HTMLSelectElement).value).toBe("10");
     expect((canvasChoice as HTMLSelectElement).value).toBe("10");
-    expect((screen.getByRole("button", { name: "Submit assignment" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Submit task for this paper" }) as HTMLButtonElement).disabled).toBe(true);
 
     fireEvent.change(submissionChoice, { target: { value: "11" } });
     expect((canvasChoice as HTMLSelectElement).value).toBe("11");
-    fireEvent.click(screen.getByRole("button", { name: "Submit assignment" }));
+    fireEvent.click(screen.getByRole("button", { name: "Submit task for this paper" }));
     fireEvent.click(screen.getByRole("checkbox", {
       name: "I confirm that this paper has no annotations for this task.",
     }));
@@ -701,7 +701,7 @@ describe("annotation tool selection", () => {
     expect(screen.getByRole("button", { name: /^Spans & relations/ }).getAttribute("aria-pressed")).toBe("true");
     expect(screen.queryByRole("combobox", { name: "Evidence canvas assignment" })).toBeNull();
     expect((screen.getByRole("combobox", { name: "Assignment to submit" }) as HTMLSelectElement).value).toBe("30");
-    expect((screen.getByRole("button", { name: "Submit assignment" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "Submit task for this paper" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it.each([
@@ -774,7 +774,7 @@ describe("annotation tool selection", () => {
     expect(new URLSearchParams(window.location.search).get("document")).toBe(String(nextDocumentId));
     expect((screen.getByRole("combobox", { name: "Assignment to submit" }) as HTMLSelectElement).value).toBe(String(nextAssignmentId));
     expect(new URLSearchParams(window.location.search).get("tool")).toBe(nextTool);
-    expect((screen.getByRole("button", { name: "Submit assignment" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Submit task for this paper" }) as HTMLButtonElement).disabled).toBe(false);
     if (nextTool === "evidence") {
       expect((screen.getByRole("combobox", { name: "Evidence canvas assignment" }) as HTMLSelectElement).value).toBe("30");
     } else {
@@ -922,8 +922,8 @@ describe("annotation label safety and shortcuts", () => {
     const initialWorkbench = labelWorkbench(type);
     mocks.updateAnnotation.mockRejectedValue(new Error("Save unavailable"));
     render(<Harness personal initialAssignments={[]} initialWorkbench={initialWorkbench} />);
-    if (type === "sentence_label") fireEvent.click(screen.getByRole("button", { name: "Clinical" }));
-    fireEvent.click(screen.getByRole("button", { name: /Excluded/ }));
+    if (type === "sentence_label") fireEvent.click(screen.getByRole("button", { name: "Change label for sentence 1, Clinical" }));
+    fireEvent.click(screen.getByRole(type === "sentence_label" ? "menuitem" : "button", { name: /Excluded/ }));
     await waitFor(() => expect(mocks.updateAnnotation).toHaveBeenCalledWith(71, { label: "Excluded" }));
     expect(mocks.deleteAnnotation).not.toHaveBeenCalled();
     expect(mocks.createAnnotation).not.toHaveBeenCalled();
@@ -934,7 +934,7 @@ describe("annotation label safety and shortcuts", () => {
     mocks.updateAnnotation.mockImplementation(() => new Promise(() => undefined));
     render(<Harness personal initialAssignments={[]} initialWorkbench={labelWorkbench("doc_label")} />);
     fireEvent.click(screen.getByRole("button", { name: /Excluded/ }));
-    expect(screen.getByRole("button", { name: /^Clinical\s*OK$/ }).hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: /^Clinical\s*Selected$/ }).hasAttribute("disabled")).toBe(true);
     expect(screen.getByRole("button", { name: /Excluded/ }).hasAttribute("disabled")).toBe(true);
     fireEvent.keyDown(window, { key: "1", altKey: true });
     expect(mocks.updateAnnotation).toHaveBeenCalledTimes(1);
@@ -962,7 +962,7 @@ describe("annotation label safety and shortcuts", () => {
     const initialWorkbench = labelWorkbench("sentence_label");
     mocks.updateAnnotation.mockResolvedValue({ ...initialWorkbench.annotations[0], label: "Excluded" });
     render(<Harness personal initialAssignments={[]} initialWorkbench={initialWorkbench} />);
-    fireEvent.click(screen.getByRole("button", { name: "Clinical" }));
+    fireEvent.click(screen.getByRole("button", { name: "Change label for sentence 1, Clinical" }));
     fireEvent.keyDown(window, { key: "2" });
     await waitFor(() => expect(mocks.updateAnnotation).toHaveBeenCalledWith(71, { label: "Excluded" }));
     expect(screen.getByText("Disease text")).toBeTruthy();

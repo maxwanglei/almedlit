@@ -1,3 +1,5 @@
+import { NativeSelect } from "@/components/NativeField";
+import LoadingState from "@/components/LoadingState";
 import {
   Suspense,
   useCallback,
@@ -33,6 +35,7 @@ import {
   publishSessionChange,
   removeLegacyToken,
   subscribeSessionChanges,
+  subscribeMembershipChanges,
 } from "@/auth/session";
 import AppShell from "@/components/AppShell";
 import RouteErrorBoundary from "@/components/RouteErrorBoundary";
@@ -251,26 +254,20 @@ function AuthenticatedLayout({
           />
         ) : null}
         {logoutPending ? (
-          <div className="status" role="status" aria-live="polite">
-            Signing out…
-          </div>
+          <LoadingState label="Signing out…" />
         ) : null}
         <RouteErrorBoundary resetKey={recoveryKey} onRetry={retryFailedScreens}>
           <PreloadRecoveryNotice />
           <Suspense
             fallback={(
               <main id="main-content" tabIndex={-1}>
-                <div className="status" role="status" aria-live="polite">
-                  Loading workspace…
-                </div>
+                <LoadingState label="Loading workspace…" />
               </main>
             )}
           >
             {redirecting ? (
               <main id="main-content" tabIndex={-1}>
-                <div className="status" role="status" aria-live="polite">
-                  Opening workspace…
-                </div>
+                <LoadingState label="Opening workspace…" />
               </main>
             ) : (
               <Outlet context={routeContext} />
@@ -396,34 +393,6 @@ function isIndividualWorkspace(membership: MeMembership | null | undefined): boo
   return membership?.workspace_kind === "individual";
 }
 
-function describeRouteState(search: string, hash: string): string {
-  const details = Array.from(new URLSearchParams(search).entries())
-    .slice(0, 3)
-    .map(([key, value]) => {
-      const label = key
-        .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-        .replace(/[-_]+/g, " ")
-        .toLowerCase();
-      const conciseValue =
-        value.length > 60 ? `${value.slice(0, 57)}...` : value;
-      return `${label} ${conciseValue || "empty"}`;
-    });
-  if (hash.length > 1) {
-    let section = hash.slice(1);
-    try {
-      section = decodeURIComponent(section);
-    } catch {
-      // Keep the literal fragment when it is not valid URI text.
-    }
-    details.push(`section ${section}`);
-  }
-  if (!details.length) return "";
-  const description = details
-    .map((detail) => `${detail[0].toUpperCase()}${detail.slice(1)}`)
-    .join(". ");
-  return ` ${description}.`;
-}
-
 export default function App(): React.ReactElement {
   return (
     <BrowserRouter>
@@ -459,6 +428,7 @@ function Application(): React.ReactElement {
   const [sessionGeneration, setSessionGeneration] = useState(0);
   const sessionGenerationRef = useRef(0);
   const pendingWorkspaceSwitchRef = useRef(false);
+  const requestedWorkspaceRef = useRef<{ userId: number; workspaceId: number } | null>(null);
   const pathname = normalizePathname(location.pathname);
   const inviteToken = inviteTokenFromPath(location.pathname, location.hash);
   const accountActionToken = accountActionTokenFromPath(location.pathname, location.hash);
@@ -508,6 +478,10 @@ function Application(): React.ReactElement {
   >(null);
   const [routeAnnouncement, setRouteAnnouncement] = useState("");
   const pendingRouteNoticeRef = useRef<string | null>(null);
+  const announcedRouteRef = useRef<string | null>(null);
+  const focusedRouteRef = useRef<string | null>(null);
+  const [roundRetryAttempt, setRoundRetryAttempt] = useState(0);
+  const [roundNotFound, setRoundNotFound] = useState(false);
   const [platformDialog, setPlatformDialog] = useState<PlatformDialogKind>(null);
   const {
     projects,
@@ -584,7 +558,7 @@ function Application(): React.ReactElement {
       (
         !projectsReady ||
         policyProject === null ||
-        projectSupportsSection(policyProject, parsedProjectRoute.tab)
+        projectSupportsSection(policyProject, parsedProjectRoute.tab, access.effectiveCapabilities)
       )
     );
   const routeRedirect = useMemo(
@@ -597,7 +571,10 @@ function Application(): React.ReactElement {
       : "overview";
   }, [canOpenProjectRoute, parsedProjectRoute]);
   const activeProjectContextId =
-    parsedProjectRoute?.projectId ?? selectedProjectId;
+    parsedProjectRoute?.projectId ?? (
+      workspaceRoute === "/my-work" && myWorkProjectId !== null &&
+      projects.some((project) => project.id === myWorkProjectId) ? myWorkProjectId : selectedProjectId
+    );
   const platform = usePlatformProject(
     parsedProjectRoute?.projectId ?? null,
     activeWorkspaceId,
@@ -657,6 +634,7 @@ function Application(): React.ReactElement {
     setRoundResolutionError(null);
     setPlatformDialog(null);
     pendingWorkspaceSwitchRef.current = false;
+    requestedWorkspaceRef.current = null;
   }, []);
 
   async function refreshWorkspaceConfiguration(
@@ -721,6 +699,7 @@ function Application(): React.ReactElement {
     }
 
     storePreferredWorkspaceId(currentUserId, nextMembership.workspace_id);
+    requestedWorkspaceRef.current = { userId: currentUserId, workspaceId: nextMembership.workspace_id };
     sessionGenerationRef.current += 1;
     setSessionGeneration(sessionGenerationRef.current);
     useProjectWorkspaceStore.getState().reset();
@@ -747,6 +726,7 @@ function Application(): React.ReactElement {
   function handleWorkspaceCreated(workspaceId: number): void {
     if (currentUserId !== null) {
       storePreferredWorkspaceId(currentUserId, workspaceId);
+      requestedWorkspaceRef.current = { userId: currentUserId, workspaceId };
     }
     pendingWorkspaceSwitchRef.current = true;
     sessionGenerationRef.current += 1;
@@ -763,11 +743,15 @@ function Application(): React.ReactElement {
     setWorkspaceDialogOpen(false);
   }
 
-  async function refreshMemberships(): Promise<void> {
+  const refreshMemberships = useCallback(async (): Promise<void> => {
     const generation = sessionGenerationRef.current;
     const me = await getMe();
     if (generation !== sessionGenerationRef.current) {
       throw new Error("The active account changed before memberships refreshed.");
+    }
+    if (currentUserId !== null && currentUserId !== me.user.id) {
+      publishSessionChange(true);
+      return;
     }
     setMemberships(me.memberships);
     setCurrentUserId(me.user.id);
@@ -780,7 +764,7 @@ function Application(): React.ReactElement {
         ) ?? null;
       setActiveMembership(refreshedActiveMembership);
     }
-  }
+  }, [activeWorkspaceId, currentUserId]);
 
   async function refreshProjectData(projectId: number): Promise<number | null> {
     return loadProjectData(projectId, true, "mine");
@@ -807,6 +791,17 @@ function Application(): React.ReactElement {
   }, [resetForSessionChange]);
 
   useEffect(() => {
+    if (!authed || !sessionReady) return;
+    let active = true;
+    const unsubscribe = subscribeMembershipChanges(() => {
+      void refreshMemberships().catch((caught: unknown) => {
+        if (active) setError(caught instanceof Error ? caught.message : "Workspace memberships could not be refreshed.");
+      });
+    });
+    return () => { active = false; unsubscribe(); };
+  }, [authed, refreshMemberships, sessionReady, setError]);
+
+  useEffect(() => {
     if (!authed) {
       return;
     }
@@ -823,7 +818,8 @@ function Application(): React.ReactElement {
         }
         const selectedMembership = preferredMembership(
           me.memberships,
-          readPreferredWorkspaceId(me.user.id),
+          requestedWorkspaceRef.current?.userId === me.user.id
+            ? requestedWorkspaceRef.current.workspaceId : readPreferredWorkspaceId(me.user.id),
         );
         const workspaceId = selectedMembership?.workspace_id ?? null;
         let effectiveCapabilities: string[] = [];
@@ -847,6 +843,7 @@ function Application(): React.ReactElement {
         setActiveWorkspaceId(workspaceId);
         setCaps(effectiveCapabilities);
         setBlockedCaps(blockedCapabilities);
+        requestedWorkspaceRef.current = null;
         if (
           pendingWorkspaceSwitchRef.current ||
           isEntryPath(window.location.pathname)
@@ -989,9 +986,23 @@ function Application(): React.ReactElement {
   ]);
 
   useEffect(() => {
-    if (!authed || !sessionReady || routeRedirect !== null) {
+    if (accountActionToken !== null) {
+      document.title = "Account action | AL-MedLit";
       return;
     }
+    if (inviteToken !== null) {
+      document.title = "Accept invitation | AL-MedLit";
+      return;
+    }
+    if (!authed) {
+      document.title = "Sign in | AL-MedLit";
+      return;
+    }
+    if (justRegistered && !onboarded) {
+      document.title = "Set up your workspace | AL-MedLit";
+      return;
+    }
+    if (!sessionReady || routeRedirect !== null) return;
     const projectRoute = parseProjectPlatformRoute(pathname);
     if (
       projectRoute?.redirect ||
@@ -1016,10 +1027,10 @@ function Application(): React.ReactElement {
           : pathname === "/training/data"
             ? "Training data"
             : pathname === "/training/runtimes"
-              ? "Training runtimes"
+              ? "Runtimes"
               : "Training";
     } else if (workspaceRoute === "/models") {
-      title = pathname === "/models" ? "Models" : "Model details";
+      title = pathname === "/models" ? "Models" : pathname.includes("/versions/") ? "Model version" : "Model details";
     } else if (workspaceRoute === "/workspace-settings") {
       title = "Workspace settings";
     } else if (workspaceRoute === "/admin") {
@@ -1030,18 +1041,26 @@ function Application(): React.ReactElement {
       title = "Page not found";
     }
 
-    document.title = `${title} | AL-MedLit`;
+    const projectName = projectRoute
+      ? projects.find((project) => project.id === projectRoute.projectId)?.name
+      : roundRouteId !== null ? resolvedRoundContext?.project.name : null;
+    document.title = [title, projectName, "AL-MedLit"].filter(Boolean).join(" | ");
+    const routeKey = `${activeWorkspaceId}:${pathname}`;
     const notice = pendingRouteNoticeRef.current;
     pendingRouteNoticeRef.current = null;
-    setRouteAnnouncement(
-      notice ??
-        `${title} loaded.${describeRouteState(
-          location.search,
-          location.hash,
-        )}`,
-    );
+    if (announcedRouteRef.current !== routeKey || notice) {
+      announcedRouteRef.current = routeKey;
+      setRouteAnnouncement(notice ?? `${title} loaded.`);
+    }
   }, [
+    accountActionToken,
+    activeWorkspaceId,
     authed,
+    inviteToken,
+    justRegistered,
+    onboarded,
+    projects,
+    resolvedRoundContext,
     canOpenProjectRoute,
     location.hash,
     location.search,
@@ -1063,6 +1082,8 @@ function Application(): React.ReactElement {
     ) {
       return;
     }
+    const focusRouteKey = `${activeWorkspaceId}:${pathname}`;
+    if (focusedRouteRef.current === focusRouteKey) return;
     const routeDataLoading =
       (workspaceRoute === "/projects" && (loading || platform.loading)) ||
       (workspaceRoute === "/my-work" && (loading || platform.loading));
@@ -1084,10 +1105,12 @@ function Application(): React.ReactElement {
       document.removeEventListener("keydown", cancelForInteraction, true);
     };
     const cancelForInteraction = (): void => {
+      focusedRouteRef.current = focusRouteKey;
       interactionCancelled = true;
       stopWatching();
     };
     const focusElement = (target: HTMLElement): void => {
+      focusedRouteRef.current = focusRouteKey;
       const hadTabIndex = target.hasAttribute("tabindex");
       if (!hadTabIndex) target.setAttribute("tabindex", "-1");
       target.focus();
@@ -1131,6 +1154,7 @@ function Application(): React.ReactElement {
       stopWatching();
     };
   }, [
+    activeWorkspaceId,
     authed,
     canOpenProjectRoute,
     loading,
@@ -1144,12 +1168,14 @@ function Application(): React.ReactElement {
   ]);
 
   useEffect(() => {
-    if (workspaceRoute === "/my-work" && roundRouteId === null && projectsReady &&
-      myWorkProjectId !== null && myWorkProjectId !== selectedProjectId &&
-      projects.some((project) => project.id === myWorkProjectId)) {
-      setSelectedProjectId(myWorkProjectId);
+    const routeProjectId = parsedProjectRoute?.projectId ?? (
+      workspaceRoute === "/my-work" && roundRouteId === null ? myWorkProjectId : null
+    );
+    if (projectsReady && routeProjectId !== null && routeProjectId !== selectedProjectId &&
+      projects.some((project) => project.id === routeProjectId)) {
+      setSelectedProjectId(routeProjectId);
     }
-  }, [myWorkProjectId, projects, projectsReady, roundRouteId, selectedProjectId, setSelectedProjectId, workspaceRoute]);
+  }, [myWorkProjectId, parsedProjectRoute, projects, projectsReady, roundRouteId, selectedProjectId, setSelectedProjectId, workspaceRoute]);
 
   useEffect(() => {
     const shouldLoadSharedData =
@@ -1225,6 +1251,7 @@ function Application(): React.ReactElement {
 
     const requestId = ++roundContextRequestIdRef.current;
     setResolvedRoundContext(null);
+    setRoundNotFound(false);
     setRoundResolutionLoading(true);
     setRoundResolutionError(null);
     void getRoundWorkContext(roundRouteId, activeWorkspaceId)
@@ -1235,6 +1262,7 @@ function Application(): React.ReactElement {
       })
       .catch((caught: unknown) => {
         if (requestId !== roundContextRequestIdRef.current) return;
+        setRoundNotFound(caught instanceof ApiError && caught.status === 404);
         setRoundResolutionError(
           caught instanceof Error
             ? caught.message
@@ -1256,6 +1284,7 @@ function Application(): React.ReactElement {
     activeWorkspaceId,
     authed,
     roundRouteId,
+    roundRetryAttempt,
     sessionReady,
     setSelectedProjectId,
   ]);
@@ -1309,7 +1338,6 @@ function Application(): React.ReactElement {
     access,
     activeWorkspaceId,
     authed,
-    roundRouteId,
     routeRedirect,
     sessionReady,
     workspaceRoute,
@@ -1342,6 +1370,7 @@ function Application(): React.ReactElement {
     }
 
     const projectId = activeProjectContextId;
+    if (useProjectWorkspaceStore.getState().selectedProjectId !== projectId) setSelectedProjectId(projectId);
     const scope = workspaceRoute === "/my-work" ? "mine" : "all";
     let cancelled = false;
     const generation = sessionGenerationRef.current;
@@ -1377,10 +1406,10 @@ function Application(): React.ReactElement {
     projectsReady,
     roundRouteId,
     routeRedirect,
-    selectedProjectId,
     sessionReady,
     setBusy,
     setError,
+    setSelectedProjectId,
     workspaceRoute,
   ]);
 
@@ -1458,7 +1487,7 @@ function Application(): React.ReactElement {
       <Suspense
         fallback={(
           <main id="main-content" tabIndex={-1}>
-            <div className="status" role="status">Loading secure link…</div>
+            <LoadingState label="Loading secure link…" />
           </main>
         )}
       >
@@ -1476,9 +1505,7 @@ function Application(): React.ReactElement {
       if (sessionLoadError) return sessionConnectionFailure;
       return (
         <main id="main-content" tabIndex={-1}>
-          <div className="status" role="status" aria-live="polite">
-            Checking your session…
-          </div>
+          <LoadingState label="Checking your session…" />
         </main>
       );
     }
@@ -1487,16 +1514,8 @@ function Application(): React.ReactElement {
         token={inviteToken}
         signedIn={authed && sessionReady}
         onAccepted={() => {
-          // A new or switched account already reset state through the session
-          // subscription. An existing signed-in user keeps their cookie, so bump
-          // the session generation to re-run the workspace load and pick up the
-          // new membership.
-          setSessionReady(false);
           setJustRegistered(false);
           setOnboarded(true);
-          sessionGenerationRef.current += 1;
-          setSessionGeneration(sessionGenerationRef.current);
-          setAuthed(true);
           navigatePath("/", "replace");
         }}
       />
@@ -1521,9 +1540,7 @@ function Application(): React.ReactElement {
       <div className="app-shell">
         {sessionLoadError ? sessionConnectionFailure : (
           <main id="main-content" tabIndex={-1}>
-            <div className="status" role="status" aria-live="polite">
-              Loading workspace…
-            </div>
+            <LoadingState label="Loading workspace…" />
           </main>
         )}
       </div>
@@ -1535,9 +1552,7 @@ function Application(): React.ReactElement {
       return (
         <div className="app-shell">
           <main id="main-content" tabIndex={-1}>
-            <div className="status" role="status" aria-live="polite">
-              Loading workspace…
-            </div>
+            <LoadingState label="Loading workspace…" />
           </main>
         </div>
       );
@@ -1651,7 +1666,7 @@ function Application(): React.ReactElement {
   const renderWorkspaceSettings = (): React.ReactElement =>
     activeWorkspaceId === null || activeMembership === null ? (
       <main id="main-content" tabIndex={-1}>
-        <div className="status" role="status">Loading workspace settings…</div>
+        <LoadingState label="Loading workspace settings…" />
       </main>
     ) : (
       <WorkspaceSettings
@@ -1671,33 +1686,23 @@ function Application(): React.ReactElement {
   );
 
   const renderProjects = (): React.ReactElement => (
-    <>
-      {error ? (
-        <Banner
-          className="shell-banner"
-          status="error"
-          title="Projects could not be loaded"
-          description={error}
-          container="section"
-        />
-      ) : null}
       <ProjectsWorkspace
         workspaceId={activeWorkspaceId}
+        workspaceName={activeMembership?.workspace_name}
+        loadError={error}
+        onRetry={() => { setProjectsReady(false); }}
         projects={projects}
         canCreate={canPerform(access, "projects:create")}
         capabilities={caps}
         loading={!projectsReady || loading}
         onOpenProject={(projectId) => {
-          setSelectedProjectId(projectId);
           navigatePath(projectPlatformPath(projectId, "overview"));
         }}
         onProjectCreated={(project) => {
           replaceProject(project);
-          setSelectedProjectId(project.id);
           navigatePath(projectPlatformPath(project.id, "overview"));
         }}
       />
-    </>
   );
 
   const renderProject = (projectId: number | null): React.ReactElement => {
@@ -1712,15 +1717,17 @@ function Application(): React.ReactElement {
       renderNotFound()
     ) : !canOpenProjectRoute ? (
       <main id="main-content" tabIndex={-1}>
-        <div className="status" role="status" aria-live="polite">
-          Opening project overview…
-        </div>
+        <LoadingState label="Opening project overview…" />
       </main>
     ) : routedProject === null ? (
-      <main id="main-content" tabIndex={-1}>
-        <div className="status" role="status" aria-live="polite">
-          {!projectsReady || loading ? "Loading project…" : "Project not found."}
-        </div>
+      <main id="main-content" className="route-error" tabIndex={-1}>
+        {!projectsReady || loading ? <LoadingState label="Loading project…" /> : error ? (
+          <section role="alert">
+            <h1>Project could not be loaded</h1>
+            <p>{error}</p>
+            <Button label="Retry loading project" onClick={() => setProjectsReady(false)} />
+          </section>
+        ) : <section><h1>Project not found</h1><p>This project is unavailable in the selected workspace.</p></section>}
       </main>
     ) : !platformProjectReady && !platform.loading && platform.error !== null ? (
       <main id="main-content" className="route-error" tabIndex={-1}>
@@ -1740,9 +1747,7 @@ function Application(): React.ReactElement {
       </main>
     ) : !platformProjectReady ? (
       <main id="main-content" tabIndex={-1}>
-        <div className="status" role="status" aria-live="polite">
-          Loading project…
-        </div>
+        <LoadingState label="Loading project…" />
       </main>
     ) : (
       <ProjectPlatform
@@ -1781,7 +1786,6 @@ function Application(): React.ReactElement {
         dialog={platformDialog}
         onDialogChange={setPlatformDialog}
         onProjectSelect={(projectId, nextTab) => {
-          setSelectedProjectId(projectId);
           navigatePath(projectPlatformPath(projectId, nextTab));
         }}
         onNavigate={navigatePath}
@@ -1830,7 +1834,7 @@ function Application(): React.ReactElement {
     currentUsername === null ||
     !projectsReady ? (
       <main id="main-content" tabIndex={-1}>
-        <div className="status" role="status">Loading training workspace…</div>
+        <LoadingState label="Loading training workspace…" />
       </main>
     ) : (
       <TrainingWorkspace
@@ -1865,7 +1869,7 @@ function Application(): React.ReactElement {
   ): React.ReactElement =>
     activeWorkspaceId === null || !projectsReady ? (
       <main id="main-content" tabIndex={-1}>
-        <div className="status" role="status">Loading model registry…</div>
+        <LoadingState label="Loading model registry…" />
       </main>
     ) : (
       <ModelsWorkspace
@@ -1884,12 +1888,11 @@ function Application(): React.ReactElement {
       roundId !== null && resolvedRoundContext?.round.id === roundId
         ? resolvedRoundContext
         : null;
+    if (roundId === null) return renderNotFound();
     return (
       <main id="main-content" className="round-work-main" tabIndex={-1}>
-      {roundResolutionLoading ? (
-        <div className="status" role="status" aria-live="polite">
-          Loading round…
-        </div>
+      {roundResolutionLoading || (!context && !roundResolutionError) ? (
+        <LoadingState label="Loading round…" />
       ) : context && currentUserId !== null && context.round.status === "open" && context.round.assistance_policy === "blind" && supportsPaperAnnotation(context.task_version) ? (
         <PaperRoundWorkspace
           context={context}
@@ -1913,7 +1916,7 @@ function Application(): React.ReactElement {
           canManage={
             canPerform(access, "rounds:manage")
           }
-          onClose={() => navigatePath("/my-work")}
+          onClose={() => navigatePath(`/my-work?project=${context.project.id}&datasetVersionId=${context.round.dataset_version_id}`)}
           onRefresh={async () => {
             const requestId = ++roundContextRequestIdRef.current;
             if (activeWorkspaceId === null) return;
@@ -1926,19 +1929,23 @@ function Application(): React.ReactElement {
               roundRouteId === context.round.id
             ) {
               setResolvedRoundContext(refreshed);
+              setRoundContexts((current) => refreshed.round.status === "open"
+                ? current.map((item) => item.round.id === refreshed.round.id ? refreshed : item)
+                : current.filter((item) => item.round.id !== refreshed.round.id));
             }
           }}
         />
       ) : (
         <div className="not-found-content">
-          <h1>Round not found</h1>
+          <h1>{roundNotFound ? "Round not found" : "Round could not be loaded"}</h1>
           <p>
             {roundResolutionError ??
               "This round is unavailable in the selected project or workspace."}
           </p>
+          {!roundNotFound && roundResolutionError ? <Button label="Retry loading round" variant="primary" onClick={() => setRoundRetryAttempt((attempt) => attempt + 1)} /> : null}
           <Button
             label="Back to My Work"
-            variant="primary"
+            variant={roundNotFound ? "primary" : "secondary"}
             onClick={() => navigatePath("/my-work")}
           />
         </div>
@@ -1949,7 +1956,7 @@ function Application(): React.ReactElement {
 
   const renderMyWork = (): React.ReactElement => {
     if (!projectsReady || (myWorkProjectId !== null && myWorkProjectId !== selectedProjectId && projects.some((project) => project.id === myWorkProjectId))) {
-      return <main id="main-content" tabIndex={-1}><p role="status">Loading your annotation workspace…</p></main>;
+      return <main id="main-content" tabIndex={-1}><LoadingState label="Loading your annotation workspace…" /></main>;
     }
     const projectRounds = roundContexts.filter((context) => context.project.id === selectedProjectId);
     if (selectedProject && currentUserId !== null && !selectedProject.tasks.some((task) => task.enabled) &&
@@ -1960,20 +1967,20 @@ function Application(): React.ReactElement {
       const primary = [...paperRounds].sort((a, b) => b.round.id - a.round.id)
         .find((context) => requestedSource === null || context.round.dataset_version_id === requestedSource);
       const overviewControls = <div className="paper-overview-controls">
-          <label>Project <select value={selectedProject.id} onChange={(event) => {
-            const next = Number(event.target.value); setSelectedProjectId(next);
+          <label>Project <NativeSelect value={selectedProject.id} onChange={(event) => {
+            const next = Number(event.target.value);
             navigatePath(`/my-work?project=${next}`);
-          }}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
-          {sourceIds.length > 1 ? <label>Source collection version <select value={primary?.round.dataset_version_id ?? ""} onChange={(event) => navigatePath(`/my-work?project=${selectedProject.id}&datasetVersionId=${event.target.value}`)}>
+          }}>{projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</NativeSelect></label>
+          {sourceIds.length > 1 ? <label>Source dataset version ID <NativeSelect value={primary?.round.dataset_version_id ?? ""} onChange={(event) => navigatePath(`/my-work?project=${selectedProject.id}&datasetVersionId=${event.target.value}`)}>
             {!primary ? <option value="">Choose a source version</option> : null}
-            {sourceIds.map((id) => <option key={id} value={id}>Source version {id}</option>)}
-          </select></label> : null}
+            {sourceIds.map((id) => <option key={id} value={id}>Dataset version ID {id}</option>)}
+          </NativeSelect></label> : null}
         </div>;
       const taskInventory = <MyWorkTaskInventory key={`${activeWorkspaceId}:${selectedProject.id}`} project={selectedProject} contexts={projectRounds}
-          canReadAllTasks={canPerform(access, "projects:read") && projectSupportsSection(selectedProject, "data")}
+          canReadAllTasks={canPerform(access, "projects:read") && projectSupportsSection(selectedProject, "data", access.effectiveCapabilities)}
           canManage={canPerform(access, "tasks:manage")} onNavigate={navigatePath} />;
       return <main id="main-content" tabIndex={-1}>
-        {roundContextsLoading ? <p role="status">Loading annotation tasks…</p> : roundContextsError ? <p role="alert">{roundContextsError}</p> : <>
+        {roundContextsLoading ? <LoadingState label="Loading annotation tasks…" /> : roundContextsError ? <p role="alert">{roundContextsError}</p> : <>
           {primary ? <PaperRoundWorkspace key={`${activeWorkspaceId}:${primary.project.id}:${primary.round.dataset_version_id}`}
             defaultView="progress"
             overviewControls={overviewControls} taskInventory={taskInventory}
@@ -1991,10 +1998,11 @@ function Application(): React.ReactElement {
       </main>;
     }
     return (
-    <>
+      <AnnotatorWorkspace
+        workspaceNotice={<>
       {selectedProject && ((selectedProject.workflow_task_count ?? 0) > 0 || projectRounds.length > 0) ? <MyWorkTaskInventory
         key={`${activeWorkspaceId}:${selectedProject.id}`} project={selectedProject} contexts={projectRounds}
-        canReadAllTasks={canPerform(access, "projects:read") && projectSupportsSection(selectedProject, "data")}
+        canReadAllTasks={canPerform(access, "projects:read") && projectSupportsSection(selectedProject, "data", access.effectiveCapabilities)}
         canManage={canPerform(access, "tasks:manage")} onNavigate={navigatePath} /> : null}
       {error ? (
         <Banner
@@ -2015,16 +2023,12 @@ function Application(): React.ReactElement {
         />
       ) : null}
       {loading ? (
-        <div className="status" role="status" aria-live="polite">
-          Loading…
-        </div>
+        <LoadingState label="Loading…" />
       ) : null}
       {roundContextsLoading ? (
-        <div className="status" role="status" aria-live="polite">
-          Loading assigned rounds…
-        </div>
+        <LoadingState label="Loading assigned rounds…" />
       ) : null}
-      <AnnotatorWorkspace
+        </>}
         projects={projects}
         selectedProject={selectedProject}
         selectedProjectId={selectedProjectId}
@@ -2057,7 +2061,6 @@ function Application(): React.ReactElement {
           navigatePath(`/my-work/rounds/${nextRoundId}?view=annotate`)
         }
       />
-    </>
     );
   };
 

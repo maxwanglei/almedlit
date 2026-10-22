@@ -31,6 +31,7 @@ from .common import (
     _validate_task_input,
     _validate_task_output,
 )
+from .feedback import create_feedback_decision
 from .holdouts import lock_holdout_policy, validate_annotation_assistance
 from .workspace_training import (
     _workspace_projects_with_modules,
@@ -1009,9 +1010,10 @@ def create_annotation_decision(
         )
         if already_superseded is not None:
             raise ConflictError("The selected annotation decision was already superseded")
-    content = data.model_dump(exclude={"project_id"})
+    decision_data = data.model_dump(exclude={"feedback_decision"})
+    content = {key: value for key, value in decision_data.items() if key != "project_id"}
     decision = models.RoundAnnotationDecision(
-        **data.model_dump(),
+        **decision_data,
         annotator_user_id=actor.id,
         content_hash=_canonical_hash(
             {
@@ -1021,7 +1023,19 @@ def create_annotation_decision(
         ),
     )
     db.add(decision)
-    _commit(db, "Could not add the annotation decision")
+    try:
+        if data.feedback_decision is not None:
+            db.flush()
+            create_feedback_decision(db, schemas.FeedbackDecisionCreate(
+                project_id=data.project_id,
+                feedback_exposure_id=data.feedback_decision.exposure_id,
+                round_annotation_decision_id=decision.id,
+                decision=data.feedback_decision.decision,
+            ), actor, commit=False)
+        _commit(db, "Could not add the annotation decision")
+    except Exception:
+        db.rollback()
+        raise
     db.refresh(decision)
     return decision
 

@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useId, useState, type ReactNode } from "react";
 import { Button } from "@astryxdesign/core/Button";
 
 import { request } from "@/api/client";
@@ -7,7 +7,8 @@ import {
   PlatformEmpty,
   PlatformPageHeader,
   PlatformSection,
-  PlatformStatus,
+  formatStatus,
+  formatCount,
   shortHash,
 } from "./components";
 import type { Dataset, DatasetVersion, PlatformProjectData, TrainingDatasetVersion } from "./types";
@@ -29,7 +30,8 @@ export default function DataScreen({
   onCreate,
   onPrepareTraining,
   title = "Data",
-  description = "Immutable source records, independent label layers, and stable split policies.",
+  showHeader = true,
+  description = "Immutable source records, independent label sets, and stable split policies.",
   secondary,
   activeTab = "source",
   onTabChange,
@@ -45,6 +47,7 @@ export default function DataScreen({
   onCreate: () => void;
   onPrepareTraining?: (dataset: Dataset) => void;
   title?: string;
+  showHeader?: boolean;
   description?: string;
   secondary?: ReactNode;
   activeTab?: "source" | "training";
@@ -56,6 +59,7 @@ export default function DataScreen({
   onTrain?: (version: TrainingDatasetVersion) => void;
   onNewTrainingVersion?: (version: TrainingDatasetVersion) => void;
 }): React.ReactElement {
+  const tabsId = useId();
   const projectId = data.projectModules.project_id;
   const [progress, setProgress] = useState<{ projectId: number; rows: AnnotationProgress[] } | null>(null);
   useEffect(() => {
@@ -73,18 +77,27 @@ export default function DataScreen({
   const sourceDatasets = data.datasets.filter((dataset) => !internalDatasetIds.has(dataset.id));
   return (
     <div className="platform-page">
-      <PlatformPageHeader
+      {showHeader ? <PlatformPageHeader
         title={title}
         description={description}
-        actionLabel={activeTab === "training" ? "Create training dataset" : onImport ? "Import PMIDs" : "Import source data"}
+        actionLabel={(activeTab === "training" ? data.trainingDatasets.length : sourceDatasets.length || legacyDocumentCount) ? activeTab === "training" ? "Create training dataset" : onImport ? "Import PMIDs" : "Import source data" : undefined}
         onAction={activeTab === "training" ? onCreateTraining : onImport ? () => onImport() : onCreate}
         secondary={secondary}
-      />
+      /> : secondary}
 
-      {onTabChange ? <nav className="platform-page-actions" aria-label="Dataset types">
-        <button type="button" className="platform-text-action" aria-current={activeTab === "source" ? "page" : undefined} onClick={() => onTabChange("source")}>Source datasets</button>
-        <button type="button" className="platform-text-action" aria-current={activeTab === "training" ? "page" : undefined} onClick={() => onTabChange("training")}>Training datasets</button>
-      </nav> : null}
+      {onTabChange ? <div className="platform-page-actions" role="tablist" aria-label="Dataset types" onKeyDown={(event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        const tabs = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+        const index = tabs.findIndex((tab) => tab === document.activeElement);
+        const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (index + 1) % tabs.length;
+        event.preventDefault();
+        tabs[next]?.focus();
+        tabs[next]?.click();
+      }}>
+        <button type="button" className="platform-text-action" id={`${tabsId}-source-tab`} role="tab" aria-selected={activeTab === "source"} aria-controls={`${tabsId}-source-panel`} tabIndex={activeTab === "source" ? 0 : -1} onClick={() => onTabChange("source")}>Source datasets</button>
+        <button type="button" className="platform-text-action" id={`${tabsId}-training-tab`} role="tab" aria-selected={activeTab === "training"} aria-controls={`${tabsId}-training-panel`} tabIndex={activeTab === "training" ? 0 : -1} onClick={() => onTabChange("training")}>Training datasets</button>
+      </div> : null}
+      <div id={`${tabsId}-${activeTab}-panel`} role={onTabChange ? "tabpanel" : undefined} aria-labelledby={onTabChange ? `${tabsId}-${activeTab}-tab` : undefined}>
       {activeTab === "training" ? <PlatformSection title="Training datasets" description="Saved versions prepared from annotations, external labels, or both. Source data and earlier versions remain available.">
         {data.trainingDatasets.length ? <div className="platform-table-scroll" role="region" aria-label="Training datasets" tabIndex={0}><table className="platform-table"><thead><tr><th scope="col">Training dataset</th><th scope="col">Version</th><th scope="col">Task</th><th scope="col">Labeled records / splits</th><th scope="col">Sources</th><th scope="col">Actions</th></tr></thead><tbody>
           {[...data.trainingDatasets].sort((a, b) => (b.version_number ?? 1) - (a.version_number ?? 1)).map((version) => {
@@ -96,7 +109,7 @@ export default function DataScreen({
             return <tr key={version.id}>
             <td><strong>{version.name}</strong></td><td>v{version.version_number ?? 1}</td>
             <td>{data.taskDefinitions.find((task) => task.id === data.taskVersions.find((item) => item.id === version.task_version_id)?.task_definition_id)?.name ?? `Task ${version.task_version_id}`}</td>
-            <td>{preview?.item_count ?? sourceVersion?.item_count ?? 0}<span>{Object.entries(splitCounts).map(([name, count]) => `${name}: ${count}`).join(" · ") || "Splits recorded"}</span></td>
+            <td>{(preview?.item_count ?? sourceVersion?.item_count ?? 0).toLocaleString()}<span>{Object.entries(splitCounts).map(([name, count]) => `${name}: ${count.toLocaleString()}`).join(" · ") || "Splits recorded"}</span></td>
             <td><details><summary>View sources ({references.length})</summary><ul>{references.map((reference, index) => {
               const source = data.datasetVersions.find((item) => item.id === reference.dataset_version_id);
               return <li key={index}>{source ? datasetName(data, source.dataset_id) : `Source version ${reference.dataset_version_id}`} · {source ? `v${source.version_number}` : "pinned version"}{reference.label_set_version_id ? ` · label set ${reference.label_set_version_id}` : ""}{reference.annotation_round_id ? ` · submitted round ${reference.annotation_round_id}` : ""}</li>;
@@ -146,14 +159,14 @@ export default function DataScreen({
                         <strong>{dataset.name}</strong>
                         {dataset.description ? <span>{dataset.description}</span> : null}
                         {dataset.purposes?.length ? <span>{dataset.purposes.map((purpose) => purpose === "training_source" ? "Training preparation" : purpose === "inference" ? "Predictions" : "Annotation").join(" · ")}</span> : null}
-                        <details><summary>Source versions</summary><ul>{versions.map((version) => <li key={version.id}>v{version.version_number} · {version.item_count} records · revision {version.source_revision}<br /><small>Fingerprint: {shortHash(version.content_hash)}</small></li>)}</ul></details>
+                        <details><summary>Source versions</summary><ul>{versions.map((version) => <li key={version.id}>v{version.version_number} · {formatCount(version.item_count, "record")} · revision {version.source_revision}<br /><small>Fingerprint: {shortHash(version.content_hash)}</small></li>)}</ul></details>
                       </td>
-                      <td><PlatformStatus value={dataset.source_type} /></td>
+                      <td><span>{formatStatus(dataset.source_type)}</span></td>
                       <td>{latest ? `v${latest.version_number}` : "No version"}</td>
-                      <td>{latest?.item_count ?? 0}</td>
+                      <td>{(latest?.item_count ?? 0).toLocaleString()}</td>
                       <td>
                         {submissionProgress ? <strong>{submissionProgress.submitted}/{submissionProgress.total} submitted</strong> : null}
-                        {layers.length ? `${labeledKeys.size || Math.max(...layers.map((layer) => layer.label_count))} saved labels` : "No saved label layer"}
+                        {layers.length ? formatCount(labeledKeys.size || Math.max(...layers.map((layer) => layer.label_count)), "saved label") : "No saved label set"}
                         <span>{rounds.length ? `${rounds.filter((round) => round.status === "open").length} open · ${rounds.filter((round) => round.status === "closed").length} closed rounds` : "Annotation not started"}</span>
                         {versions.filter((version) => version.id !== latest?.id).map((version) => {
                           const prior = progressByVersion.get(version.id);
@@ -171,7 +184,7 @@ export default function DataScreen({
                             /> : null}
                             {onAnnotate && latest ? <Button label="Annotate" size="sm" isDisabled={!latest.item_count} onClick={() => onAnnotate(dataset, latest)} /> : null}
                             {onPredict && latest ? <Button label="Run predictions" size="sm" isDisabled={!latest.item_count} onClick={() => onPredict(latest)} /> : null}
-                            {onImport && dataset.source_type === "project_corpus" ? <Button label="Add PMIDs" size="sm" onClick={() => onImport(dataset)} /> : null}
+                            {onImport && dataset.source_type === "project_corpus" ? <Button label="Import PMIDs" size="sm" onClick={() => onImport(dataset)} /> : null}
                           </div>
                         </td>
                       ) : null}
@@ -184,14 +197,14 @@ export default function DataScreen({
         ) : legacyDocumentCount ? (
           <PlatformEmpty
             title="Project corpus awaiting a dataset snapshot"
-            detail={`${legacyDocumentCount} existing documents remain available and can be versioned without changing them.`}
+            detail={`${formatCount(legacyDocumentCount, "existing document")} ${legacyDocumentCount === 1 ? "remains" : "remain"} available and can be versioned without changing ${legacyDocumentCount === 1 ? "it" : "them"}.`}
             actionLabel="Create dataset snapshot"
             onAction={onCreate}
           />
         ) : (
           <PlatformEmpty
             title="No source datasets yet"
-            detail="Import papers by PMID or upload source records. Give each collection a name, then choose annotation, predictions, or training preparation."
+            detail="Import papers by PMID or upload source records. Give each dataset a name, then choose annotation, predictions, or training preparation."
             actionLabel={onImport ? "Import PMIDs" : "Import source data"}
             onAction={onImport ? () => onImport() : onCreate}
           />
@@ -200,14 +213,14 @@ export default function DataScreen({
       {onImport ? <p><button type="button" className="platform-text-action" onClick={onCreate}>Import CSV, JSONL, Parquet, or a public dataset</button></p> : null}
 
       <details><summary>Label and split version details</summary><PlatformSection
-        title="Label layers"
+        title="Label sets"
         description="Imported labels remain separate from human, adjudicated, and derived labels."
       >
         {data.labelSets.length ? (
           <div
             className="platform-table-scroll"
             role="region"
-            aria-label="Label layers table"
+            aria-label="Label sets table"
             tabIndex={0}
           >
             <table className="platform-table">
@@ -228,9 +241,9 @@ export default function DataScreen({
                     <td>{datasetName(data, data.datasetVersions.find(
                       (version) => version.id === labels.dataset_version_id,
                     )?.dataset_id ?? -1)}</td>
-                    <td><PlatformStatus value={labels.source_kind} /></td>
+                    <td><span>{formatStatus(labels.source_kind)}</span></td>
                     <td>{labels.composition_policy}</td>
-                    <td>{labels.label_count}</td>
+                    <td>{labels.label_count.toLocaleString()}</td>
                     <td><code>{shortHash(labels.content_hash)}</code></td>
                   </tr>
                 ))}
@@ -239,7 +252,7 @@ export default function DataScreen({
           </div>
         ) : (
           <p className="platform-inline-empty">
-            No label layers yet. Imported labels will be preserved here rather than overwritten.
+            No label sets yet. Imported labels will be preserved here rather than overwritten.
           </p>
         )}
       </PlatformSection>
@@ -286,6 +299,8 @@ export default function DataScreen({
       </PlatformSection>
       </details>
       </>}
+      </div>
+      {onTabChange ? <div hidden id={`${tabsId}-${activeTab === "source" ? "training" : "source"}-panel`} role="tabpanel" aria-labelledby={`${tabsId}-${activeTab === "source" ? "training" : "source"}-tab`} /> : null}
     </div>
   );
 }

@@ -59,6 +59,50 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("usePlatformProject load scope", () => {
+  it("rejects a retained mutation callback when its project context has changed", async () => {
+    const { result, rerender } = renderHook(
+      ({ projectId }: { projectId: number }) => usePlatformProject(projectId, 5, true, "data"),
+      { initialProps: { projectId: 7 } },
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const previousAddCycle = result.current.addCycle;
+    rerender({ projectId: 8 });
+    await expect(previousAddCycle({ name: "Cycle", goal: "expand_pool", taskVersionId: 1, datasetVersionId: 2, baselineModelVersionId: null, feedbackSources: [] })).rejects.toThrow(/active project changed/);
+    expect(mocks.createCycle).not.toHaveBeenCalled();
+  });
+
+  it("rejects a mutation that finishes after its project context changed", async () => {
+    const pending = deferred<void>();
+    mocks.createCycle.mockReturnValue(pending.promise);
+    const { result, rerender } = renderHook(
+      ({ projectId }: { projectId: number }) => usePlatformProject(projectId, 5, true, "data"),
+      { initialProps: { projectId: 7 } },
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    let operation!: Promise<void>;
+    act(() => { operation = result.current.addCycle({ name: "Cycle", goal: "expand_pool", taskVersionId: 1, datasetVersionId: 2, baselineModelVersionId: null, feedbackSources: [] }); });
+    const rejected = expect(operation).rejects.toThrow(/active project changed/);
+    rerender({ projectId: 8 });
+    await act(async () => { pending.resolve(); await rejected; });
+    expect(result.current.busy).toBe(false);
+  });
+
+  it("rejects a mutation if the project changes during its post-save reload", async () => {
+    const pendingReload = deferred<typeof EMPTY_PLATFORM_PROJECT_DATA>();
+    const { result, rerender } = renderHook(
+      ({ projectId }: { projectId: number }) => usePlatformProject(projectId, 5, true, "data"),
+      { initialProps: { projectId: 7 } },
+    );
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    mocks.loadPlatformProject.mockReturnValueOnce(pendingReload.promise);
+    let operation!: Promise<void>;
+    act(() => { operation = result.current.addCycle({ name: "Cycle", goal: "expand_pool", taskVersionId: 1, datasetVersionId: 2, baselineModelVersionId: null, feedbackSources: [] }); });
+    const rejected = expect(operation).rejects.toThrow(/active project changed/);
+    await waitFor(() => expect(result.current.loading).toBe(true));
+    rerender({ projectId: 8 });
+    await act(async () => { pendingReload.resolve(EMPTY_PLATFORM_PROJECT_DATA); await rejected; });
+    expect(result.current.busy).toBe(false);
+  });
   it("passes the active scope and reloads when the section changes", async () => {
     const { result, rerender } = renderHook(
       ({ scope }: { scope: "data" | "train" }) =>
@@ -180,6 +224,26 @@ describe("usePlatformProject load scope", () => {
     expect(committedPreviousErrors.length).toBeGreaterThan(0);
     expect(committedPreviousErrors).not.toContain(true);
     expect(screen.getByText("No project error")).toBeTruthy();
+  });
+
+  it("never commits an empty success state before loading a new section", async () => {
+    const nextLoad = deferred<typeof EMPTY_PLATFORM_PROJECT_DATA>();
+    mocks.loadPlatformProject.mockResolvedValueOnce(EMPTY_PLATFORM_PROJECT_DATA).mockReturnValueOnce(nextLoad.promise);
+    const committed: string[] = [];
+    function Section({ scope }: { scope: "data" | "rounds" }) {
+      const project = usePlatformProject(7, 5, true, scope);
+      return <p>{project.loading ? "Loading section" : "Empty section"}</p>;
+    }
+    const onRender = () => {
+      committed.push(screen.getByText(/section$/).textContent ?? "");
+    };
+    const { rerender } = render(<Profiler id="section" onRender={onRender}><Section scope="data" /></Profiler>);
+    await screen.findByText("Empty section");
+    committed.length = 0;
+    rerender(<Profiler id="section" onRender={onRender}><Section scope="rounds" /></Profiler>);
+    expect(committed).not.toContain("Empty section");
+    await act(async () => { nextLoad.resolve(EMPTY_PLATFORM_PROJECT_DATA); });
+    await screen.findByText("Empty section");
   });
 
   it("ignores an older project response and its finally state", async () => {
@@ -442,7 +506,7 @@ it("retries project launches with one attempt and handles the displayed failure"
   const { result, rerender } = renderHook(({ projectId }) => usePlatformProject(projectId, 5, true, "train"),
     { initialProps: { projectId: 7 } });
   await waitFor(() => expect(result.current.loading).toBe(false));
-  await act(async () => { await expect(result.current.launch(draft)).resolves.toBeUndefined(); });
+  await act(async () => { await expect(result.current.launch(draft)).rejects.toThrow("Response lost"); });
   expect(result.current.error).toBe("Response lost");
   await act(() => result.current.launch(draft));
   const firstAttempt = mocks.launchTrainingRun.mock.calls[0]?.[3];

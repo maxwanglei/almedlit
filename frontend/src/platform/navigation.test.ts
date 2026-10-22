@@ -43,8 +43,8 @@ describe("project platform navigation", () => {
   });
 
   it.each([
-    ["learning", "Learning Loop"],
-    ["loop", "Learning Loop"],
+    ["learning", "Active learning"],
+    ["loop", "Active learning"],
     ["guidelines", "Guideline Learning"],
   ] as const)(
     "redirects planned %s routes to Overview with an announcement",
@@ -62,7 +62,7 @@ describe("project platform navigation", () => {
     expect(
       PROJECT_ROUTE_REGISTRY.find((route) => route.id === "rounds"),
     ).toMatchObject({
-      label: "Team & Rounds",
+      label: "Team & rounds",
       requiredCapability: "annotation",
       backendModule: "annotate",
       releaseState: "released",
@@ -92,10 +92,13 @@ describe("project platform navigation", () => {
       workspace_id: 4,
     };
 
-    expect(projectSupportsSection(project, "data")).toBe(true);
-    expect(projectSupportsSection(project, "activity")).toBe(true);
-    expect(projectSupportsSection(project, "tasks")).toBe(false);
-    expect(projectSupportsSection(project, "rounds")).toBe(false);
+    expect(projectSupportsSection(project, "data", ["training", "lineage"])).toBe(true);
+    expect(projectSupportsSection(project, "activity", ["training", "lineage"])).toBe(true);
+    expect(projectSupportsSection(project, "tasks", ["training", "lineage"])).toBe(false);
+    expect(projectSupportsSection(project, "rounds", ["training", "lineage"])).toBe(false);
+    expect(projectSupportsSection(project, "activity", ["annotation"])).toBe(false);
+    expect(projectSupportsSection(project, "inference", ["annotation"])).toBe(false);
+    expect(projectSupportsSection(project, "inference", ["inference"])).toBe(true);
   });
 
   it("rejects unknown tabs and unsafe project ids", () => {

@@ -1,18 +1,22 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render as renderComponent, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render as renderComponent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BrowserRouter } from "react-router-dom";
 import type { ReactElement } from "react";
 
 import { addRoundDecision, loadRoundWork, submitRoundDecisions } from "./api";
 import { createPaperEntityTaskVersionPayload } from "./paperTaskContracts";
-import PaperRoundWorkspace, { createPaperAnnotationIds, createPaperRoundAnnotationApi, paperRoundAnnotationType, projectPaperRoundWork, selectPaperRoundContexts, type LoadedPaperRound } from "./PaperRoundWorkspace";
+import PaperRoundWorkspace, { createPaperAnnotationIds, createPaperRoundAnnotationApi, paperRoundAnnotationType, projectPaperRoundWork, selectPaperRoundContexts, type LoadedPaperRound, type PaperAnnotationApi } from "./PaperRoundWorkspace";
 import type { AnnotationDecision, DatasetItem, RoundWorkContext } from "./types";
 import type { AnnotationWorkbench, Document } from "@/types/api";
 
 vi.mock("./api", () => ({ addRoundDecision: vi.fn(), loadRoundWork: vi.fn(), submitRoundDecisions: vi.fn() }));
 vi.mock("./RoundWorkbench", () => ({ default: () => <div>Generic annotation editor</div> }));
-vi.mock("@/pages/AnnotatorWorkspace", () => ({ default: ({ workbench, documents }: { workbench: AnnotationWorkbench | null; documents: Document[] }) => <div>
+vi.mock("@/pages/AnnotatorWorkspace", () => ({ default: ({ workbench, documents, annotationApi, refreshProjectData, setError }: { workbench: AnnotationWorkbench | null; documents: Document[]; annotationApi: PaperAnnotationApi; refreshProjectData: () => Promise<void>; setError: (error: string | null) => void }) => <div>
+  <button type="button" onClick={() => void refreshProjectData()}>Reload papers</button>
+  <button type="button" onClick={() => setError("Choose a valid annotation label.")}>Show validation error</button>
+  {workbench?.annotations.map((annotation) => <span key={annotation.id}>Saved {annotation.label}</span>)}
+  <button type="button" onClick={() => void annotationApi.setDocumentLabel(31, "Relevant")}>Save paper label</button>
   <p>Shared paper editor</p>{workbench?.tasks.map((task) => <span key={task.id}>{task.display_name}</span>)}
   {documents.map((document) => <p key={document.id}>{document.text}</p>)}
 </div> }));
@@ -230,4 +234,55 @@ describe("paper workspace source loading", () => {
     expect(screen.queryByText("Generic annotation editor")).toBeNull();
     expect(screen.queryByText("Shared paper editor")).toBeNull();
   });
+});
+
+it("settles the current paper load when a previous editor's save finishes during it", async () => {
+  const initial = fixture();
+  const sibling = fixture(true);
+  vi.mocked(loadRoundWork).mockResolvedValue(initial.work);
+  let resolveSave!: (value: AnnotationDecision) => void;
+  vi.mocked(addRoundDecision).mockImplementationOnce(() => new Promise((resolve) => { resolveSave = resolve; }));
+  const props = { context: initial.context, contexts: [initial.context], currentUserId: 5, annotatorId: "researcher", onClose: vi.fn(), onOpenProjectTasks: vi.fn() };
+  const { rerender } = render(<PaperRoundWorkspace {...props} />);
+  await screen.findByText("Shared paper editor");
+  fireEvent.click(screen.getByRole("button", { name: "Save paper label" }));
+  await waitFor(() => expect(addRoundDecision).toHaveBeenCalledTimes(1));
+  let resolvePrimary!: (value: typeof initial.work) => void;
+  let resolveSibling!: (value: typeof sibling.work) => void;
+  vi.mocked(loadRoundWork).mockImplementation((_projectId, round) => new Promise((resolve) => {
+    if (round.id === initial.context.round.id) resolvePrimary = resolve;
+    else resolveSibling = resolve;
+  }));
+  rerender(<BrowserRouter><PaperRoundWorkspace {...props} contexts={[initial.context, sibling.context]} /></BrowserRouter>);
+  await screen.findByText("Loading saved papers and task decisions…");
+  await act(async () => resolveSave({ id: 101, project_id: 9, round_item_id: 1010, output: "Relevant", supersedes_decision_id: null, decision_kind: "annotation", is_initial_checkpoint: false, rationale: null, annotator_user_id: 5, content_hash: "saved" }));
+  await act(async () => { resolvePrimary(initial.work); resolveSibling(sibling.work); });
+  expect(screen.queryByText("Loading saved papers and task decisions…")).toBeNull();
+  expect(screen.getByText("Shared paper editor")).toBeTruthy();
+});
+
+it("preserves an appended decision when an older reload finishes after its save", async () => {
+  const initial = fixture();
+  vi.mocked(loadRoundWork).mockResolvedValue(initial.work);
+  render(<PaperRoundWorkspace context={initial.context} contexts={[initial.context]} currentUserId={5} annotatorId="researcher" onClose={vi.fn()} onOpenProjectTasks={vi.fn()} />);
+  await screen.findByText("Shared paper editor");
+  let resolveReload!: (value: typeof initial.work) => void;
+  vi.mocked(loadRoundWork).mockImplementationOnce(() => new Promise((resolve) => { resolveReload = resolve; }));
+  fireEvent.click(screen.getByRole("button", { name: "Reload papers" }));
+  fireEvent.click(screen.getByRole("button", { name: "Save paper label" }));
+  await screen.findByText("Saved Relevant");
+  await act(async () => resolveReload(initial.work));
+  expect(screen.getByText("Saved Relevant")).toBeTruthy();
+});
+
+it("keeps the editor mounted and offers no reload for a validation error", async () => {
+  const source = fixture();
+  vi.mocked(loadRoundWork).mockResolvedValue(source.work);
+  render(<PaperRoundWorkspace context={source.context} contexts={[source.context]} currentUserId={5} annotatorId="researcher" onClose={vi.fn()} onOpenProjectTasks={vi.fn()} />);
+  await screen.findByText("Shared paper editor");
+  fireEvent.click(screen.getByRole("button", { name: "Show validation error" }));
+  expect(screen.getByRole("alert").textContent).toContain("Choose a valid annotation label.");
+  expect(screen.queryByRole("button", { name: "Retry loading papers" })).toBeNull();
+  expect(screen.getByText("Shared paper editor")).toBeTruthy();
+  expect(loadRoundWork).toHaveBeenCalledTimes(1);
 });

@@ -1,3 +1,4 @@
+import LoadingState from "@/components/LoadingState";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
@@ -134,7 +135,7 @@ function ProjectEvidenceSetup({ projectId, workspaceId, busy = false, onChanged,
           <button type="button" className="platform-text-action" onClick={() => onNavigate(`/my-work?project=${projectId}&view=annotate&tool=evidence`)}>Open My Work</button>
           <button type="button" className="platform-text-action" onClick={() => onNavigate(`/projects/${projectId}/quality`)}>Review evidence</button>
         </div>
-        {loading ? <p role="status">Loading evidence setup…</p> : null}
+        {loading ? <LoadingState label="Loading evidence setup…" /> : null}
         {error ? <div role="alert"><p>{error}</p><button type="button" disabled={disabled} onClick={() => void refresh().catch(() => undefined)}>Retry evidence setup</button></div> : null}
         {status ? <p role="status">{status}</p> : null}
         {data && data.documents.length === 0 ? <p>Import documents in Data before assigning evidence annotation.</p> : null}

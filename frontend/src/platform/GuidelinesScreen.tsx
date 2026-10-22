@@ -1,3 +1,4 @@
+import { formatTaskKind } from "@/lib/taskPresentation";
 import {
   PlatformEmpty,
   PlatformPageHeader,
@@ -72,7 +73,7 @@ export default function GuidelinesScreen({
                         <td><PlatformStatus value={revision.status} /></td>
                         <td>
                           {taskVersion
-                            ? `${taskVersion.task_kind.replace(/_/g, " ")} · v${taskVersion.version_number}`
+                            ? `${formatTaskKind(taskVersion.task_kind, taskVersion.annotation_ui?.preset)} · v${taskVersion.version_number}`
                             : `Version ${revision.task_version_id}`}
                         </td>
                         <td>{revision.rationale ?? "No rationale recorded"}</td>

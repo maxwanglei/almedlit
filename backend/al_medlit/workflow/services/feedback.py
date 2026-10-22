@@ -17,6 +17,7 @@ from al_medlit.workspace.models import WorkspaceMember
 from .common import (
     _commit,
     _FeedbackEventLineage,
+    _persist,
     _project,
     _require_actor_role,
     _scoped,
@@ -217,7 +218,7 @@ def reveal_round_feedback(
 
 
 def create_feedback_decision(
-    db: Session, data: schemas.FeedbackDecisionCreate, actor: User
+    db: Session, data: schemas.FeedbackDecisionCreate, actor: User, *, commit: bool = True
 ) -> models.FeedbackDecision:
     exposure = _scoped(
         db,
@@ -256,7 +257,7 @@ def create_feedback_decision(
             )
     decision = models.FeedbackDecision(**data.model_dump(), user_id=actor.id)
     db.add(decision)
-    _commit(db, "Could not record the feedback decision")
+    _persist(db, "Could not record the feedback decision", commit=commit)
     db.refresh(decision)
     return decision
 

@@ -41,6 +41,10 @@ function context(
 }
 
 describe("module navigation model", () => {
+  it.each(["/projects/new", "/projects/data", "/projects/runtimes", "/xxxxxxxx/new"])("does not classify %s as Training", (path) => {
+    expect(resolveWorkspaceRoute(path)).toBe("/not-found");
+  });
+
   it.each([
     {
       name: "individual owner with annotation",

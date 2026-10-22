@@ -7,33 +7,80 @@ import { EmptyState } from "@astryxdesign/core/EmptyState";
 
 import { shouldHandleSpaClick } from "@/components/ModuleSwitcher";
 
-export function statusVariant(
-  status: string,
-): "neutral" | "info" | "success" | "warning" | "error" {
-  const normalized = status.toLowerCase();
-  if (["active", "available", "completed", "succeeded", "ready", "closed"].includes(normalized)) {
-    return "success";
-  }
-  if (["failed", "blocked", "rejected", "unavailable"].includes(normalized)) {
-    return "error";
-  }
-  if (
-    ["partial", "pilot", "queued", "running", "in_progress", "pending"].includes(
-      normalized,
-    )
-  ) {
-    return "warning";
-  }
-  if (["open", "draft", "foundation", "planned", "experimental"].includes(normalized)) {
-    return "info";
-  }
-  return "neutral";
+type StatusTone = "neutral" | "info" | "success" | "warning" | "error";
+
+const STATUS_PRESENTATION: Record<string, { label: string; tone: StatusTone }> = {
+  active: { label: "Active", tone: "success" },
+  available: { label: "Available", tone: "success" },
+  completed: { label: "Completed", tone: "success" },
+  succeeded: { label: "Succeeded", tone: "success" },
+  ready: { label: "Ready", tone: "success" },
+  submitted: { label: "Submitted", tone: "success" },
+  closed: { label: "Closed", tone: "neutral" },
+  cancelled: { label: "Cancelled", tone: "neutral" },
+  canceled: { label: "Cancelled", tone: "neutral" },
+  failed: { label: "Failed", tone: "error" },
+  blocked: { label: "Blocked", tone: "error" },
+  rejected: { label: "Rejected", tone: "error" },
+  unavailable: { label: "Unavailable", tone: "error" },
+  partial: { label: "Partial", tone: "warning" },
+  pilot: { label: "Pilot", tone: "warning" },
+  queued: { label: "Queued", tone: "info" },
+  running: { label: "Running", tone: "info" },
+  in_progress: { label: "In progress", tone: "info" },
+  pending: { label: "Pending", tone: "warning" },
+  review: { label: "Review", tone: "warning" },
+  adjudication_ready: { label: "Ready for adjudication", tone: "warning" },
+  open: { label: "Open", tone: "info" },
+  draft: { label: "Draft", tone: "neutral" },
+  foundation: { label: "Foundation", tone: "info" },
+  planned: { label: "Planned", tone: "neutral" },
+  experimental: { label: "Experimental", tone: "warning" },
+};
+
+const TERM_LABELS: Record<string, string> = {
+  conventional_ml: "Conventional ML",
+  llm_finetune: "LLM fine-tuning",
+  lora: "LoRA",
+  minio: "MinIO",
+  f1_macro: "F1 macro",
+  f1_micro: "F1 micro",
+};
+
+const ACRONYMS: Record<string, string> = {
+  api: "API", cpu: "CPU", csv: "CSV", f1: "F1", gpu: "GPU", id: "ID",
+  json: "JSON", jsonl: "JSONL", llm: "LLM", ml: "ML", ner: "NER", nlp: "NLP",
+  pmid: "PMID", pmc: "PMC", sha256: "SHA-256", tfidf: "TF-IDF", uri: "URI",
+};
+
+export function statusVariant(status: string): StatusTone {
+  return STATUS_PRESENTATION[status.trim().toLowerCase()]?.tone ?? "neutral";
 }
 
 export function formatStatus(value: string): string {
-  return value
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (letter: string) => letter.toUpperCase());
+  const normalized = value.trim().toLowerCase();
+  const knownLabel = STATUS_PRESENTATION[normalized]?.label ?? TERM_LABELS[normalized];
+  if (knownLabel) return knownLabel;
+  const words = normalized.replace(/_/g, " ").split(/\s+/);
+  return words.map((word, index) => ACRONYMS[word] ?? (index === 0
+    ? word.charAt(0).toUpperCase() + word.slice(1)
+    : word)).join(" ");
+}
+
+export function formatCount(count: number, singular: string, plural = `${singular}s`): string {
+  return `${count.toLocaleString()} ${count === 1 ? singular : plural}`;
+}
+
+export function formatPercent(value: number): string {
+  return new Intl.NumberFormat(undefined, { style: "percent", maximumFractionDigits: 1 }).format(value);
+}
+
+export function formatDateTime(value: string | null | undefined, fallback = "Not recorded"): string {
+  if (!value) return fallback;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? fallback : date.toLocaleString(undefined, {
+    dateStyle: "medium", timeStyle: "short",
+  });
 }
 
 export function shortHash(value: string | null | undefined): string {

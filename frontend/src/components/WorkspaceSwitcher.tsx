@@ -1,4 +1,8 @@
+import { NativeSelect } from "@/components/NativeField";
+import { useEffect, useState } from "react";
+
 import type { MeMembership } from "@/api/client";
+import { workspaceRoleLabel } from "@/lib/workspacePresentation";
 import { Button } from "@astryxdesign/core/Button";
 import { Plus } from "lucide-react";
 
@@ -9,18 +13,8 @@ interface WorkspaceSwitcherProps {
   onManageWorkspaces?: () => void;
   ariaLabel?: string;
 }
-
 export function workspaceMembershipLabel(membership: MeMembership): string {
-  const role =
-    membership.workspace_kind === "individual"
-      ? "Owner"
-      : membership.role === "trainer"
-        ? "Model Trainer"
-        : membership.role === "admin"
-          ? "Administrator"
-          : membership.role === "manager"
-            ? "Manager"
-            : "Annotator";
+  const role = workspaceRoleLabel(membership.role, membership.workspace_kind);
   return `${membership.workspace_name} · ${role}`;
 }
 
@@ -31,6 +25,11 @@ export default function WorkspaceSwitcher({
   onManageWorkspaces,
   ariaLabel = "Workspace",
 }: WorkspaceSwitcherProps): React.ReactElement | null {
+  const [selection, setSelection] = useState<{ activeId: number | null; selectedId: number } | null>(null);
+  const selectedId = selection?.activeId === activeWorkspaceId && memberships.some((membership) => membership.workspace_id === selection.selectedId)
+    ? selection.selectedId
+    : activeWorkspaceId;
+  useEffect(() => { setSelection(null); }, [activeWorkspaceId]);
   if (memberships.length === 0 || activeWorkspaceId === null) {
     return onManageWorkspaces ? (
       <Button
@@ -47,23 +46,27 @@ export default function WorkspaceSwitcher({
     <div className="workspace-switcher-group">
       <label className="workspace-switcher">
         <span>Workspace</span>
-        <select
+        <NativeSelect
           aria-label={ariaLabel}
-          value={activeWorkspaceId}
+          value={selectedId ?? activeWorkspaceId}
           disabled={memberships.length === 1}
-          onChange={(event) => onWorkspaceChange(Number(event.target.value))}
+          onChange={(event) => setSelection({ activeId: activeWorkspaceId, selectedId: Number(event.target.value) })}
         >
           {memberships.map((membership) => (
             <option key={membership.workspace_id} value={membership.workspace_id}>
               {workspaceMembershipLabel(membership)}
             </option>
           ))}
-        </select>
+        </NativeSelect>
       </label>
+      {selectedId !== null && selectedId !== activeWorkspaceId ? (
+        <Button label="Switch workspace" variant="primary" size="sm" onClick={() => onWorkspaceChange(selectedId)} />
+      ) : null}
       {onManageWorkspaces ? (
         <Button
           label="Add workspace"
           icon={<Plus size={16} aria-hidden="true" />}
+          tooltip="Manage workspaces"
           isIconOnly
           variant="ghost"
           size="sm"

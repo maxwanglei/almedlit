@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { publishSessionChange } from "@/auth/session";
 import SourceDatasetSetup from "./SourceDatasetSetup";
 import { createPaperEntityTaskVersionPayload } from "./paperTaskContracts";
+import type * as PlatformApi from "./api";
 import { EMPTY_PLATFORM_PROJECT_DATA, type DatasetVersion, type TaskVersion } from "./types";
 
 const mocks = vi.hoisted(() => ({ request: vi.fn(), task: vi.fn(), round: vi.fn() }));
@@ -54,7 +56,7 @@ describe("SourceDatasetSetup", () => {
     const user = userEvent.setup(); const navigate = vi.fn(); const task = classificationTask(31);
     const data = sourceData([task]);
     sessionStorage.setItem("al-medlit:source-setup:7:12", JSON.stringify({ datasetId: 12, version: data.datasetVersions[0], taskVersion: task, selectedTaskId: 31, roundId: 902, roundTaskVersionId: 31, roundDatasetVersionId: 13 }));
-    mocks.request.mockResolvedValue({ id: 902, status: "open" });
+    mocks.request.mockImplementation(async (path: string) => ({ id: 902, status: path.includes("/transition") ? "open" : "draft" }));
     render(<SourceDatasetSetup projectId={7} projectName="Tucatinib" data={data} datasetId={12} datasetVersionId={13} initialTaskVersionId={31} currentUserId={9} canAnnotate canInfer={false} onRefresh={async () => undefined} onNavigate={navigate} />);
     await user.click(screen.getByRole("button", { name: "Start annotating" }));
     expect(mocks.request).toHaveBeenCalledWith("/rounds/902/transition?project_id=7", expect.objectContaining({ body: JSON.stringify({ status: "open" }) }));
@@ -171,13 +173,13 @@ describe("SourceDatasetSetup", () => {
     await user.click(screen.getByRole("button", { name: "Import selected papers" }));
     await screen.findByText("Reloading project");
     await user.click(screen.getByRole("button", { name: "Finish project refresh" }));
-    expect(screen.getByRole("status", { name: "Source collection status" }).textContent).toContain("1 paper imported; 1 existing paper reused.");
+    expect(screen.getByRole("status", { name: "Source dataset status" }).textContent).toContain("1 paper imported; 1 existing paper reused.");
     expect(screen.getByText(/2 papers are ready/)).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Create source dataset" }));
     await screen.findByText("Reloading project");
     await user.click(screen.getByRole("button", { name: "Finish project refresh" }));
     expect(screen.getByRole("heading", { name: "Source dataset saved" })).toBeTruthy();
-    expect(screen.getByRole("status", { name: "Source collection status" }).textContent).toContain("Source dataset saved: Tucatinib papers · v1 · 2 papers");
+    expect(screen.getByRole("status", { name: "Source dataset status" }).textContent).toContain("Source dataset saved: Tucatinib papers · v1 · 2 papers");
     expect(screen.getByRole("button", { name: "Start annotating" })).toBeTruthy();
     expect(mocks.request).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole("button", { name: "Import selected papers" })).toBeNull();
@@ -222,4 +224,168 @@ describe("SourceDatasetSetup", () => {
     expect(screen.getByRole("option", { name: "Paper classifier · v1" })).toBeTruthy();
     expect((screen.getByLabelText("Annotation task") as HTMLSelectElement).value).toBe("31");
   });
+});
+
+it("recovers a saved parent after remount when the source snapshot failed", async () => {
+  const user = userEvent.setup();
+  mocks.request.mockImplementation(async (path: string) => {
+    if (path === "/datasets") return { id: 12 };
+    throw new Error("Snapshot offline");
+  });
+  const props = { projectId: 7, projectName: "Tucatinib", data: EMPTY_PLATFORM_PROJECT_DATA, currentUserId: 9, canAnnotate: true, canInfer: false, onRefresh: async () => undefined, onNavigate: vi.fn() };
+  const mounted = render(<SourceDatasetSetup {...props} />);
+  await user.click(screen.getByRole("button", { name: "Import selected papers" }));
+  await user.click(screen.getByRole("button", { name: "Create source dataset" }));
+  await screen.findByRole("alert");
+  mounted.unmount();
+  mocks.request.mockImplementation(async (path: string) => path === "/datasets" ? { id: 99 } : { id: 13, dataset_id: 12, version_number: 1, item_count: 2 });
+  render(<SourceDatasetSetup {...props} />);
+  await user.click(screen.getByRole("button", { name: "Create source dataset" }));
+  await screen.findByRole("button", { name: "Start annotating" });
+  expect(mocks.request.mock.calls.filter(([path]) => path === "/datasets")).toHaveLength(1);
+});
+it("reconciles an already opened recovered round without repeating its transition", async () => {
+  const user = userEvent.setup(); const navigate = vi.fn(); const task = classificationTask(31); const data = sourceData([task]);
+  sessionStorage.setItem("al-medlit:source-setup:7:12", JSON.stringify({ datasetId: 12, version: data.datasetVersions[0], taskVersion: task, selectedTaskId: 31, roundId: 902, roundTaskVersionId: 31, roundDatasetVersionId: 13 }));
+  mocks.request.mockResolvedValue({ id: 902, project_id: 7, task_version_id: 31, dataset_version_id: 13, status: "open" });
+  render(<SourceDatasetSetup projectId={7} projectName="Tucatinib" data={data} datasetId={12} datasetVersionId={13} initialTaskVersionId={31} currentUserId={9} canAnnotate canInfer={false} onRefresh={async () => undefined} onNavigate={navigate} />);
+  await user.click(screen.getByRole("button", { name: "Start annotating" }));
+  await waitFor(() => expect(navigate).toHaveBeenCalledWith("/my-work/rounds/902?view=annotate"));
+  expect(mocks.request).toHaveBeenCalledWith("/rounds/902");
+  expect(mocks.request.mock.calls.some(([path]) => String(path).includes("/transition"))).toBe(false);
+});
+it("bounds an automatic round name to the backend limit", async () => {
+  const user = userEvent.setup(); const data = sourceData([classificationTask(31)]);
+  data.datasets[0].name = "P".repeat(255);
+  mocks.round.mockResolvedValue({ id: 901 });
+  render(<SourceDatasetSetup projectId={7} projectName="Papers" data={data} datasetId={12} datasetVersionId={13} initialTaskVersionId={31} currentUserId={9} canAnnotate canInfer={false} onRefresh={async () => undefined} onNavigate={vi.fn()} />);
+  await user.click(screen.getByRole("button", { name: "Start annotating" }));
+  expect(mocks.round.mock.calls[0][1].name.length).toBeLessThanOrEqual(255);
+});
+
+it("persists a task version that finishes after its setup unmounts", async () => {
+  const user = userEvent.setup();
+  let finish: (task: TaskVersion) => void = () => { throw new Error("Task request was not started"); };
+  mocks.task.mockImplementation(() => new Promise<TaskVersion>((resolve) => { finish = resolve; }));
+  mocks.round.mockResolvedValue({ id: 901 });
+  const props = { projectId: 7, projectName: "Papers", data: sourceData(), datasetId: 12, datasetVersionId: 13, currentUserId: 9, canAnnotate: true, canInfer: false, onRefresh: async () => undefined, onNavigate: vi.fn() };
+  const mounted = render(<SourceDatasetSetup {...props} />);
+  await user.type(screen.getByLabelText("Labels"), "relevant, irrelevant");
+  await user.click(screen.getByRole("button", { name: "Start annotating" }));
+  mounted.unmount();
+  await act(async () => { finish(classificationTask(31)); });
+  render(<SourceDatasetSetup {...props} />);
+  await user.click(screen.getByRole("button", { name: "Start annotating" }));
+  expect(mocks.task).toHaveBeenCalledTimes(1);
+  expect(mocks.round).toHaveBeenCalledWith(7, expect.objectContaining({ taskVersionId: 31 }), expect.any(Function));
+});
+
+it("does not restore a source draft or create its snapshot when the parent finishes after logout", async () => {
+  const user = userEvent.setup();
+  let finish: (value: { id: number }) => void = () => { throw new Error("Dataset request was not started"); };
+  mocks.request.mockImplementation(() => new Promise<{ id: number }>((resolve) => { finish = resolve; }));
+  const onRefresh = vi.fn();
+  const onNavigate = vi.fn();
+  const mounted = render(<SourceDatasetSetup projectId={7} projectName="Papers" data={EMPTY_PLATFORM_PROJECT_DATA} currentUserId={9} canAnnotate canInfer={false} onRefresh={onRefresh} onNavigate={onNavigate} />);
+  await user.click(screen.getByRole("button", { name: "Import selected papers" }));
+  await user.click(screen.getByRole("button", { name: "Create source dataset" }));
+  publishSessionChange(false);
+  mounted.unmount();
+  await act(async () => { finish({ id: 12 }); });
+  expect(sessionStorage.getItem("al-medlit:source-setup:7:new")).toBeNull();
+  expect(sessionStorage.getItem("al-medlit:source-setup:7:12")).toBeNull();
+  expect(mocks.request).toHaveBeenCalledTimes(1);
+  expect(onRefresh).not.toHaveBeenCalled();
+  expect(onNavigate).not.toHaveBeenCalled();
+});
+
+it("does not restore a source draft when its snapshot finishes after logout", async () => {
+  const user = userEvent.setup();
+  let finish: (value: DatasetVersion) => void = () => { throw new Error("Snapshot request was not started"); };
+  mocks.request.mockImplementation((path: string) => path === "/datasets" ? Promise.resolve({ id: 12 }) : new Promise<DatasetVersion>((resolve) => { finish = resolve; }));
+  const onRefresh = vi.fn();
+  const onNavigate = vi.fn();
+  const mounted = render(<SourceDatasetSetup projectId={7} projectName="Papers" data={sourceData()} currentUserId={9} canAnnotate canInfer={false} onRefresh={onRefresh} onNavigate={onNavigate} />);
+  await user.click(screen.getByRole("button", { name: "Import selected papers" }));
+  await user.click(screen.getByRole("button", { name: "Create source dataset" }));
+  await waitFor(() => expect(mocks.request).toHaveBeenCalledTimes(2));
+  publishSessionChange(false);
+  mounted.unmount();
+  const source = sourceData().datasetVersions[0];
+  if (!source) throw new Error("Fixture requires source version");
+  await act(async () => { finish(source); });
+  expect(sessionStorage.getItem("al-medlit:source-setup:7:new")).toBeNull();
+  expect(sessionStorage.getItem("al-medlit:source-setup:7:12")).toBeNull();
+  expect(onRefresh).not.toHaveBeenCalled();
+  expect(onNavigate).not.toHaveBeenCalled();
+});
+
+it("stops task creation after a definition finishes in an obsolete session", async () => {
+  const user = userEvent.setup();
+  const actualApi = await vi.importActual<typeof PlatformApi>("./api");
+  mocks.task.mockImplementation(actualApi.createTaskWithVersion);
+  let finish: (value: { id: number }) => void = () => { throw new Error("Task request was not started"); };
+  mocks.request.mockImplementation(() => new Promise<{ id: number }>((resolve) => { finish = resolve; }));
+  const mounted = render(<SourceDatasetSetup projectId={7} projectName="Papers" data={sourceData()} datasetId={12} datasetVersionId={13} currentUserId={9} canAnnotate canInfer={false} onRefresh={vi.fn()} onNavigate={vi.fn()} />);
+  await user.type(screen.getByLabelText("Labels"), "relevant, irrelevant");
+  await user.click(screen.getByRole("button", { name: "Start annotating" }));
+  publishSessionChange(false);
+  mounted.unmount();
+  await act(async () => { finish({ id: 21 }); });
+  expect(sessionStorage.getItem("al-medlit:source-setup:7:12")).toBeNull();
+  expect(mocks.request).toHaveBeenCalledTimes(1);
+  expect(mocks.round).not.toHaveBeenCalled();
+});
+
+it("does not overwrite the new session's draft when an old task version finishes", async () => {
+  const user = userEvent.setup();
+  const actualApi = await vi.importActual<typeof PlatformApi>("./api");
+  mocks.task.mockImplementation(actualApi.createTaskWithVersion);
+  let finish: (value: TaskVersion) => void = () => { throw new Error("Task version request was not started"); };
+  mocks.request.mockImplementation((path: string) => path === "/tasks" ? Promise.resolve({ id: 21 }) : new Promise<TaskVersion>((resolve) => { finish = resolve; }));
+  const onNavigate = vi.fn();
+  const mounted = render(<SourceDatasetSetup projectId={7} projectName="Papers" data={sourceData()} datasetId={12} datasetVersionId={13} currentUserId={9} canAnnotate canInfer={false} onRefresh={vi.fn()} onNavigate={onNavigate} />);
+  await user.type(screen.getByLabelText("Labels"), "relevant, irrelevant");
+  await user.click(screen.getByRole("button", { name: "Start annotating" }));
+  await waitFor(() => expect(mocks.request).toHaveBeenCalledTimes(2));
+  publishSessionChange(false);
+  mounted.unmount();
+  sessionStorage.setItem("al-medlit:source-setup:7:12", "new session's source draft");
+  await act(async () => { finish(classificationTask(31)); });
+  expect(sessionStorage.getItem("al-medlit:source-setup:7:12")).toBe("new session's source draft");
+  expect(mocks.round).not.toHaveBeenCalled();
+  expect(onNavigate).not.toHaveBeenCalled();
+});
+
+it("stops a newly created round before transition when its session has ended", async () => {
+  const user = userEvent.setup();
+  const actualApi = await vi.importActual<typeof PlatformApi>("./api");
+  mocks.round.mockImplementation(actualApi.createRound);
+  let finish: (value: { id: number }) => void = () => { throw new Error("Round request was not started"); };
+  mocks.request.mockImplementation(() => new Promise<{ id: number }>((resolve) => { finish = resolve; }));
+  const onNavigate = vi.fn();
+  const mounted = render(<SourceDatasetSetup projectId={7} projectName="Papers" data={sourceData([classificationTask(31)])} datasetId={12} datasetVersionId={13} initialTaskVersionId={31} currentUserId={9} canAnnotate canInfer={false} onRefresh={vi.fn()} onNavigate={onNavigate} />);
+  await user.click(screen.getByRole("button", { name: "Start annotating" }));
+  publishSessionChange(false);
+  mounted.unmount();
+  await act(async () => { finish({ id: 901 }); });
+  expect(sessionStorage.getItem("al-medlit:source-setup:7:12")).toBeNull();
+  expect(mocks.request).toHaveBeenCalledTimes(1);
+  expect(onNavigate).not.toHaveBeenCalled();
+});
+
+it("preserves a new session's draft when navigation changes the session after a save", async () => {
+  const user = userEvent.setup();
+  mocks.request.mockImplementation(async (path: string) => path === "/datasets" ? { id: 12 } : { id: 13, dataset_id: 12, version_number: 1, item_count: 2 });
+  const onRefresh = vi.fn();
+  const onNavigate = vi.fn(() => {
+    publishSessionChange(false);
+    sessionStorage.setItem("al-medlit:source-setup:7:new", "new session's source draft");
+  });
+  render(<SourceDatasetSetup projectId={7} projectName="Papers" data={EMPTY_PLATFORM_PROJECT_DATA} currentUserId={9} canAnnotate canInfer={false} onRefresh={onRefresh} onNavigate={onNavigate} />);
+  await user.click(screen.getByRole("button", { name: "Import selected papers" }));
+  await user.click(screen.getByRole("button", { name: "Create source dataset" }));
+  await waitFor(() => expect(onNavigate).toHaveBeenCalled());
+  expect(sessionStorage.getItem("al-medlit:source-setup:7:new")).toBe("new session's source draft");
+  expect(onRefresh).not.toHaveBeenCalled();
 });

@@ -4,42 +4,37 @@ import { Banner } from "@astryxdesign/core/Banner";
 import { ClickableCard } from "@astryxdesign/core/ClickableCard";
 
 import { setWorkspaceCapability } from "@/api/client";
+import { WORKSPACE_PRESET_LABELS, type WorkspacePreset } from "@/lib/workspacePresentation";
 
-const TEAM_PRESETS: { key: string; label: string; blurb: string }[] = [
-  { key: "annotate", label: "Annotate", blurb: "Just annotation. The lightest setup." },
+const TEAM_PRESETS: { key: WorkspacePreset; blurb: string }[] = [
+  { key: "annotate", blurb: "Just annotation. The lightest setup." },
   {
     key: "train",
-    label: "Train Models",
     blurb: "Independent training and model registry without annotation.",
   },
-  { key: "annotate_train", label: "Annotate + Train", blurb: "Annotate and train models." },
+  { key: "annotate_train", blurb: "Annotate and train models." },
   {
     key: "annotate_train_al",
-    label: "+ Active Learning",
     blurb: "Enable the planned active-learning capability.",
   },
-  { key: "full", label: "Full", blurb: "Everything your deployment supports." },
+  { key: "full", blurb: "Everything your deployment supports." },
 ];
 
-const PERSONAL_PRESETS: { key: string; label: string; blurb: string }[] = [
+const PERSONAL_PRESETS: { key: WorkspacePreset; blurb: string }[] = [
   {
     key: "annotate",
-    label: "Start Annotating",
     blurb: "Private projects, PMID import, and your My Work queue.",
   },
   {
     key: "annotate_train",
-    label: "Annotate + Train",
     blurb: "Add model-training tools after you build a labeled set.",
   },
   {
     key: "train",
-    label: "Train Models",
     blurb: "Use uploaded or public datasets without enabling annotation.",
   },
   {
     key: "full",
-    label: "Full Research Loop",
     blurb: "Enable every available tool for an advanced solo workflow.",
   },
 ];
@@ -95,13 +90,13 @@ export default function OnboardingPresetPicker({
           {presets.map((preset, index) => (
             <ClickableCard
               key={preset.key}
-              label={preset.label}
+              label={WORKSPACE_PRESET_LABELS[preset.key]}
               isDisabled={busy}
               onClick={() => void choose(preset.key)}
               className={index === 0 && isPersonalWorkspace ? "preset-card recommended" : "preset-card"}
             >
               {index === 0 && isPersonalWorkspace ? <small>Recommended</small> : null}
-              <strong>{preset.label}</strong>
+              <strong>{WORKSPACE_PRESET_LABELS[preset.key]}</strong>
               <span>{preset.blurb}</span>
             </ClickableCard>
           ))}

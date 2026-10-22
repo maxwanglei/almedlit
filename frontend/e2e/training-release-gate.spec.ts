@@ -61,10 +61,10 @@ test("individual owner completes standalone public-dataset training with immutab
   await expect(
     page.getByRole("heading", { level: 1, name: "Training data" }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Source datasets", exact: true }).click();
+  await page.getByRole("tab", { name: "Source datasets", exact: true }).click();
   await page.getByRole("button", { name: "Import source data", exact: true }).first().click();
 
-  let dialog = page.getByRole("dialog", { name: "Add dataset version" });
+  let dialog = page.getByRole("dialog", { name: "Import source data" });
   await dialog.getByRole("textbox", { name: "Name" }).fill(
     "IMDb pinned benchmark",
   );
@@ -96,8 +96,8 @@ test("individual owner completes standalone public-dataset training with immutab
     name: "Dataset registry table",
   });
   await expect(datasetRegistry).toContainText("IMDb pinned benchmark");
-  await expect(datasetRegistry).toContainText("Public Registry");
-  await expect(datasetRegistry).toContainText("50000");
+  await expect(datasetRegistry).toContainText("Public registry");
+  await expect(datasetRegistry).toContainText("50,000");
 
   await page.getByRole("button", { name: "Define task" }).click();
   dialog = page.getByRole("dialog", { name: "Define NLP task" });
@@ -134,8 +134,8 @@ test("individual owner completes standalone public-dataset training with immutab
   );
   await preparation.getByRole("button", { name: "Preview training dataset" }).click();
   const preview = page.getByRole("region", { name: "Training dataset preview" });
-  await expect(preview).toContainText("50000 records");
-  await expect(preview).toContainText("train: 40000 · validation: 5000 · test: 5000");
+  await expect(preview).toContainText("50,000 records");
+  await expect(preview).toContainText("train: 40,000 · validation: 5,000 · test: 5,000");
   await preview.getByRole("button", { name: "Create training dataset", exact: true }).click();
 
   const trainingDatasets = page.getByRole("region", { name: "Training datasets", exact: true });
@@ -146,7 +146,7 @@ test("individual owner completes standalone public-dataset training with immutab
 
   await expect(
     page.getByRole("button", {
-      name: "Step 1 of 5: Task & Data",
+      name: "Step 1 of 5: Task & data",
       exact: true,
     }),
   ).toHaveAttribute("aria-current", "step");
@@ -182,7 +182,7 @@ test("individual owner completes standalone public-dataset training with immutab
   ).toHaveValue("test");
   await page.getByRole("button", { name: "Continue" }).click();
 
-  await expect(page.getByText("Review & Launch", { exact: true })).toBeVisible();
+  await expect(page.getByText("Review", { exact: true })).toBeVisible();
   await expect(page.getByText("IMDb sentiment linear", { exact: true }))
     .toBeVisible();
   await expect(

@@ -1,3 +1,4 @@
+import { formatTaskKind } from "@/lib/taskPresentation";
 import { useState } from "react";
 
 import type { ProjectTask } from "@/types/api";
@@ -62,7 +63,7 @@ export default function AnnotateScreen({
   return (
     <div className="platform-page">
       <PlatformPageHeader
-        title={showingTasks ? "Tasks" : "Team & Rounds"}
+        title={showingTasks ? "Tasks" : "Team & rounds"}
         description={
           showingTasks
             ? "Manage annotation tasks and start work on a saved source collection."
@@ -130,7 +131,7 @@ export default function AnnotateScreen({
                       <tr key={version.id}>
                         <td><strong>{task.name}</strong></td>
                         <td>v{version.version_number}{index > 0 ? " · Previous version" : " · Current"}</td>
-                        <td>{version.annotation_ui?.preset === "document_entities" ? "Named entities (NER)" : version.task_kind === "token_labeling" ? "Token labeling (tokenized data)" : version.task_kind.replace(/_/g, " ")}</td>
+                        <td>{formatTaskKind(version.task_kind, version.annotation_ui?.preset)}</td>
                         <td>{version.metrics.join(", ") || "Not set"}</td>
                         <td>{data.rounds.filter((round) => round.task_version_id === version.id && round.status === "open" && (round.open_to_all_annotators || (currentUserId !== null && round.annotator_user_ids.includes(currentUserId)))).map((round) => <button key={round.id} type="button" className="platform-text-action" onClick={() => onOpenRound(round.id)}>Continue {task.name} · {round.name}</button>)}
                           {canManage && onSetupTask ? <button type="button" className="platform-text-action" onClick={() => onSetupTask(version.id)}>Set up {task.name}{index > 0 ? ` · v${version.version_number}` : ""}</button> : null}
@@ -192,11 +193,11 @@ export default function AnnotateScreen({
                       <td data-label="Status" data-priority="status">
                         <PlatformStatus value={round.status} />
                       </td>
-                      <td data-label="Dataset">v{round.dataset_version_id}</td>
-                      <td data-label="Task">v{round.task_version_id}</td>
+                      <td data-label="Dataset">{data.datasetVersions.find((version) => version.id === round.dataset_version_id) ? `v${data.datasetVersions.find((version) => version.id === round.dataset_version_id)?.version_number}` : "Version unavailable"}</td>
+                      <td data-label="Task">{data.taskVersions.find((version) => version.id === round.task_version_id) ? `v${data.taskVersions.find((version) => version.id === round.task_version_id)?.version_number}` : "Version unavailable"}</td>
                       <td data-label="Guideline">
                         {round.guideline_revision_id
-                          ? `v${round.guideline_revision_id}`
+                          ? data.guidelineRevisions.find((revision) => revision.id === round.guideline_revision_id) ? `Revision ${data.guidelineRevisions.find((revision) => revision.id === round.guideline_revision_id)?.version_number}` : "Revision unavailable"
                           : "Not pinned"}
                       </td>
                       <td data-label="Reason">{round.reason ?? "Initial annotation"}</td>

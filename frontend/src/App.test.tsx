@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
 import { ApiError } from "@/api/client";
-import { publishSessionChange, subscribeSessionChanges } from "@/auth/session";
+import { publishMembershipChange, publishSessionChange, subscribeSessionChanges } from "@/auth/session";
 import { clearPreloadError, registerPreloadErrorHandler } from "@/lib/preloadErrorRecovery";
 
 const mocks = vi.hoisted(() => {
@@ -215,9 +215,11 @@ vi.mock("@/platform/RoundWorkbench", () => ({
   default: ({
     round,
     task,
+    onRefresh,
   }: {
     round: { id: number; name: string };
     task: { id: number; name?: string };
+    onRefresh: () => Promise<void>;
   }) => (
     <main
       id="main-content"
@@ -226,6 +228,7 @@ vi.mock("@/platform/RoundWorkbench", () => ({
       data-task-version-id={task.id}
     >
       <h1>{round.name}</h1>
+      <button onClick={() => void onRefresh()}>Refresh round</button>
     </main>
   ),
 }));
@@ -590,6 +593,7 @@ describe("App screen error recovery", () => {
     mocks.renderFailures.annotator = false;
 
     fireEvent.change(screen.getByLabelText("Workspace"), { target: { value: "20" } });
+    fireEvent.click(screen.getByRole("button", { name: "Switch workspace" }));
 
     expect(await screen.findByLabelText("Mock annotator workspace")).toBeTruthy();
     expect((screen.getByLabelText("Workspace") as HTMLSelectElement).value).toBe("20");
@@ -677,7 +681,7 @@ describe("App session probe recovery", () => {
         annotation_validation_mode: "relaxed" }],
     });
     render(<App />);
-    await screen.findByText("Project not found.");
+    await screen.findByRole("heading", { name: "Project not found" });
     expect(mocks.projectState.setSelectedProjectId).not.toHaveBeenCalledWith(999);
     expect(mocks.projectState.loadProjectData).not.toHaveBeenCalledWith(999, false, "all");
     expect(mocks.projectState.selectedProjectId).toBe(81);
@@ -872,6 +876,7 @@ describe("App project platform load recovery", () => {
     setPlatformState({ projectId: 81, loading: false, error: null });
     render(<App />);
     await screen.findByLabelText("Mock project platform");
+    await waitForPlatformRequest();
     fireEvent.click(screen.getByRole("button", { name: "Refresh mock evidence" }));
 
     await waitFor(() => expect(mocks.projectState.loadProjectData).toHaveBeenCalledWith(81, true, "all"));
@@ -1064,6 +1069,7 @@ describe("App workspace selection", () => {
     expect((selector as HTMLSelectElement).value).toBe("10");
 
     fireEvent.change(selector, { target: { value: "20" } });
+    fireEvent.click(screen.getByRole("button", { name: "Switch workspace" }));
 
     await waitFor(() =>
       expect((screen.getByLabelText("Workspace") as HTMLSelectElement).value).toBe("20"),
@@ -1074,6 +1080,34 @@ describe("App workspace selection", () => {
     expect(mocks.getWorkspaceCapabilities).toHaveBeenCalledWith(10);
     expect(mocks.getWorkspaceCapabilities).toHaveBeenCalledWith(20);
     expect(mocks.getMe).toHaveBeenCalledTimes(2);
+  });
+
+  it("switches memberships even when the browser cannot save the workspace preference", async () => {
+    render(<App />);
+    const selector = await screen.findByLabelText("Workspace");
+    const original = Storage.prototype.setItem;
+    const denied = vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
+      if (key.startsWith("al_medlit_active_workspace:")) throw new Error("Storage denied");
+      return original.call(this, key, value);
+    });
+    try {
+      fireEvent.change(selector, { target: { value: "20" } });
+      const confirm = screen.queryByRole("button", { name: "Switch workspace" });
+      if (confirm) fireEvent.click(confirm);
+      await waitFor(() => expect(mocks.getWorkspaceCapabilities).toHaveBeenCalledWith(20));
+      expect(screen.getByLabelText("Workspace")).toHaveProperty("value", "20");
+    } finally { denied.mockRestore(); }
+  });
+
+  it("refreshes membership changes without resetting open workspace state", async () => {
+    render(<App />);
+    await screen.findByLabelText("Mock annotator workspace");
+    mocks.getMe.mockClear();
+    act(() => publishMembershipChange());
+    await waitFor(() => expect(mocks.getMe).toHaveBeenCalledOnce());
+    expect(mocks.projectState.reset).not.toHaveBeenCalled();
+    expect(mocks.evidenceState.reset).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Mock annotator workspace")).toBeTruthy();
   });
 
   it("does not expose a transient not-found route while workspace capabilities load", async () => {
@@ -1115,6 +1149,7 @@ describe("App workspace selection", () => {
     fireEvent.change(screen.getByLabelText("Workspace"), {
       target: { value: "20" },
     });
+    fireEvent.click(screen.getByRole("button", { name: "Switch workspace" }));
 
     expect(await screen.findByText("Loading workspace…")).toBeTruthy();
     expect(window.location.pathname).toBe("/projects");
@@ -1319,7 +1354,7 @@ describe("App workspace selection", () => {
         (name) => screen.getByRole("link", { name }).getAttribute("href"),
       ),
     ).toEqual(["/my-work", "/projects", "/training", "/models"]);
-    expect(screen.queryByRole("link", { name: "Workspace Settings" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Workspace settings" })).toBeNull();
     expect(screen.queryByRole("link", { name: "Administration" })).toBeNull();
   });
 
@@ -1346,7 +1381,7 @@ describe("App workspace selection", () => {
     expect(window.location.hash).toBe("#metrics");
   });
 
-  it("updates route feedback and focus for query and hash history", async () => {
+  it("preserves focus and announcements for query and hash history", async () => {
     window.history.replaceState(
       null,
       "",
@@ -1367,13 +1402,14 @@ describe("App workspace selection", () => {
       expect(document.title).toBe("Training | AL-MedLit");
       expect(
         screen.getByText(
-          "Training loaded. Status queued. Section runs.",
+          "Training loaded.",
         ),
       ).toBeTruthy();
       expect(document.activeElement).toBe(heading);
     });
 
-    screen.getByRole("link", { name: "Training" }).focus();
+    const trainingLink = screen.getByRole("link", { name: "Training" });
+    trainingLink.focus();
     document.title = "Stale title";
     act(() => {
       window.history.pushState(
@@ -1389,10 +1425,10 @@ describe("App workspace selection", () => {
       expect(document.title).toBe("Training | AL-MedLit");
       expect(
         screen.getByText(
-          "Training loaded. Status running. Section metrics.",
+          "Training loaded.",
         ),
       ).toBeTruthy();
-      expect(document.activeElement).toBe(heading);
+      expect(document.activeElement).toBe(trainingLink);
     });
 
     screen.getByRole("link", { name: "Training" }).focus();
@@ -1405,10 +1441,10 @@ describe("App workspace selection", () => {
       expect(document.title).toBe("Training | AL-MedLit");
       expect(
         screen.getByText(
-          "Training loaded. Status queued. Section runs.",
+          "Training loaded.",
         ),
       ).toBeTruthy();
-      expect(document.activeElement).toBe(heading);
+      expect(document.activeElement).toBe(trainingLink);
     });
   });
 
@@ -1588,7 +1624,7 @@ describe("App workspace selection", () => {
         "aria-current",
       ),
     ).toBe("page");
-    expect(screen.getByRole("link", { name: "Workspace Settings" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Workspace settings" })).toBeTruthy();
   });
 
   it("resolves a direct assigned-round URL to its owning project", async () => {
@@ -1676,6 +1712,44 @@ describe("App workspace selection", () => {
         ([projectId, , enabled]) => projectId !== null || enabled === true,
       ),
     ).toBe(false);
+  });
+
+  it("retains the round queue while navigating between My Work and a round", async () => {
+    window.history.replaceState(null, "", "/my-work");
+    render(<App />);
+    await screen.findByLabelText("Mock annotator workspace");
+    await waitFor(() => expect(mocks.listWorkspaceRoundWorkContexts).toHaveBeenCalledTimes(1));
+    act(() => {
+      window.history.pushState(null, "", "/my-work/rounds/71");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await screen.findByLabelText("Mock round workbench");
+    act(() => {
+      window.history.pushState(null, "", "/my-work");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await screen.findByLabelText("Mock annotator workspace");
+    expect(mocks.listWorkspaceRoundWorkContexts).toHaveBeenCalledTimes(1);
+  });
+
+  it("removes a closed round from the retained queue after a round refresh", async () => {
+    const context = await mocks.getRoundWorkContext(71);
+    mocks.getRoundWorkContext.mockClear();
+    mocks.listWorkspaceRoundWorkContexts.mockResolvedValue([context]);
+    window.history.replaceState(null, "", "/my-work/rounds/71");
+    render(<App />);
+    await screen.findByLabelText("Mock round workbench");
+    await waitFor(() => expect(mocks.listWorkspaceRoundWorkContexts).toHaveBeenCalledTimes(1));
+    mocks.getRoundWorkContext.mockResolvedValue({ ...context, round: { ...context.round, status: "closed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh round" }));
+    await waitFor(() => expect(mocks.getRoundWorkContext).toHaveBeenCalledTimes(2));
+    await act(async () => { await Promise.resolve(); });
+    act(() => {
+      window.history.pushState(null, "", "/my-work");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    expect((await screen.findByLabelText("Mock annotator workspace")).getAttribute("data-round-contexts")).toBe("");
+    expect(mocks.listWorkspaceRoundWorkContexts).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the real system administration URL and location state for superusers", async () => {

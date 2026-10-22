@@ -32,10 +32,10 @@ test("cold login returns to the complete deep link", async ({ page }) => {
 test("a rejected invite password does not log out another tab", async ({ page, context }) => {
   await installPlatformApiMock(page);
   await page.route("**/api/auth/me", (route) => respond(route, { detail: "Sign in required" }, 401));
-  await page.route("**/api/invites/browser-invite", (route) => respond(route, {
+  await page.route("**/api/invites/preview", (route) => respond(route, {
     workspace_name: "Invited team", role: "annotator", expires_at: "2099-01-01T00:00:00Z",
   }));
-  await page.route("**/api/invites/browser-invite/accept", (route) =>
+  await page.route("**/api/invites/accept", (route) =>
     respond(route, { detail: "Invalid username or password" }, 401));
   await page.goto("/invites/browser-invite");
   await page.getByRole("button", { name: "Use an existing account" }).click();

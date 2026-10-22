@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -90,6 +90,62 @@ afterEach(() => {
 });
 
 describe("WorkspaceSettings", () => {
+  it("uses sentence-case preset and role labels without status styling", async () => {
+    vi.mocked(getWorkspaceCapabilities).mockResolvedValueOnce({
+      preset: "annotate", overrides: [], effective: ["annotation"],
+      blocked: { active_learning: "This capability is planned." },
+    });
+    vi.mocked(listWorkspaceInvites).mockResolvedValueOnce([{
+      id: 31, workspace_id: 4, role: "trainer", created_by: 7,
+      created_by_username: "owner", expires_at: "2026-08-07T12:00:00Z",
+      created_at: "2026-07-31T12:00:00Z",
+    }]);
+    render(<WorkspaceSettings workspaceId={4} workspaceName="Research team"
+      workspaceKind="team" currentUserId={7} onManageWorkspaces={vi.fn()}
+      onCapabilitiesChanged={vi.fn()} />);
+
+    const preset = await screen.findByRole("combobox", { name: /Capability preset/ });
+    expect(within(preset).getAllByRole("option").map((option) => option.textContent)).toEqual([
+      "Annotate", "Train models", "Annotate and train",
+      "Annotate and train with active learning", "Full",
+    ]);
+    const capabilities = screen.getByLabelText("Effective capabilities");
+    expect(capabilities.textContent).toContain("Annotation");
+    expect(capabilities.textContent).toContain("Active learning unavailable");
+    expect(capabilities.textContent).toContain("This capability is planned.");
+    expect(capabilities.querySelector(".platform-status")).toBeNull();
+    expect(screen.getByRole("cell", { name: "Model trainer" }).querySelector(".platform-status")).toBeNull();
+    expect(screen.getByRole("cell", { name: "Active" }).querySelector(".platform-status")).not.toBeNull();
+  });
+
+  it("shows each member's actual role in an individual workspace", async () => {
+    const [owner] = await listWorkspaceMembers(4);
+    vi.mocked(listWorkspaceMembers).mockResolvedValueOnce([
+      owner, { ...owner, id: 2, user_id: 8, username: "trainer", display_name: "Researcher", role: "trainer" },
+    ]);
+    render(<WorkspaceSettings workspaceId={4} workspaceName="Personal"
+      workspaceKind="individual" currentUserId={7} onManageWorkspaces={vi.fn()}
+      onCapabilitiesChanged={vi.fn()} />);
+
+    expect(await screen.findByRole("cell", { name: "Owner" })).toBeTruthy();
+    expect(screen.getByRole("cell", { name: "Model trainer" })).toBeTruthy();
+  });
+
+  it.each([
+    [1, "1 minute"], [2, "2 minutes"], [60, "1 hour"], [120, "2 hours"],
+    [1440, "1 day"], [2880, "2 days"],
+  ])("formats a default invitation expiry of %s minutes as %s", async (minutes, label) => {
+    vi.mocked(getWorkspaceGovernance).mockResolvedValueOnce({
+      workspace_id: 4, workspace_kind: "team", join_code: "join-abc",
+      default_invite_expiry_minutes: minutes,
+    });
+    render(<WorkspaceSettings workspaceId={4} workspaceName="Research team"
+      workspaceKind="team" currentUserId={7} onManageWorkspaces={vi.fn()}
+      onCapabilitiesChanged={vi.fn()} />);
+
+    expect(await screen.findByRole("option", { name: `Instance default (${label})` })).toBeTruthy();
+  });
+
   it("cannot overwrite capabilities after their initial load fails", async () => {
     vi.mocked(getWorkspaceCapabilities).mockRejectedValueOnce(new Error("Connection lost"));
     render(<WorkspaceSettings workspaceId={4} workspaceName="Research team"
@@ -288,4 +344,11 @@ describe("WorkspaceSettings", () => {
     expect(screen.getByText("New Workspace Owner")).toBeTruthy();
     expect(screen.queryByText("Old Workspace Owner")).toBeNull();
   });
+});
+
+it("does not label an individual workspace member as owner when their role is trainer", async () => {
+  vi.mocked(listWorkspaceMembers).mockResolvedValue([{ id: 1, workspace_id: 4, user_id: 7, username: "trainer", display_name: "Trainer", email: null, is_active: true, role: "trainer" }]);
+  render(<WorkspaceSettings workspaceId={4} workspaceName="Research" workspaceKind="individual" currentUserId={7} onCapabilitiesChanged={vi.fn()} onManageWorkspaces={vi.fn()} />);
+  expect(await screen.findByRole("cell", { name: "Model trainer" })).toBeTruthy();
+  expect(screen.queryByRole("cell", { name: "Owner" })).toBeNull();
 });

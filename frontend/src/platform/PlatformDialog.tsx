@@ -1,3 +1,6 @@
+import { formatTaskKind } from "@/lib/taskPresentation";
+import { NativeInput, NativeSelect, NativeTextarea } from "@/components/NativeField";
+import ValidatedForm from "@/components/ValidatedForm";
 import { useId, useMemo, useState } from "react";
 import { Button } from "@astryxdesign/core/Button";
 import {
@@ -13,6 +16,7 @@ import {
 import DialogFrame from "@/components/DialogFrame";
 
 import { validateDatasetDraft, validateTaskDraft } from "./api";
+import { formatCount, formatStatus } from "./components";
 import type {
   CycleDraft,
   DatasetDraft,
@@ -37,6 +41,7 @@ interface PlatformDialogProps {
   initialTaskVersionId?: number | null;
   currentUserId?: number | null;
   isPersonalWorkspace?: boolean;
+  taskPurpose?: "annotation" | "training";
   onClose: () => void;
   onCreateDataset: (draft: DatasetDraft) => Promise<void>;
   onCreateCycle: (draft: CycleDraft) => Promise<void>;
@@ -58,7 +63,7 @@ const ICONS = {
 };
 
 const TITLES = {
-  dataset: "Add dataset version",
+  dataset: "Import source data",
   task: "Define NLP task",
   trainingData: "Prepare training data",
   cycle: "Start learning cycle",
@@ -76,6 +81,7 @@ export default function PlatformDialog({
   initialTaskVersionId,
   currentUserId,
   isPersonalWorkspace = false,
+  taskPurpose = "annotation",
   onClose,
   onCreateDataset,
   onCreateCycle,
@@ -125,6 +131,7 @@ export default function PlatformDialog({
         </div>
         <Button
           label="Close"
+          tooltip="Close dialog"
           icon={<X size={17} />}
           isIconOnly
           variant="ghost"
@@ -139,7 +146,7 @@ export default function PlatformDialog({
         })} />
       ) : null}
       {kind === "task" ? (
-        <TaskForm busy={busy} onSubmit={(draft) => submit(() => {
+        <TaskForm busy={busy} purpose={taskPurpose} onSubmit={(draft) => submit(() => {
           validateTaskDraft(draft);
           return onCreateTask(draft);
         })} />
@@ -195,9 +202,11 @@ export default function PlatformDialog({
 
 function FormActions({
   busy,
+  disabled = false,
   label = "Create",
 }: {
   busy: boolean;
+  disabled?: boolean;
   label?: string;
 }): React.ReactElement {
   return (
@@ -206,7 +215,7 @@ function FormActions({
         label={busy ? `${label}…` : label}
         type="submit"
         variant="primary"
-        isDisabled={busy}
+        isDisabled={busy || disabled}
         isLoading={busy}
       />
     </div>
@@ -234,7 +243,7 @@ function DatasetForm({
   const [registryConfigName, setRegistryConfigName] = useState("");
 
   return (
-    <form
+    <ValidatedForm
       className="platform-dialog-form"
       onSubmit={(event) => {
         event.preventDefault();
@@ -254,10 +263,10 @@ function DatasetForm({
         });
       }}
     >
-      <label><span>Name</span><input required maxLength={255} value={name} onChange={(event) => setName(event.target.value)} /></label>
+      <label><span>Name</span><NativeInput required maxLength={255} value={name} onChange={(event) => setName(event.target.value)} /></label>
       <label>
         <span>Source</span>
-        <select value={sourceType} onChange={(event) => {
+        <NativeSelect value={sourceType} onChange={(event) => {
           const nextSourceType = event.target.value as DatasetDraft["sourceType"];
           setSourceType(nextSourceType);
           if (nextSourceType === "public_registry" && !["csv", "jsonl", "parquet"].includes(sourceFormat)) {
@@ -269,14 +278,14 @@ function DatasetForm({
           <option value="project_corpus">Existing project corpus</option>
           <option value="generated">Generated data</option>
           <option value="other">Other source</option>
-        </select>
+        </NativeSelect>
       </label>
-      <label><span>Description</span><textarea rows={2} value={description} onChange={(event) => setDescription(event.target.value)} /></label>
+      <label><span>Description</span><NativeTextarea rows={2} value={description} onChange={(event) => setDescription(event.target.value)} /></label>
       {sourceType === "upload" ? (
         <>
           <label>
             <span>Dataset file</span>
-            <input
+            <NativeInput
               required
               type="file"
               accept=".csv,.jsonl,.json,.parquet,text/csv,application/json"
@@ -284,20 +293,20 @@ function DatasetForm({
             />
           </label>
           <div className="platform-form-grid">
-            <label><span>Stable ID field</span><input value={stableKeyField} placeholder="Generated when empty" onChange={(event) => setStableKeyField(event.target.value)} /></label>
-            <label><span>Group ID field</span><input value={groupKeyField} placeholder="Optional leakage group" onChange={(event) => setGroupKeyField(event.target.value)} /></label>
+            <label><span>Stable ID field</span><NativeInput value={stableKeyField} placeholder="Generated when empty" onChange={(event) => setStableKeyField(event.target.value)} /></label>
+            <label><span>Group ID field</span><NativeInput value={groupKeyField} placeholder="Optional leakage group" onChange={(event) => setGroupKeyField(event.target.value)} /></label>
           </div>
         </>
       ) : null}
       {sourceType === "public_registry" ? (
         <>
           <div className="platform-form-grid">
-            <label><span>Hugging Face dataset</span><input required value={registryDatasetId} placeholder="owner/dataset" onChange={(event) => setRegistryDatasetId(event.target.value)} /></label>
-            <label><span>Configuration</span><input value={registryConfigName} placeholder="Optional" onChange={(event) => setRegistryConfigName(event.target.value)} /></label>
+            <label><span>Hugging Face dataset</span><NativeInput required value={registryDatasetId} placeholder="owner/dataset" onChange={(event) => setRegistryDatasetId(event.target.value)} /></label>
+            <label><span>Configuration</span><NativeInput value={registryConfigName} placeholder="Optional" onChange={(event) => setRegistryConfigName(event.target.value)} /></label>
           </div>
           <label>
             <span>Pinned dataset snapshot</span>
-            <input
+            <NativeInput
               required
               type="file"
               accept=".csv,.jsonl,.json,.parquet,text/csv,application/json"
@@ -305,8 +314,8 @@ function DatasetForm({
             />
           </label>
           <div className="platform-form-grid">
-            <label><span>Stable ID field</span><input value={stableKeyField} placeholder="Generated when empty" onChange={(event) => setStableKeyField(event.target.value)} /></label>
-            <label><span>Group ID field</span><input value={groupKeyField} placeholder="Optional leakage group" onChange={(event) => setGroupKeyField(event.target.value)} /></label>
+            <label><span>Stable ID field</span><NativeInput value={stableKeyField} placeholder="Generated when empty" onChange={(event) => setStableKeyField(event.target.value)} /></label>
+            <label><span>Group ID field</span><NativeInput value={groupKeyField} placeholder="Optional leakage group" onChange={(event) => setGroupKeyField(event.target.value)} /></label>
           </div>
         </>
       ) : null}
@@ -314,16 +323,16 @@ function DatasetForm({
         <div className="platform-form-grid">
           <label>
             <span>Format</span>
-            <select value={sourceFormat} onChange={(event) => setSourceFormat(event.target.value as DatasetDraft["sourceFormat"])}>
+            <NativeSelect value={sourceFormat} onChange={(event) => setSourceFormat(event.target.value as DatasetDraft["sourceFormat"])}>
               <option value="csv">CSV</option>
               <option value="jsonl">JSONL</option>
               <option value="parquet">Parquet</option>
               {sourceType !== "public_registry" ? <option value="other">Other</option> : null}
-            </select>
+            </NativeSelect>
           </label>
           <label>
             <span>Exact revision</span>
-            <input
+            <NativeInput
               required={sourceType !== "upload"}
               pattern={sourceType === "public_registry" ? "[a-fA-F0-9]{40}" : undefined}
               title={sourceType === "public_registry" ? "Enter the full 40-character hexadecimal commit hash." : undefined}
@@ -335,21 +344,23 @@ function DatasetForm({
         </div>
       ) : null}
       {sourceType !== "upload" && sourceType !== "public_registry" && sourceType !== "project_corpus" ? (
-        <label><span>Source URI</span><input value={sourceUri} placeholder="Immutable object or corpus URI" onChange={(event) => setSourceUri(event.target.value)} /></label>
+        <label><span>Source URI</span><NativeInput value={sourceUri} placeholder="Immutable object or corpus URI" onChange={(event) => setSourceUri(event.target.value)} /></label>
       ) : null}
       {sourceType !== "project_corpus" ? (
-        <label><span>License identifier</span><input value={license} placeholder="e.g. apache-2.0" onChange={(event) => setLicense(event.target.value)} /></label>
+        <label><span>License identifier</span><NativeInput value={license} placeholder="e.g. apache-2.0" onChange={(event) => setLicense(event.target.value)} /></label>
       ) : null}
       <FormActions busy={busy} />
-    </form>
+    </ValidatedForm>
   );
 }
 
 function TaskForm({
   busy,
+  purpose,
   onSubmit,
 }: {
   busy: boolean;
+  purpose: "annotation" | "training";
   onSubmit: (draft: TaskDraft) => Promise<void>;
 }): React.ReactElement {
   const labelsHelpId = useId();
@@ -359,7 +370,7 @@ function TaskForm({
   const [taskKind, setTaskKind] = useState<TaskDraft["taskKind"] | "paper_entities">("classification");
   const [labels, setLabels] = useState("");
   return (
-    <form className="platform-dialog-form" onSubmit={(event) => {
+    <ValidatedForm className="platform-dialog-form" onSubmit={(event) => {
       event.preventDefault();
       void onSubmit({
         key,
@@ -371,28 +382,28 @@ function TaskForm({
       });
     }}>
       <div className="platform-form-grid">
-        <label><span>Name</span><input required value={name} onChange={(event) => setName(event.target.value)} /></label>
-        <label><span>Stable key</span><input required pattern="[a-z0-9][a-z0-9_.-]*" value={key} placeholder="sentiment_classification" onChange={(event) => setKey(event.target.value)} /></label>
+        <label><span>Name</span><NativeInput required value={name} onChange={(event) => setName(event.target.value)} /></label>
+        <label><span>Stable key</span><NativeInput required pattern="[a-z0-9][a-z0-9_.-]*" value={key} placeholder="sentiment_classification" onChange={(event) => setKey(event.target.value)} /></label>
       </div>
       <label>
         <span>Task kind</span>
-        <select value={taskKind} onChange={(event) => setTaskKind(event.target.value as TaskDraft["taskKind"])}>
+        <NativeSelect value={taskKind} onChange={(event) => setTaskKind(event.target.value as TaskDraft["taskKind"])}>
           <option value="classification">Classification</option>
           <option value="multilabel_classification">Multilabel classification</option>
           <option value="regression">Regression</option>
-          <option value="paper_entities">Named entities (NER) in papers</option>
+          {purpose === "annotation" ? <option value="paper_entities">Named entities (NER) in papers</option> : null}
           <option value="token_labeling">Token labeling (tokenized data)</option>
           <option value="span_extraction">Span extraction</option>
           <option value="relation_extraction">Relation extraction</option>
           <option value="ranking">Ranking</option>
           <option value="generation">Generation</option>
           <option value="instruction_tuning">Instruction tuning</option>
-        </select>
+        </NativeSelect>
       </label>
-      <label><span>Description</span><textarea rows={3} value={description} onChange={(event) => setDescription(event.target.value)} /></label>
+      <label><span>Description</span><NativeTextarea rows={3} value={description} onChange={(event) => setDescription(event.target.value)} /></label>
       <label>
         <span>Allowed labels</span>
-        <input
+        <NativeInput
           required={taskKind === "paper_entities"}
           pattern={taskKind === "paper_entities" ? ".*[^\\s,].*" : undefined}
           aria-describedby={taskKind === "paper_entities" ? labelsHelpId : undefined}
@@ -405,7 +416,7 @@ function TaskForm({
         <small id={labelsHelpId}>NER requires at least one entity label. Separate multiple labels with commas.</small>
       ) : null}
       <FormActions busy={busy} />
-    </form>
+    </ValidatedForm>
   );
 }
 
@@ -465,7 +476,7 @@ function TrainingDataForm({
       ? !compatibleLabelSets.some((labels) => labels.id === labelSetVersionId)
       : !labelField.trim();
   return (
-    <form className="platform-dialog-form" onSubmit={(event) => {
+    <ValidatedForm className="platform-dialog-form" onSubmit={(event) => {
       event.preventDefault();
       void onSubmit({
         name,
@@ -480,7 +491,7 @@ function TrainingDataForm({
         validationPercent,
       });
     }}>
-      <label><span>Training dataset name</span><input required value={name} onChange={(event) => setName(event.target.value)} /></label>
+      <label><span>Training dataset name</span><NativeInput required value={name} onChange={(event) => setName(event.target.value)} /></label>
       <ResourceSelectors
         data={data}
         taskVersionId={taskVersionId}
@@ -494,12 +505,12 @@ function TrainingDataForm({
           selectCompatibleLabelSet(nextDatasetVersionId, taskVersionId);
         }}
       />
-      <label><span>Input field</span><input required value={inputField} onChange={(event) => setInputField(event.target.value)} /></label>
+      <label><span>Input field</span><NativeInput required value={inputField} onChange={(event) => setInputField(event.target.value)} /></label>
       <fieldset className="platform-fieldset">
         <legend>Label source</legend>
         <div className="platform-option-list">
           <label data-disabled={!compatibleLabelSets.length}>
-            <input
+            <NativeInput
               type="radio"
               name="training-label-source"
               checked={labelSource === "existing_label_set"}
@@ -507,12 +518,12 @@ function TrainingDataForm({
               onChange={() => setLabelSource("existing_label_set")}
             />
             <span>
-              <strong>Existing label layer</strong>
+              <strong>Existing label set</strong>
               <small>Use imported, human, or adjudicated labels without changing them.</small>
             </span>
           </label>
           <label>
-            <input
+            <NativeInput
               type="radio"
               name="training-label-source"
               checked={labelSource === "dataset_field"}
@@ -520,31 +531,31 @@ function TrainingDataForm({
             />
             <span>
               <strong>Dataset field</strong>
-              <small>Extract preserved source labels into a separate immutable layer.</small>
+              <small>Extract preserved source labels into a separate immutable label set.</small>
             </span>
           </label>
         </div>
       </fieldset>
       {labelSource === "existing_label_set" ? (
         <label>
-          <span>Label layer</span>
-          <select
+          <span>Label set</span>
+          <NativeSelect
             required
             value={labelSetVersionId}
             onChange={(event) => setLabelSetVersionId(Number(event.target.value))}
           >
-            <option value={0}>Select a compatible label layer</option>
+            <option value={0}>Select a compatible label set</option>
             {compatibleLabelSets.map((labels) => (
               <option key={labels.id} value={labels.id}>
-                {labels.name} · v{labels.version_number} · {labels.source_kind} · {labels.label_count} labels
+                {labels.name} · v{labels.version_number} · {formatStatus(labels.source_kind)} · {formatCount(labels.label_count, "label")}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </label>
       ) : (
         <label>
           <span>Imported label field</span>
-          <input
+          <NativeInput
             required
             value={labelField}
             onChange={(event) => setLabelField(event.target.value)}
@@ -554,26 +565,26 @@ function TrainingDataForm({
       <div className="platform-form-grid">
         <label>
           <span>Train percent</span>
-          <input type="number" min={1} max={98} value={trainPercent} onChange={(event) => setTrainPercent(Number(event.target.value))} />
+          <NativeInput type="number" min={1} max={98} value={trainPercent} onChange={(event) => setTrainPercent(Number(event.target.value))} />
         </label>
         <label>
           <span>Validation percent</span>
-          <input type="number" min={1} max={98} value={validationPercent} onChange={(event) => setValidationPercent(Number(event.target.value))} />
+          <NativeInput type="number" min={1} max={98} value={validationPercent} onChange={(event) => setValidationPercent(Number(event.target.value))} />
         </label>
       </div>
       <p className="platform-form-note">
         Test: {testPercent}% · protected from training, selection, prompt tuning, and guideline mining.
       </p>
       <FormActions
-        busy={
-          busy ||
+        busy={busy}
+        disabled={
           !taskVersionId ||
           !datasetVersionId ||
           labelSourceIncomplete ||
           testPercent < 1
         }
       />
-    </form>
+    </ValidatedForm>
   );
 }
 
@@ -619,7 +630,7 @@ function CycleForm({
       sourceType !== "external_llm" &&
       !sourceName.trim());
   return (
-    <form className="platform-dialog-form" onSubmit={(event) => {
+    <ValidatedForm className="platform-dialog-form" onSubmit={(event) => {
       event.preventDefault();
       const feedbackSources =
         sourceType === "registered_model"
@@ -648,15 +659,15 @@ function CycleForm({
         feedbackSources,
       });
     }}>
-      <label><span>Cycle name</span><input required value={name} onChange={(event) => setName(event.target.value)} /></label>
+      <label><span>Cycle name</span><NativeInput required value={name} onChange={(event) => setName(event.target.value)} /></label>
       <label>
         <span>Goal</span>
-        <select value={goal} onChange={(event) => setGoal(event.target.value as CycleDraft["goal"])}>
+        <NativeSelect value={goal} onChange={(event) => setGoal(event.target.value as CycleDraft["goal"])}>
           <option value="reannotate">Re-annotate with feedback</option>
           <option value="expand_pool">Expand the data pool</option>
           <option value="guideline_pilot">Pilot a guideline</option>
           <option value="error_remediation">Remediate errors</option>
-        </select>
+        </NativeSelect>
       </label>
       <ResourceSelectors
         data={data}
@@ -670,7 +681,7 @@ function CycleForm({
       />
       <label>
         <span>Feedback source</span>
-        <select
+        <NativeSelect
           value={sourceType}
           onChange={(event) => {
             setSourceType(event.target.value as SourceChoice);
@@ -685,12 +696,12 @@ function CycleForm({
           <option value="dictionary">Dictionary</option>
           <option value="ensemble">Ensemble</option>
           <option value="human_disagreement">Human disagreement</option>
-        </select>
+        </NativeSelect>
       </label>
       {sourceType === "registered_model" ? (
         <label>
           <span>Model version</span>
-          <select
+          <NativeSelect
             required
             value={baselineModelVersionId}
             onChange={(event) => setBaselineModelVersionId(Number(event.target.value))}
@@ -706,12 +717,12 @@ function CycleForm({
                 </option>
               );
             })}
-          </select>
+          </NativeSelect>
         </label>
       ) : (
         <label>
           <span>Source name</span>
-          <input
+          <NativeInput
             required
             value={sourceName}
             onChange={(event) => setSourceName(event.target.value)}
@@ -722,7 +733,7 @@ function CycleForm({
         <>
           <label>
             <span>Provider</span>
-            <input
+            <NativeInput
               required
               value={provider}
               onChange={(event) => setProvider(event.target.value)}
@@ -730,7 +741,7 @@ function CycleForm({
           </label>
           <label>
             <span>Provider model ID</span>
-            <input
+            <NativeInput
               required
               value={externalModelId}
               onChange={(event) => setExternalModelId(event.target.value)}
@@ -738,7 +749,7 @@ function CycleForm({
           </label>
           <label>
             <span>Exact model revision</span>
-            <input
+            <NativeInput
               required
               value={exactRevision}
               onChange={(event) => setExactRevision(event.target.value)}
@@ -746,7 +757,7 @@ function CycleForm({
           </label>
           <label>
             <span>Data-egress policy</span>
-            <input
+            <NativeInput
               required
               value={egressPolicy}
               onChange={(event) => setEgressPolicy(event.target.value)}
@@ -755,9 +766,10 @@ function CycleForm({
         </>
       ) : null}
       <FormActions
-        busy={busy || !taskVersionId || !datasetVersionId || sourceIncomplete}
+        busy={busy}
+        disabled={!taskVersionId || !datasetVersionId || sourceIncomplete}
       />
-    </form>
+    </ValidatedForm>
   );
 }
 
@@ -825,7 +837,7 @@ function FeedbackScoringForm({
   }
 
   return (
-    <form className="platform-dialog-form" onSubmit={(event) => {
+    <ValidatedForm className="platform-dialog-form" onSubmit={(event) => {
       event.preventDefault();
       void onSubmit({
         cycleId: cycleId || null,
@@ -840,7 +852,7 @@ function FeedbackScoringForm({
       </p>
       <label>
         <span>Learning cycle</span>
-        <select
+        <NativeSelect
           value={cycleId}
           onChange={(event) => {
             const nextCycleId = Number(event.target.value);
@@ -859,13 +871,13 @@ function FeedbackScoringForm({
               Cycle {cycle.sequence} · {cycle.name}
             </option>
           ))}
-        </select>
+        </NativeSelect>
         {selectedCycle ? <small>Dataset, task, and baseline model are pinned by this cycle.</small> : null}
       </label>
       <section className="platform-form-grid" aria-label="Scoring resources">
         <label>
           <span>Classification task</span>
-          <select
+          <NativeSelect
             required
             disabled={Boolean(selectedCycle)}
             value={taskVersionId}
@@ -881,11 +893,11 @@ function FeedbackScoringForm({
                 Classification · v{task.version_number}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </label>
         <label>
           <span>Dataset version</span>
-          <select
+          <NativeSelect
             required
             disabled={Boolean(selectedCycle)}
             value={datasetVersionId}
@@ -896,16 +908,16 @@ function FeedbackScoringForm({
               const dataset = data.datasets.find((item) => item.id === version.dataset_id);
               return (
                 <option key={version.id} value={version.id}>
-                  {dataset?.name ?? "Dataset"} · v{version.version_number} · {version.item_count} items
+                  {dataset?.name ?? "Dataset"} · v{version.version_number} · {formatCount(version.item_count, "record")}
                 </option>
               );
             })}
-          </select>
+          </NativeSelect>
         </label>
       </section>
       <label>
         <span>TF-IDF model</span>
-        <select
+        <NativeSelect
           required
           disabled={Boolean(selectedCycle)}
           value={modelVersionId}
@@ -922,7 +934,7 @@ function FeedbackScoringForm({
               </option>
             );
           })}
-        </select>
+        </NativeSelect>
       </label>
       {!classificationTasks.length ? (
         <p className="platform-dialog-error" role="alert">
@@ -934,10 +946,11 @@ function FeedbackScoringForm({
         </p>
       ) : null}
       <FormActions
-        busy={busy || !taskVersionId || !datasetVersionId || !modelVersionId}
+        busy={busy}
+        disabled={!taskVersionId || !datasetVersionId || !modelVersionId}
         label="Start scoring"
       />
-    </form>
+    </ValidatedForm>
   );
 }
 
@@ -971,11 +984,14 @@ function RoundForm({
   const [annotatorUserIds, setAnnotatorUserIds] = useState<number[]>(defaultAnnotatorId ? [defaultAnnotatorId] : []);
   const [openToAllAnnotators, setOpenToAllAnnotators] = useState(false);
   const [reason, setReason] = useState("");
+  const learningEnabled = data.projectModules.effective.includes("learning");
+  const availableCycles = learningEnabled ? data.cycles : [];
   const selectedCycle = data.cycles.find((cycle) => cycle.id === cycleId);
   const compatibleSplitMaps = data.splitMaps.filter(
     (splitMap) => splitMap.dataset_version_id === datasetVersionId,
   );
   const compatibleFeedbackSets = data.feedbackSets.filter((feedbackSet) => {
+    if (!learningEnabled) return false;
     const run = data.feedbackRuns.find(
       (item) =>
         item.id === feedbackSet.feedback_run_id &&
@@ -992,6 +1008,9 @@ function RoundForm({
   });
   const selectedDataset = data.datasetVersions.find(
     (version) => version.id === datasetVersionId,
+  );
+  const compatibleGuidelineRevisions = data.guidelineRevisions.filter((revision) =>
+    revision.task_version_id === taskVersionId && revision.status === "active",
   );
 
   function resetSelectionResources(
@@ -1022,14 +1041,15 @@ function RoundForm({
     setFeedbackSetVersionId(nextFeedbackSet?.id ?? 0);
   }
 
-  const targeted = reannotationMode === "targeted_subset";
+  const targeted = reannotationMode === "targeted_subset" && compatibleSplitMaps.length > 0;
+  const effectiveSelectionStrategy = compatibleFeedbackSets.length ? selectionStrategy : "random";
   const uncertaintyIncomplete =
     targeted &&
-    selectionStrategy === "uncertainty" &&
+    effectiveSelectionStrategy === "uncertainty" &&
     !compatibleFeedbackSets.some((feedbackSet) => feedbackSet.id === feedbackSetVersionId);
 
   return (
-    <form className="platform-dialog-form" onSubmit={(event) => {
+    <ValidatedForm className="platform-dialog-form" onSubmit={(event) => {
       event.preventDefault();
       if (!selectedDataset?.item_count) return;
       void onSubmit({
@@ -1038,21 +1058,21 @@ function RoundForm({
         datasetVersionId,
         cycleId: cycleId || null,
         splitMapId: targeted ? splitMapId || null : null,
-        guidelineRevisionId: guidelineRevisionId || null,
-        feedbackSetVersionId: feedbackSetVersionId || null,
+        guidelineRevisionId: compatibleGuidelineRevisions.some((revision) => revision.id === guidelineRevisionId) ? guidelineRevisionId : null,
+        feedbackSetVersionId: compatibleFeedbackSets.some((feedbackSet) => feedbackSet.id === feedbackSetVersionId) ? feedbackSetVersionId : null,
         assistancePolicy: "blind",
-        reannotationMode,
-        selectionStrategy: targeted ? selectionStrategy : "all",
+        reannotationMode: targeted ? "targeted_subset" : "full_dataset",
+        selectionStrategy: targeted ? effectiveSelectionStrategy : "all",
         selectionLimit,
         annotatorUserIds,
         openToAllAnnotators,
         reason,
       });
     }}>
-      <label><span>Round name</span><input required value={name} onChange={(event) => setName(event.target.value)} /></label>
-      <label>
+      <label><span>Round name</span><NativeInput required value={name} onChange={(event) => setName(event.target.value)} /></label>
+      {availableCycles.length ? <label>
         <span>Learning cycle</span>
-        <select
+        <NativeSelect
           value={cycleId}
           onChange={(event) => {
             const nextCycleId = Number(event.target.value);
@@ -1072,12 +1092,12 @@ function RoundForm({
           }}
         >
           <option value={0}>No cycle</option>
-          {data.cycles.map((cycle) => (
+          {availableCycles.map((cycle) => (
             <option key={cycle.id} value={cycle.id}>Cycle {cycle.sequence} · {cycle.name}</option>
           ))}
-        </select>
+        </NativeSelect>
         {selectedCycle ? <small>Dataset and task are pinned by this cycle.</small> : null}
-      </label>
+      </label> : null}
       <ResourceSelectors
         data={{ ...data, datasetVersions: data.datasetVersions.filter((version) => version.item_count > 0) }}
         taskVersionId={taskVersionId}
@@ -1096,7 +1116,7 @@ function RoundForm({
         <legend>Round coverage</legend>
         <section className="platform-option-list">
           <label>
-            <input
+            <NativeInput
               type="radio"
               name="round-coverage"
               checked={!targeted}
@@ -1104,8 +1124,8 @@ function RoundForm({
             />
             <span><strong>Full dataset</strong><small>Annotate every dataset item.</small></span>
           </label>
-          <label>
-            <input
+          {compatibleSplitMaps.length ? <label>
+            <NativeInput
               type="radio"
               name="round-coverage"
               checked={targeted}
@@ -1115,7 +1135,7 @@ function RoundForm({
               }}
             />
             <span><strong>Targeted subset</strong><small>Select eligible items while preserving protected splits.</small></span>
-          </label>
+          </label> : null}
         </section>
       </fieldset>
       {targeted ? (
@@ -1123,29 +1143,29 @@ function RoundForm({
           <section className="platform-form-grid" aria-label="Selection configuration">
             <label>
               <span>Split map</span>
-              <select required value={splitMapId} onChange={(event) => setSplitMapId(Number(event.target.value))}>
+              <NativeSelect required value={splitMapId} onChange={(event) => setSplitMapId(Number(event.target.value))}>
                 <option value={0}>Select a governed split</option>
                 {compatibleSplitMaps.map((splitMap) => (
                   <option key={splitMap.id} value={splitMap.id}>
                     {splitMap.name} · protects {splitMap.protected_splits.join(", ") || "none"}
                   </option>
                 ))}
-              </select>
+              </NativeSelect>
             </label>
             <label>
               <span>Selection strategy</span>
-              <select
-                value={selectionStrategy}
+              <NativeSelect
+                value={effectiveSelectionStrategy}
                 onChange={(event) => setSelectionStrategy(event.target.value as "random" | "uncertainty")}
               >
                 <option value="random">Random</option>
-                <option value="uncertainty">Uncertainty</option>
-              </select>
+                {compatibleFeedbackSets.length ? <option value="uncertainty">Uncertainty</option> : null}
+              </NativeSelect>
             </label>
           </section>
           <label>
             <span>Selection limit</span>
-            <input
+            <NativeInput
               required
               type="number"
               min={1}
@@ -1156,43 +1176,43 @@ function RoundForm({
           </label>
         </>
       ) : null}
-      <label>
+      {compatibleFeedbackSets.length ? <label>
         <span>Model feedback set</span>
-        <select
-          required={targeted && selectionStrategy === "uncertainty"}
+        <NativeSelect
+          required={targeted && effectiveSelectionStrategy === "uncertainty"}
           value={feedbackSetVersionId}
           onChange={(event) => setFeedbackSetVersionId(Number(event.target.value))}
         >
           <option value={0}>No feedback set</option>
           {compatibleFeedbackSets.map((feedbackSet) => (
             <option key={feedbackSet.id} value={feedbackSet.id}>
-              Feedback set v{feedbackSet.version_number} · {feedbackSet.candidate_count} candidates
+              Feedback set v{feedbackSet.version_number} · {formatCount(feedbackSet.candidate_count, "candidate")}
             </option>
           ))}
-        </select>
+        </NativeSelect>
         <small>Assistance remains blind: scores affect order but predictions are not shown to annotators.</small>
-      </label>
+      </label> : null}
       {uncertaintyIncomplete ? (
         <p className="platform-dialog-error" role="alert">
           Uncertainty selection requires a completed, non-empty feedback set for this dataset, task, and cycle.
         </p>
       ) : null}
-      <label>
+      {compatibleGuidelineRevisions.length ? <label>
         <span>Pinned guideline</span>
-        <select value={guidelineRevisionId} onChange={(event) => setGuidelineRevisionId(Number(event.target.value))}>
+        <NativeSelect value={guidelineRevisionId} onChange={(event) => setGuidelineRevisionId(Number(event.target.value))}>
           <option value={0}>No guideline</option>
-          {data.guidelineRevisions.map((revision) => {
+          {compatibleGuidelineRevisions.map((revision) => {
             const guideline = data.guidelines.find((item) => item.id === revision.guideline_id);
             return <option key={revision.id} value={revision.id}>{guideline?.name ?? "Guideline"} · v{revision.version_number}</option>;
           })}
-        </select>
-      </label>
+        </NativeSelect>
+      </label> : null}
       <fieldset className="platform-form-fieldset">
         <legend>Annotators</legend>
         <section className="platform-checkbox-list">
           {data.workspaceMembers.filter((member) => member.is_active).map((member) => (
             <label key={member.user_id} className="platform-checkbox-row">
-              <input
+              <NativeInput
                 type="checkbox"
                 checked={annotatorUserIds.includes(member.user_id)}
                 disabled={openToAllAnnotators}
@@ -1207,7 +1227,7 @@ function RoundForm({
         </section>
       </fieldset>
       <label className="platform-checkbox-row">
-        <input
+        <NativeInput
           type="checkbox"
           checked={openToAllAnnotators}
           onChange={(event) => {
@@ -1217,16 +1237,15 @@ function RoundForm({
         />
         <span>Open to all workspace annotators</span>
       </label>
-      <label><span>Reason</span><textarea rows={3} value={reason} onChange={(event) => setReason(event.target.value)} /></label>
-      <FormActions busy={
-        busy ||
+      <label><span>Reason</span><NativeTextarea rows={3} value={reason} onChange={(event) => setReason(event.target.value)} /></label>
+      <FormActions busy={busy} disabled={
         !taskVersionId ||
         !selectedDataset?.item_count ||
         (targeted && !splitMapId) ||
         uncertaintyIncomplete ||
         (!openToAllAnnotators && !annotatorUserIds.length)
       } />
-    </form>
+    </ValidatedForm>
   );
 }
 
@@ -1248,7 +1267,7 @@ function GuidelineForm({
   const [rationale, setRationale] = useState("");
   const taskVersion = data.taskVersions.find((item) => item.id === taskVersionId);
   return (
-    <form className="platform-dialog-form" onSubmit={(event) => {
+    <ValidatedForm className="platform-dialog-form" onSubmit={(event) => {
       event.preventDefault();
       if (!taskVersion) return;
       void onSubmit({
@@ -1260,18 +1279,18 @@ function GuidelineForm({
         rationale,
       });
     }}>
-      <label><span>Name</span><input required value={name} onChange={(event) => setName(event.target.value)} /></label>
+      <label><span>Name</span><NativeInput required value={name} onChange={(event) => setName(event.target.value)} /></label>
       <label>
         <span>Task version</span>
-        <select value={taskVersionId} onChange={(event) => setTaskVersionId(Number(event.target.value))}>
-          {data.taskVersions.map((task) => <option key={task.id} value={task.id}>{task.task_kind.replace(/_/g, " ")} · v{task.version_number}</option>)}
-        </select>
+        <NativeSelect value={taskVersionId} onChange={(event) => setTaskVersionId(Number(event.target.value))}>
+          {data.taskVersions.map((task) => <option key={task.id} value={task.id}>{formatTaskKind(task.task_kind, task.annotation_ui?.preset)} · v{task.version_number}</option>)}
+        </NativeSelect>
       </label>
-      <label><span>Description</span><input value={description} onChange={(event) => setDescription(event.target.value)} /></label>
-      <label><span>Guideline content</span><textarea required rows={10} value={markdown} onChange={(event) => setMarkdown(event.target.value)} /></label>
-      <label><span>Rationale</span><textarea rows={3} value={rationale} onChange={(event) => setRationale(event.target.value)} /></label>
-      <FormActions busy={busy || !taskVersion} />
-    </form>
+      <label><span>Description</span><NativeInput value={description} onChange={(event) => setDescription(event.target.value)} /></label>
+      <label><span>Guideline content</span><NativeTextarea required rows={10} value={markdown} onChange={(event) => setMarkdown(event.target.value)} /></label>
+      <label><span>Rationale</span><NativeTextarea rows={3} value={rationale} onChange={(event) => setRationale(event.target.value)} /></label>
+      <FormActions busy={busy} disabled={!taskVersion} />
+    </ValidatedForm>
   );
 }
 
@@ -1294,18 +1313,18 @@ function ResourceSelectors({
     <div className="platform-form-grid">
       <label>
         <span>Task version</span>
-        <select required disabled={disabled} value={taskVersionId} onChange={(event) => onTaskChange(Number(event.target.value))}>
-          {data.taskVersions.map((task) => <option key={task.id} value={task.id}>{task.task_kind.replace(/_/g, " ")} · v{task.version_number}</option>)}
-        </select>
+        <NativeSelect required disabled={disabled} value={taskVersionId} onChange={(event) => onTaskChange(Number(event.target.value))}>
+          {data.taskVersions.map((task) => <option key={task.id} value={task.id}>{formatTaskKind(task.task_kind, task.annotation_ui?.preset)} · v{task.version_number}</option>)}
+        </NativeSelect>
       </label>
       <label>
         <span>Dataset version</span>
-        <select required disabled={disabled} value={datasetVersionId} onChange={(event) => onDatasetChange(Number(event.target.value))}>
+        <NativeSelect required disabled={disabled} value={datasetVersionId} onChange={(event) => onDatasetChange(Number(event.target.value))}>
           {data.datasetVersions.map((version) => {
             const dataset = data.datasets.find((item) => item.id === version.dataset_id);
             return <option key={version.id} value={version.id}>{dataset?.name ?? "Dataset"} · v{version.version_number}</option>;
           })}
-        </select>
+        </NativeSelect>
       </label>
     </div>
   );

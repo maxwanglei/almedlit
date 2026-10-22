@@ -1,3 +1,4 @@
+import { formatTaskKind } from "@/lib/taskPresentation";
 import {
   listBaseModels,
   listWorkspaceMembers,
@@ -124,7 +125,10 @@ function collectionPlan(
       add("datasets", "datasetVersions", "labelSets", "splitMaps");
     }
     if (enabled.has("annotate")) add("rounds", "tasks", "taskVersions");
-    if (enabled.has("models")) add("models", "modelVersions", "tasks", "taskVersions");
+    if (enabled.has("models")) {
+      add("models", "modelVersions");
+      if (enabled.has("data")) add("tasks", "taskVersions");
+    }
     if (enabled.has("train")) add("trainingRuns", "trainingDatasets");
     return plan;
   }
@@ -201,10 +205,8 @@ function collectionPlan(
   }
 
   if (scope === "models" && enabled.has("models")) {
+    if (enabled.has("data")) add("tasks", "taskVersions", "trainingDatasets");
     add(
-      "tasks",
-      "taskVersions",
-      "trainingDatasets",
       "models",
       "modelVersions",
       "modelEvaluations",
@@ -598,7 +600,7 @@ function taskLabel(
   return {
     name:
       definition?.name ??
-      version?.task_kind.replace(/_/g, " ") ??
+      (version ? formatTaskKind(version.task_kind, version.annotation_ui?.preset) : undefined) ??
       `Task version ${taskVersionId}`,
     kind: version?.task_kind ?? "classification",
   };
@@ -1399,6 +1401,10 @@ export function addRoundDecision(
     decisionKind: AnnotationDecision["decision_kind"];
     isInitialCheckpoint: boolean;
     rationale: string;
+    feedbackDecision?: {
+      exposureId: number;
+      decision: "accepted" | "modified" | "rejected" | "ignored";
+    };
   },
 ): Promise<AnnotationDecision> {
   return post<AnnotationDecision>("/rounds/decisions", {
@@ -1409,6 +1415,10 @@ export function addRoundDecision(
     decision_kind: payload.decisionKind,
     is_initial_checkpoint: payload.isInitialCheckpoint,
     rationale: payload.rationale.trim() || null,
+    ...(payload.feedbackDecision ? { feedback_decision: {
+      exposure_id: payload.feedbackDecision.exposureId,
+      decision: payload.feedbackDecision.decision,
+    } } : {}),
   });
 }
 

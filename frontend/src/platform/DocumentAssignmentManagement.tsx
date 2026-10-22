@@ -1,3 +1,5 @@
+import { NativeInput, NativeSelect, NativeTextarea } from "@/components/NativeField";
+import ValidatedForm from "@/components/ValidatedForm";
 import { useRef, useState } from "react";
 
 import { createProjectTask, createTaskAssignment, updateProjectTask, updateTaskAssignment } from "@/api/client";
@@ -133,15 +135,15 @@ export function DocumentTaskManagement({ projectId, tasks, busy = false, onChang
         }}>{task.enabled ? "Disable" : "Enable"}</button>
       </li>)}</ul> : <p>No document annotation tasks have been configured.</p>}
       {availableKinds.length ? (
-        <form className="platform-dialog-form" aria-label="Create document annotation task" onSubmit={(event) => { event.preventDefault(); void mutate(addTask); }}>
+        <ValidatedForm className="platform-dialog-form" aria-label="Create document annotation task" onSubmit={(event) => { event.preventDefault(); void mutate(addTask); }}>
           <fieldset disabled={working}>
             <legend>Create document task</legend>
-            <label><span>Annotation type</span><select value={newTaskKind} onChange={(event) => setTaskKind(event.target.value as NewTaskKind)}>{availableKinds.map((kind) => <option key={kind.value} value={kind.value}>{kind.label}</option>)}</select></label>
-            <label><span>Task name</span><input required maxLength={120} value={taskName} onChange={(event) => setTaskName(event.target.value)} /></label>
-            {newTaskKind !== "evidence_block" ? <label><span>Task labels</span><input required pattern={".*[^\\s,].*"} value={taskLabels} placeholder="Drug, Disease" onChange={(event) => setTaskLabels(event.target.value)} /></label> : null}
+            <label><span>Annotation type</span><NativeSelect value={newTaskKind} onChange={(event) => setTaskKind(event.target.value as NewTaskKind)}>{availableKinds.map((kind) => <option key={kind.value} value={kind.value}>{kind.label}</option>)}</NativeSelect></label>
+            <label><span>Task name</span><NativeInput required maxLength={120} value={taskName} onChange={(event) => setTaskName(event.target.value)} /></label>
+            {newTaskKind !== "evidence_block" ? <label><span>Task labels</span><NativeInput required pattern={".*[^\\s,].*"} value={taskLabels} placeholder="Drug, Disease" onChange={(event) => setTaskLabels(event.target.value)} /></label> : null}
             <button type="submit" disabled={working}>Create document task</button>
           </fieldset>
-        </form>
+        </ValidatedForm>
       ) : <p>Evidence, entity, and relation tasks are already configured.</p>}
     </section>
   );
@@ -206,14 +208,14 @@ export default function DocumentAssignmentManagement({
       {error ? <p role="alert" className="platform-dialog-error">{error}</p> : null}
       {refreshFailed ? <button type="button" disabled={refreshing} onClick={() => void retryRefresh()}>Retry refresh</button> : null}
       {message ? <p role="status">{message}</p> : null}
-      <form className="platform-dialog-form" aria-label="Assign a document" onSubmit={(event) => { event.preventDefault(); void mutate(assignDocument); }}>
+      <ValidatedForm className="platform-dialog-form" aria-label="Assign a document" onSubmit={(event) => { event.preventDefault(); void mutate(assignDocument); }}>
         <fieldset disabled={working}>
           <legend>Assign document</legend>
-          <label><span>Document task</span><select required value={selectedTask?.id ?? 0} onChange={(event) => { setTaskId(Number(event.target.value)); setTargetVersionId(0); }}><option value={0}>Select a document task</option>{enabledTasks.map((task) => <option key={task.id} value={task.id}>{task.display_name}</option>)}</select></label>
-          <label><span>Document</span><select required value={selectedDocument?.id ?? 0} onChange={(event) => setDocumentId(Number(event.target.value))}><option value={0}>Select a document</option>{projectDocuments.map((document) => <option key={document.id} value={document.id}>{documentName(document)}</option>)}</select></label>
-          <label><span>Annotator</span><select required value={activeMembers.some((member) => member.user_id === assigneeId) ? assigneeId : 0} onChange={(event) => setAssigneeId(Number(event.target.value))}><option value={0}>Select an annotator</option>{activeMembers.map((member) => <option key={member.user_id} value={member.user_id}>{member.display_name || member.username}</option>)}</select></label>
+          <label><span>Document task</span><NativeSelect required value={selectedTask?.id ?? 0} onChange={(event) => { setTaskId(Number(event.target.value)); setTargetVersionId(0); }}><option value={0}>Select a document task</option>{enabledTasks.map((task) => <option key={task.id} value={task.id}>{task.display_name}</option>)}</NativeSelect></label>
+          <label><span>Document</span><NativeSelect required value={selectedDocument?.id ?? 0} onChange={(event) => setDocumentId(Number(event.target.value))}><option value={0}>Select a document</option>{projectDocuments.map((document) => <option key={document.id} value={document.id}>{documentName(document)}</option>)}</NativeSelect></label>
+          <label><span>Annotator</span><NativeSelect required value={activeMembers.some((member) => member.user_id === assigneeId) ? assigneeId : 0} onChange={(event) => setAssigneeId(Number(event.target.value))}><option value={0}>Select an annotator</option>{activeMembers.map((member) => <option key={member.user_id} value={member.user_id}>{member.display_name || member.username}</option>)}</NativeSelect></label>
           {evidenceTask ? <>
-            <label><span>Evidence target version</span><select required value={selectedTarget?.active_version_id ?? 0} onChange={(event) => setTargetVersionId(Number(event.target.value))}><option value={0}>Select an active target version</option>{availableTargets.map((target) => <option key={target.id} value={target.active_version_id!}>{target.name} · v{target.versions.find((version) => version.id === target.active_version_id)?.version_number}</option>)}</select></label>
+            <label><span>Evidence target version</span><NativeSelect required value={selectedTarget?.active_version_id ?? 0} onChange={(event) => setTargetVersionId(Number(event.target.value))}><option value={0}>Select an active target version</option>{availableTargets.map((target) => <option key={target.id} value={target.active_version_id!}>{target.name} · v{target.versions.find((version) => version.id === target.active_version_id)?.version_number}</option>)}</NativeSelect></label>
             {!availableTargets.length ? <p>Activate an evidence target above before assigning documents.</p> : null}
             {!activeGuideline ? <p>Create an active evidence guideline above before assigning documents.</p> : <p>Assignments use active guideline {activeGuideline.version_label} (version {activeGuideline.id}).</p>}
             {selectedDocument && !selectedDocument.active_structure_version_id ? <p>Import or process this document to prepare its structure before assigning evidence.</p> : null}
@@ -221,10 +223,10 @@ export default function DocumentAssignmentManagement({
           {!enabledTasks.length ? <p>Create or enable a document task before assigning documents.</p> : null}
           {!projectDocuments.length ? <p>Import papers from the Data page before creating document assignments.</p> : null}
           {!activeMembers.length ? <p>Add an active workspace member before assigning documents.</p> : null}
-          <label><span>Assignment notes</span><textarea value={notes} onChange={(event) => setNotes(event.target.value)} /></label>
+          <label><span>Assignment notes</span><NativeTextarea value={notes} onChange={(event) => setNotes(event.target.value)} /></label>
           <button type="submit" disabled={working}>Assign document</button>
         </fieldset>
-      </form>
+      </ValidatedForm>
       <h3>Document assignments</h3>
       {projectAssignments.length ? <div className="platform-table-wrap"><table className="platform-table">
         <thead><tr><th>Document and task</th><th>Annotator</th><th>Status</th><th>Pinned versions</th><th>Actions</th></tr></thead>

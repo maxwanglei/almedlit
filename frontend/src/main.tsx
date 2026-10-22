@@ -16,7 +16,7 @@ if (import.meta.hot) {
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <Theme theme={neutralTheme}>
+    <Theme theme={neutralTheme} mode="light">
       <App />
     </Theme>
   </React.StrictMode>

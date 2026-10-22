@@ -347,3 +347,19 @@ it("loads the next models page with applied filters while edits remain unapplied
   await waitFor(() => expect(mocks.listWorkspaceModels).toHaveBeenLastCalledWith(5,
     { projectId: undefined, limit: 50, cursor: 81 }, [project]));
 });
+
+it.each(["identity", "versions"])("does not report missing model data after a failed %s request", async (failedRequest) => {
+  mocks.findWorkspaceModel.mockReset();
+  mocks.loadPlatformProject.mockReset();
+  if (failedRequest === "identity") mocks.findWorkspaceModel.mockRejectedValue(new Error("Model service offline"));
+  else {
+    mocks.findWorkspaceModel.mockResolvedValue(modelSummary);
+    mocks.loadPlatformProject.mockRejectedValue(new Error("Model service offline"));
+  }
+  render(<ModelsWorkspace workspaceId={5} projects={[project]} view="detail" modelId={81} onNavigate={vi.fn()} />);
+  expect(await screen.findByRole("heading", { name: "Model could not be loaded" })).toBeTruthy();
+  expect(screen.queryByText("Model not found")).toBeNull();
+  expect(screen.queryByText("No model versions")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Train model" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Retry loading model" })).toBeTruthy();
+});

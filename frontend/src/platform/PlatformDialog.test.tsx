@@ -41,6 +41,7 @@ function Harness(): React.ReactElement {
 function learningProjectData(): PlatformProjectData {
   return {
     ...EMPTY_PLATFORM_PROJECT_DATA,
+    projectModules: { ...EMPTY_PLATFORM_PROJECT_DATA.projectModules, effective: ["learning"] },
     workspaceMembers: [],
     taskVersions: [
       {
@@ -299,7 +300,7 @@ describe("PlatformDialog creation validation", () => {
       await user.selectOptions(screen.getByLabelText("Source"), "public_registry");
       await user.type(screen.getByLabelText("Hugging Face dataset"), "lab/clinical");
       const file = new File(['{"text":"example"}\n'], "clinical.jsonl", { type: "application/json" });
-      await user.upload(screen.getByLabelText("Pinned dataset snapshot"), file);
+      await user.upload(screen.getByLabelText(/^Pinned dataset snapshot/), file);
       const revision = screen.getByLabelText<HTMLInputElement>("Exact revision");
       await user.type(revision, invalidRevision);
 
@@ -311,7 +312,7 @@ describe("PlatformDialog creation validation", () => {
       expect(revision.value).toBe(invalidRevision);
       expect(revision.checkValidity()).toBe(false);
       expect(screen.getByLabelText<HTMLInputElement>("Name").value).toBe("Clinical abstracts");
-      expect(screen.getByLabelText<HTMLInputElement>("Pinned dataset snapshot").files?.[0]).toBe(file);
+      expect(screen.getByLabelText<HTMLInputElement>(/^Pinned dataset snapshot/).files?.[0]).toBe(file);
       await user.clear(revision);
       await user.type(revision, "a".repeat(40));
       expect(revision.checkValidity()).toBe(true);
@@ -357,7 +358,7 @@ describe("PlatformDialog accessibility", () => {
     expect(document.body.style.overflow).toBe("");
   });
 
-  it("creates a blind full-dataset round while exposing optional learning controls", async () => {
+  it("creates a blind full-dataset round without unavailable optional controls", async () => {
     const user = userEvent.setup();
     const onCreateRound = vi.fn().mockResolvedValue(undefined);
     const onClose = vi.fn();
@@ -427,8 +428,10 @@ describe("PlatformDialog accessibility", () => {
       />,
     );
 
-    expect(screen.getByLabelText("Learning cycle")).toBeTruthy();
-    expect(screen.getByRole("combobox", { name: /Model feedback set/ })).toBeTruthy();
+    expect(screen.queryByLabelText("Learning cycle")).toBeNull();
+    expect(screen.queryByRole("combobox", { name: /Model feedback set/ })).toBeNull();
+    expect(screen.queryByLabelText("Pinned guideline")).toBeNull();
+    expect(screen.queryByRole("radio", { name: /Targeted subset/ })).toBeNull();
     expect(screen.queryByLabelText("Feedback visibility")).toBeNull();
     expect(screen.queryByLabelText("Selection strategy")).toBeNull();
 
@@ -461,6 +464,8 @@ describe("PlatformDialog accessibility", () => {
     render(<PlatformDialog kind="round" data={data} busy={false} currentUserId={7} onClose={vi.fn()} onCreateDataset={complete} onCreateCycle={complete} onCreateRound={complete} onScoreFeedback={complete} onCreateGuideline={complete} onCreateTask={complete} onPrepareTrainingData={complete} />);
     expect(screen.getByRole<HTMLSelectElement>("combobox", { name: "Dataset version" }).options.length).toBe(0);
     expect(screen.getByRole<HTMLButtonElement>("button", { name: /^Create/ }).disabled).toBe(true);
+    expect(screen.getByRole("button", { name: "Create" }).getAttribute("aria-busy")).toBeNull();
+    expect(screen.getByRole("button", { name: "Create" }).textContent).not.toContain("Loading");
   });
 
   it("offers the existing project corpus as a dataset source", async () => {

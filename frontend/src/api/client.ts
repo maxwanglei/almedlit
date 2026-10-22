@@ -37,6 +37,7 @@ import type {
   ImportPreviewResponse,
   ImportResponse,
   InferenceRun,
+  InferenceRunSummary,
   InferenceRunCreate,
   InferenceWindow,
   IaaReport,
@@ -78,6 +79,7 @@ import type {
 import {
   getSessionGeneration,
   publishSessionChange,
+  publishMembershipChange,
 } from "@/auth/session";
 import {
   normalizeArtifactPackage,
@@ -988,8 +990,8 @@ async function listInferencePages<T>(path: string): Promise<T[]> {
   return items;
 }
 
-export function listInferenceRuns(projectId: number): Promise<InferenceRun[]> {
-  return listInferencePages<InferenceRun>(`/projects/${projectId}/inference/runs`);
+export function listInferenceRuns(projectId: number): Promise<InferenceRunSummary[]> {
+  return listInferencePages<InferenceRunSummary>(`/projects/${projectId}/inference/runs`);
 }
 
 export function getInferenceRun(runId: number): Promise<InferenceRun> {
@@ -1212,7 +1214,8 @@ export async function acceptInvite(
       ? "reject-credentials"
       : "invalidate-session",
   );
-  publishSessionChange(true);
+  if (payload.username && payload.password) publishSessionChange(true);
+  else publishMembershipChange();
 }
 
 export function listWorkspaceJoinRequests(

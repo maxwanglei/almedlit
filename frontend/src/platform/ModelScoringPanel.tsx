@@ -39,6 +39,8 @@ export default function ModelScoringPanel({
   const [pollExpired, setPollExpired] = useState(false);
   const [pollGeneration, setPollGeneration] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
+  const refreshRef = useRef(onRefresh);
+  refreshRef.current = onRefresh;
   const projectRef = useRef(projectId);
   const runsRef = useRef(runs);
   projectRef.current = projectId;
@@ -61,7 +63,7 @@ export default function ModelScoringPanel({
       (run) => run.status === "queued" || run.status === "running",
     );
     if (!currentActiveRuns.length) {
-      await onRefresh();
+      await refreshRef.current();
       return;
     }
     const requestedProjectId = projectId;
@@ -71,9 +73,9 @@ export default function ModelScoringPanel({
     if (projectRef.current !== requestedProjectId) return;
     setRuns((current) => mergeRuns(current, refreshed));
     if (refreshed.some((run) => run.status === "completed" || run.status === "failed")) {
-      await onRefresh();
+      await refreshRef.current();
     }
-  }, [onRefresh, projectId]);
+  }, [projectId]);
 
   useEffect(() => {
     if (!activeRunKey || pollExpired) return;
@@ -160,6 +162,7 @@ export default function ModelScoringPanel({
             </thead>
             <tbody>
               {runs.map((run) => {
+                const datasetVersion = data.datasetVersions.find((item) => item.id === run.dataset_version_id);
                 const version = data.modelVersions.find(
                   (item) => item.id === run.model_version_id,
                 );
@@ -178,7 +181,7 @@ export default function ModelScoringPanel({
                     <td data-label="Status" data-priority="status">
                       <PlatformStatus value={run.status} />
                     </td>
-                    <td data-label="Dataset">v{run.dataset_version_id}</td>
+                    <td data-label="Dataset">{datasetVersion ? `v${datasetVersion.version_number}` : `Dataset version ID ${run.dataset_version_id}`}</td>
                     <td data-label="Candidates">{feedbackSet?.candidate_count ?? "—"}</td>
                     <td data-label="Result">
                       {feedbackSet ? (

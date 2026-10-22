@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -94,6 +94,36 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("SystemAdministration", () => {
+  it("keeps the current user page after changing an account status", async () => {
+    const user = userEvent.setup();
+    mocks.listAdminUsers.mockImplementation(async (query) => ({ ...userPage, page: query.page }));
+    render(<SystemAdministration pathname="/admin/users" onNavigate={vi.fn()} />);
+    await screen.findByText("Ada Lovelace");
+    await user.click(screen.getByRole("button", { name: "Next page" }));
+    await waitFor(() => expect(mocks.listAdminUsers).toHaveBeenLastCalledWith(expect.objectContaining({ page: 2 })));
+    await user.click(screen.getByRole("button", { name: "View Ada Lovelace" }));
+    await user.click(await screen.findByRole("button", { name: "Deactivate account" }));
+    const buttons = screen.getAllByRole("button", { name: "Deactivate account" });
+    await user.click(buttons[buttons.length - 1]);
+    await screen.findByText("Ada Lovelace is now inactive.");
+    await waitFor(() => expect(mocks.listAdminUsers).toHaveBeenCalledTimes(3));
+    expect(mocks.listAdminUsers).toHaveBeenLastCalledWith(expect.objectContaining({ page: 2 }));
+  });
+
+  it("disables policy saving while a refresh is pending", async () => {
+    const user = userEvent.setup();
+    render(<SystemAdministration pathname="/admin/settings" onNavigate={vi.fn()} />);
+    await screen.findByText("Runtime summary");
+    let resolveRefresh!: (value: AdminSettings) => void;
+    mocks.getAdminSettings.mockReturnValueOnce(new Promise<AdminSettings>((resolve) => { resolveRefresh = resolve; }));
+    await user.click(screen.getByRole("button", { name: "Refresh settings" }));
+    expect(screen.getByRole("button", { name: "Save policy" }).hasAttribute("disabled")).toBe(true);
+    await user.click(screen.getByRole("button", { name: "Save policy" }));
+    expect(mocks.updateAdminSettings).not.toHaveBeenCalled();
+    await act(async () => { resolveRefresh(settings); });
+    expect(screen.getByRole("button", { name: "Save policy" }).hasAttribute("disabled")).toBe(false);
+  });
+
   it("defaults to the deployment user directory and applies server-side filters", async () => {
     const user = userEvent.setup();
     render(<SystemAdministration pathname="/admin" onNavigate={vi.fn()} />);

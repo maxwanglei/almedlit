@@ -48,6 +48,12 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("My Work saved task inventory", () => {
+  it("explains absent assigned work without claiming there are no saved tasks", () => {
+    render(<MyWorkTaskInventory project={project} contexts={[]} canReadAllTasks={false} canManage={false} onNavigate={vi.fn()} />);
+    expect(screen.queryByText("No annotation tasks have been saved for this project.")).toBeNull();
+    expect(screen.getByText("No annotation rounds are assigned to you for this project.")).toBeTruthy();
+    expect(request).not.toHaveBeenCalled();
+  });
   it("shows the actual two saved tasks even when only classification has an assigned round", async () => {
     const navigate = vi.fn();
     render(<MyWorkTaskInventory project={project} contexts={[context]} canReadAllTasks canManage onNavigate={navigate} />);

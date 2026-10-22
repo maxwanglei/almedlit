@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Project } from "@/types/api";
+import { publishSessionChange } from "@/auth/session";
 
 import TrainingWorkspace, { trainingDraftKey } from "./TrainingWorkspace";
 import type { DatasetDraft, TaskDraft } from "./api";
@@ -29,6 +30,9 @@ function deferred<T>(): {
 }
 
 const mocks = vi.hoisted(() => ({
+  request: vi.fn().mockResolvedValue([]),
+  previewTrainingDataset: vi.fn(),
+  prepareTrainingDataset: vi.fn(),
   cancelTrainingRun: vi.fn(),
   createDatasetWithVersion: vi.fn(),
   createExecutionEnvironment: vi.fn(),
@@ -46,7 +50,9 @@ const mocks = vi.hoisted(() => ({
   validateTaskDraft: vi.fn(),
 }));
 
+vi.mock("@/api/client", async (original) => ({ ...await original<Record<string, unknown>>(), request: mocks.request }));
 vi.mock("./api", () => mocks);
+vi.mock("./trainingPreparationApi", () => ({ previewTrainingDataset: mocks.previewTrainingDataset, prepareTrainingDataset: mocks.prepareTrainingDataset }));
 
 const project: Project = {
   id: 7,
@@ -184,6 +190,8 @@ const baseProps = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.request.mockResolvedValue([]);
+  sessionStorage.clear();
   mocks.listWorkspaceTrainingContexts.mockResolvedValue({
     items: [],
     next_cursor: null,
@@ -317,7 +325,7 @@ describe("TrainingWorkspace", () => {
     ).toContain(otherProject.name);
     expect(
       await screen.findByRole("option", {
-        name: "Fresh workspace dataset",
+        name: "Fresh workspace dataset · v1",
       }),
     ).toBeTruthy();
 
@@ -382,7 +390,7 @@ describe("TrainingWorkspace", () => {
       />,
     );
     expect(
-      await screen.findByRole("option", { name: "Current dataset" }),
+      await screen.findByRole("option", { name: "Current dataset · v1" }),
     ).toBeTruthy();
 
     await act(async () => {
@@ -392,7 +400,7 @@ describe("TrainingWorkspace", () => {
     });
 
     expect(
-      screen.getByRole("option", { name: "Current dataset" }),
+      screen.getByRole("option", { name: "Current dataset · v1" }),
     ).toBeTruthy();
     expect(
       screen.queryByRole("option", { name: "Stale dataset" }),
@@ -709,7 +717,7 @@ describe("TrainingWorkspace", () => {
     });
     expect(
       await screen.findByRole("button", {
-        name: "Step 1 of 5: Task & Data",
+        name: "Step 1 of 5: Task & data",
       }),
     ).toBeTruthy();
     await waitFor(() => {
@@ -810,6 +818,8 @@ describe("TrainingWorkspace", () => {
     );
 
     await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(mocks.cancelTrainingRun).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Cancel run" }));
 
     await waitFor(() =>
       expect(mocks.cancelTrainingRun).toHaveBeenCalledWith(7, 151),
@@ -1117,10 +1127,214 @@ it("handles failed launch clicks and preserves the attempt identity until the dr
   const firstAttempt = mocks.launchTrainingRun.mock.calls[0]?.[3];
   expect(firstAttempt).toMatchObject({ key: expect.any(String) });
   expect(mocks.launchTrainingRun.mock.calls[1]?.[3]).toBe(firstAttempt);
-  await user.click(screen.getByRole("button", { name: "Model & Recipe" }));
+  await user.click(screen.getByRole("button", { name: "Model & recipe" }));
   await user.type(screen.getByLabelText("Model name"), " changed");
-  await user.click(screen.getByRole("button", { name: "Review & Launch" }));
+  await user.click(screen.getByRole("button", { name: "Review" }));
   await user.click(screen.getByRole("button", { name: "Launch training" }));
   await waitFor(() => expect(mocks.launchTrainingRun).toHaveBeenCalledTimes(3));
   expect(mocks.launchTrainingRun.mock.calls[2]?.[3].key).not.toBe(firstAttempt.key);
+});
+
+it("retains a newly registered runtime when an earlier load finishes", async () => {
+  const user = userEvent.setup(); const initialLoad = deferred<PlatformProjectData>();
+  mocks.listWorkspaceTrainingContexts.mockResolvedValue({ items: [trainingContext(project)], next_cursor: null });
+  mocks.loadPlatformProject.mockReturnValue(initialLoad.promise);
+  render(<TrainingWorkspace {...baseProps} view="runtimes" initialProjectId={7} canProvisionRuntimes />);
+  await user.type(await screen.findByRole("textbox", { name: "Runtime name" }), "Classical CPU");
+  await user.type(screen.getByRole("textbox", { name: "Immutable image digest" }), `sha256:${"a".repeat(64)}`);
+  await user.click(screen.getByRole("button", { name: "Register runtime" }));
+  await waitFor(() => expect(mocks.createExecutionEnvironment).toHaveBeenCalled());
+  await act(async () => { initialLoad.resolve(EMPTY_PLATFORM_PROJECT_DATA); });
+  expect(screen.getByLabelText("Runtime").querySelector('option[value="131"]')).toBeTruthy();
+});
+it("preserves the training wizard when changing back to the same context", async () => {
+  const user = userEvent.setup();
+  mocks.listWorkspaceTrainingContexts.mockResolvedValue({ items: [trainingContext(project)], next_cursor: null });
+  mocks.loadPlatformProject.mockResolvedValue(trainingProjectData(7, "Ready data"));
+  render(<TrainingWorkspace {...baseProps} view="new" initialProjectId={7} />);
+  const next = await screen.findByRole("button", { name: "Continue" });
+  await waitFor(() => expect(next).toHaveProperty("disabled", false));
+  await user.click(next);
+  await user.type(screen.getByLabelText("Model name"), "Keep my model");
+  await user.click(screen.getByRole("button", { name: "Change context" }));
+  await user.click(screen.getByRole("button", { name: "Use selected project" }));
+  expect(await screen.findByLabelText("Model name")).toHaveProperty("value", "Keep my model");
+});
+it.each(["train", "data"])("offers context recovery when the initial %s request fails", async (failedScope) => {
+  const user = userEvent.setup();
+  mocks.listWorkspaceTrainingContexts.mockResolvedValue({ items: [trainingContext(project)], next_cursor: null });
+  mocks.loadPlatformProject.mockImplementation(async (_projectId: number, scope: string) => {
+    if (scope === failedScope) throw new Error("Project inputs unavailable");
+    return trainingProjectData(7, "Ready data");
+  });
+  render(<TrainingWorkspace {...baseProps} view="new" initialProjectId={7} />);
+  expect((await screen.findByRole("alert")).textContent).toContain("Project inputs unavailable");
+  expect(screen.queryByText("Loading Evidence classification…")).toBeNull();
+  expect(screen.queryByLabelText("Model name")).toBeNull();
+  await user.click(screen.getByRole("button", { name: "Change context" }));
+  expect(screen.getByRole("button", { name: "Use selected project" })).toBeTruthy();
+  mocks.loadPlatformProject.mockResolvedValue(trainingProjectData(7, "Recovered data"));
+  await user.click(screen.getByRole("button", { name: "Use selected project" }));
+  expect(await screen.findByRole("option", { name: "Recovered data · v1" })).toBeTruthy();
+});
+it("updates a running detail until completion and removes cancellation", async () => {
+  vi.useFakeTimers();
+  try {
+    mocks.findWorkspaceTrainingRun.mockResolvedValueOnce({ ...workspaceRun(151, 7, "Baseline"), status: "running" }).mockResolvedValue(workspaceRun(151, 7, "Baseline"));
+    render(<TrainingWorkspace {...baseProps} view="run-detail" runId={151} />);
+    await act(async () => undefined);
+    expect(screen.getByRole("button", { name: "Cancel run" })).toBeTruthy();
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+    expect(screen.queryByRole("button", { name: "Cancel run" })).toBeNull();
+    expect(screen.getByText("Succeeded")).toBeTruthy();
+    const count = mocks.findWorkspaceTrainingRun.mock.calls.length;
+    await act(async () => { await vi.advanceTimersByTimeAsync(9_000); });
+    expect(mocks.findWorkspaceTrainingRun).toHaveBeenCalledTimes(count);
+  } finally { vi.useRealTimers(); }
+});
+it("offers trainable entity contracts in Training task creation", async () => {
+  const user = userEvent.setup();
+  mocks.listWorkspaceTrainingContexts.mockResolvedValue({ items: [trainingContext(project)], next_cursor: null });
+  mocks.loadPlatformProject.mockResolvedValue(trainingProjectData(7, "Ready data"));
+  render(<TrainingWorkspace {...baseProps} view="data" initialProjectId={7} canCreateTask />);
+  await user.click(await screen.findByRole("button", { name: "Define task" }));
+  expect(screen.queryByRole("option", { name: "Named entities (NER) in papers" })).toBeNull();
+  expect(screen.getByRole("option", { name: "Token labeling (tokenized data)" })).toBeTruthy();
+  expect(screen.getByRole("option", { name: "Span extraction" })).toBeTruthy();
+});
+
+it("clears the saved confirmation after five seconds", async () => {
+  const user = userEvent.setup();
+  const data = trainingProjectData(7, "Ready data");
+  data.datasets = [{ id: 1, project_id: 7, name: "Source", source_type: "upload", description: null }];
+  data.datasetVersions = [{ id: 11, project_id: 7, dataset_id: 1, version_number: 1, item_count: 12, data_schema: { properties: { label: { type: "string" } } }, source_uri: null, source_revision: "1", source_format: "json", provenance: {}, license_info: {}, content_hash: "source", artifact_package_id: null }];
+  mocks.listWorkspaceTrainingContexts.mockResolvedValue({ items: [trainingContext(project)], next_cursor: null });
+  mocks.loadPlatformProject.mockResolvedValue(data);
+  mocks.previewTrainingDataset.mockResolvedValue({ ready: true, issues: [], source_counts: [], item_count: 12, group_count: 12, excluded_unlabeled_count: 0, duplicate_count: 0, split_counts: {}, manifest_hash: "f".repeat(64) });
+  mocks.prepareTrainingDataset.mockResolvedValue({ training_dataset_version: { id: 33, name: "Prepared", version_number: 1 } });
+  render(<TrainingWorkspace {...baseProps} view="data" initialProjectId={7} search="?projectId=7&flow=prepare" />);
+  await user.type(await screen.findByLabelText("Training dataset name"), "Prepared");
+  await user.click(screen.getByRole("button", { name: "Preview training dataset" }));
+  const create = await screen.findByRole("button", { name: "Create training dataset" });
+  vi.useFakeTimers();
+  try {
+    fireEvent.click(create);
+    await act(async () => undefined);
+    expect(screen.getByText(/saved. Choose Train model/)).toBeTruthy();
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(screen.queryByText(/saved. Choose Train model/)).toBeNull();
+  } finally { vi.useRealTimers(); }
+});
+
+it("keeps a saved training version recoverable when its project refresh fails", async () => {
+  const user = userEvent.setup();
+  sessionStorage.setItem("al-medlit:training-preparation:7:new:all", JSON.stringify({ saved: { id: 33, name: "Prepared", version_number: 1 } }));
+  mocks.listWorkspaceTrainingContexts.mockResolvedValue({ items: [trainingContext(project)], next_cursor: null });
+  mocks.loadPlatformProject.mockResolvedValue(trainingProjectData(7, "Ready data"));
+  render(<TrainingWorkspace {...baseProps} view="data" initialProjectId={7} search="?projectId=7&flow=prepare" />);
+  const open = await screen.findByRole("button", { name: "Open saved dataset" });
+  mocks.loadPlatformProject.mockRejectedValue(new Error("Summary offline"));
+  await user.click(open);
+  expect((await screen.findAllByRole("alert")).some((alert) => alert.textContent?.includes("Summary offline"))).toBe(true);
+  expect(baseProps.onNavigate).not.toHaveBeenCalled();
+  mocks.loadPlatformProject.mockResolvedValue(trainingProjectData(7, "Ready data"));
+  await user.click(screen.getByRole("button", { name: "Retry opening saved dataset" }));
+  await waitFor(() => expect(baseProps.onNavigate).toHaveBeenCalledWith("/training/data?projectId=7&tab=training"));
+  expect(mocks.prepareTrainingDataset).not.toHaveBeenCalled();
+});
+
+it.each(["logout", "unmount"])("does not navigate after %s interrupts opening a saved training version", async (interruption) => {
+  const user = userEvent.setup();
+  const key = "al-medlit:training-preparation:7:new:all";
+  sessionStorage.setItem(key, JSON.stringify({ saved: { id: 33, name: "Prepared", version_number: 1 } }));
+  mocks.listWorkspaceTrainingContexts.mockResolvedValue({ items: [trainingContext(project)], next_cursor: null });
+  const data = trainingProjectData(7, "Ready data");
+  mocks.loadPlatformProject.mockResolvedValue(data);
+  const mounted = render(<TrainingWorkspace {...baseProps} view="data" initialProjectId={7} search="?projectId=7&flow=prepare" />);
+  const open = await screen.findByRole("button", { name: "Open saved dataset" });
+  const refresh = deferred<PlatformProjectData>();
+  mocks.loadPlatformProject.mockReturnValue(refresh.promise);
+  await user.click(open);
+  await waitFor(() => expect(mocks.loadPlatformProject).toHaveBeenCalledTimes(4));
+  if (interruption === "logout") publishSessionChange(false);
+  else mounted.unmount();
+  const replacement = JSON.stringify({ draft: { name: "Another user's dataset" } });
+  sessionStorage.setItem(key, replacement);
+  await act(async () => { refresh.resolve(data); await refresh.promise; });
+  expect(baseProps.onNavigate).not.toHaveBeenCalled();
+  expect(sessionStorage.getItem(key)).toBe(replacement);
+});
+
+it("keeps run failures, evaluation reasons and timings visible in run details", async () => {
+  mocks.findWorkspaceTrainingRun.mockResolvedValue({ ...workspaceRun(151, 7, "Baseline"), status: "failed", failure_reason: "Worker ran out of memory", started_at: "2026-10-22T12:00:00Z", completed_at: "2026-10-22T12:05:00Z" });
+  mocks.request.mockResolvedValue([{ id: 16, split_name: "test", status: "unsupported", status_reason: "The test split has no labeled records.", metrics: {} }]);
+  render(<TrainingWorkspace {...baseProps} view="run-detail" runId={151} />);
+  expect(await screen.findByText("Worker ran out of memory")).toBeTruthy();
+  expect(await screen.findByText("The test split has no labeled records.")).toBeTruthy();
+  expect(screen.getByText("Started")).toBeTruthy();
+  expect(screen.getByText("Completed")).toBeTruthy();
+  expect(mocks.request).toHaveBeenCalledWith("/training-runs/151/evaluations?project_id=7");
+});
+
+it("reports a run request failure separately from a missing run", async () => {
+  mocks.findWorkspaceTrainingRun.mockRejectedValue(new Error("Run service offline"));
+  render(<TrainingWorkspace {...baseProps} view="run-detail" runId={151} />);
+  expect(await screen.findByRole("heading", { name: "Training run could not be loaded" })).toBeTruthy();
+  expect(screen.queryByText("Training run not found")).toBeNull();
+});
+
+it("keeps the project context in training section links", () => {
+  render(<TrainingWorkspace {...baseProps} view="runs" initialProjectId={7} />);
+  expect(screen.getByRole("link", { name: "Runtimes" }).getAttribute("href")).toBe("/training/runtimes?projectId=7");
+  expect(screen.getByRole("link", { name: "Training data" }).getAttribute("href")).toBe("/training/data?projectId=7");
+});
+
+it("keeps a create action when saved training datasets already exist", async () => {
+  mocks.listWorkspaceTrainingContexts.mockResolvedValue({ items: [trainingContext(project)], next_cursor: null });
+  mocks.loadPlatformProject.mockResolvedValue(trainingProjectData(7, "Existing training data"));
+  const user = userEvent.setup();
+  render(<TrainingWorkspace {...baseProps} view="data" initialProjectId={7} />);
+  const create = await screen.findByRole("button", { name: "Create training dataset" });
+  await user.click(create);
+  expect(baseProps.onNavigate).toHaveBeenLastCalledWith("/training/data?projectId=7&flow=prepare");
+});
+
+it.each([
+  { field: "Package manifest JSON", action: "Register runtime", invalid: "{", message: "Package manifest must be valid JSON.", request: mocks.createExecutionEnvironment },
+  { field: "Hardware constraints JSON", action: "Register runtime", invalid: "[]", message: "Hardware constraints must be a JSON object.", request: mocks.createExecutionEnvironment },
+  { field: "Preflight report JSON", action: "Record preflight", invalid: "{", message: "Preflight report must be valid JSON.", request: mocks.verifyExecutionEnvironment },
+  { field: "Encryption settings JSON", action: "Add storage policy", invalid: "[]", message: "Encryption settings must be a JSON object.", request: mocks.createStoragePolicy },
+  { field: "Cache policy JSON", action: "Add storage policy", invalid: "{", message: "Cache policy must be valid JSON.", request: mocks.createStoragePolicy },
+])("reveals and describes invalid $field before provisioning", async ({ field: fieldName, action, invalid, message, request }) => {
+  const user = userEvent.setup();
+  const data = trainingProjectData(7, "Ready data");
+  data.environments = [{ id: 9131, project_id: 7, name: "CPU", environment_class: "classical-cpu", image_digest: `sha256:${"a".repeat(64)}`,
+    package_manifest: {}, hardware_constraints: {}, status: "available", verification_report: {}, verified_at: null }];
+  mocks.listWorkspaceTrainingContexts.mockResolvedValue({ items: [trainingContext(project)], next_cursor: null });
+  mocks.loadPlatformProject.mockResolvedValue(data);
+  render(<TrainingWorkspace {...baseProps} view="runtimes" initialProjectId={7} canProvisionRuntimes />);
+  await user.type(await screen.findByRole("textbox", { name: "Runtime name" }), "CPU runtime");
+  await user.type(screen.getByRole("textbox", { name: "Immutable image digest" }), `sha256:${"a".repeat(64)}`);
+  await user.type(screen.getByRole("textbox", { name: "Policy name" }), "Artifacts");
+  await user.selectOptions(screen.getByRole("combobox", { name: "Runtime" }), "9131");
+  const field = screen.getByLabelText(fieldName);
+  const disclosure = field.closest("details");
+  if (disclosure) disclosure.open = true;
+  fireEvent.change(field, { target: { value: invalid } });
+  if (disclosure) disclosure.open = false;
+
+  await user.click(screen.getByRole("button", { name: action }));
+
+  const error = await screen.findByText(message);
+  expect(field.getAttribute("aria-invalid")).toBe("true");
+  expect(field.getAttribute("aria-describedby")).toBe(error.id);
+  expect(screen.getByRole("textbox", { name: fieldName })).toBe(field);
+  expect(document.activeElement).toBe(field);
+  if (disclosure) expect(disclosure.open).toBe(true);
+  expect(request).not.toHaveBeenCalled();
+  fireEvent.change(field, { target: { value: "{}" } });
+  await user.click(screen.getByRole("button", { name: action }));
+  await waitFor(() => expect(request).toHaveBeenCalledTimes(1));
+  expect(field.getAttribute("aria-invalid")).toBeNull();
+  expect(screen.queryByText(message)).toBeNull();
 });
