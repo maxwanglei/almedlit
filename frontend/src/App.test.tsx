@@ -121,20 +121,6 @@ vi.mock("@/pages/AnnotatorWorkspace", () => ({
     </section>;
   },
 }));
-vi.mock("@/pages/ManagerConsole", () => ({
-  default: ({
-    moduleSwitcher,
-    workspaceSwitcher,
-  }: {
-    moduleSwitcher?: ReactNode;
-    workspaceSwitcher?: ReactNode;
-  }) => (
-    <section aria-label="Mock manager workspace">
-      {moduleSwitcher}
-      {workspaceSwitcher}
-    </section>
-  ),
-}));
 vi.mock("@/pages/LoginPage", () => ({
   default: ({
     onAuthed,
@@ -323,10 +309,6 @@ vi.mock("@/platform/usePlatformProject", () => ({
       modelVersions: [],
       guidelines: [],
       guidelineRevisions: [],
-      guidelineProposals: [],
-      guidelineImpacts: [],
-      feedbackEvents: [],
-      reviewCases: [],
       trainingRuns: [],
       recipes: [],
       baseModels: [],

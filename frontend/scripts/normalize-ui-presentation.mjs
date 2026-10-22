@@ -10,7 +10,7 @@ function visitFiles(directory) {
   for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
     const filename = path.join(directory, entry.name);
     if (entry.isDirectory()) visitFiles(filename);
-    else if (filename.endsWith(".tsx") && !filename.endsWith(".test.tsx") && !["ManagerConsole.tsx", "TrainingConsole.tsx", "LoadingState.tsx", "NativeField.tsx", "ValidatedForm.tsx"].includes(entry.name)) normalize(filename);
+    else if (filename.endsWith(".tsx") && !filename.endsWith(".test.tsx") && !["LoadingState.tsx", "NativeField.tsx", "ValidatedForm.tsx"].includes(entry.name)) normalize(filename);
   }
 }
 

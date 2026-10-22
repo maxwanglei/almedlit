@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  getProject,
   getProjectProgress,
   listDocumentSummaries,
   listMyWorkProjects,
@@ -13,7 +12,6 @@ import type { Document, Project, ProjectProgress, TaskAssignment } from "@/types
 import { useProjectWorkspaceStore } from "./projectWorkspaceStore";
 
 vi.mock("@/api/client", () => ({
-  getProject: vi.fn(),
   getProjectProgress: vi.fn(),
   listDocumentSummaries: vi.fn(),
   listMyWorkProjects: vi.fn(),
@@ -95,7 +93,6 @@ function progress(projectId: number): ProjectProgress {
 
 describe("project workspace store", () => {
   beforeEach(() => {
-    vi.mocked(getProject).mockReset();
     vi.mocked(getProjectProgress).mockReset();
     vi.mocked(listDocumentSummaries).mockReset();
     vi.mocked(listMyWorkProjects).mockReset();

@@ -15,25 +15,19 @@ import type {
   DatasetItem,
   DatasetVersion,
   ExecutionEnvironment,
-  FeedbackEvent,
   FeedbackReveal,
   FeedbackRun,
   FeedbackSetVersion,
   Guideline,
-  GuidelineImpact,
-  GuidelineProposal,
   GuidelineRevision,
   LabelSetVersion,
   LearningCycle,
-  LearningFeedbackProducer,
-  LearningFeedbackSource,
   ModelEvaluation,
   ModelVersion,
   PlatformProjectData,
   ProjectModule,
   ProjectModules,
   RegisteredModel,
-  ReviewCase,
   RoundWorkContext,
   RoundWorkItemIdentity,
   RoundWorkRound,
@@ -73,11 +67,8 @@ type PlatformCollection =
   | "cycles"
   | "datasetVersions"
   | "datasets"
-  | "feedbackEvents"
   | "feedbackRuns"
   | "feedbackSets"
-  | "guidelineImpacts"
-  | "guidelineProposals"
   | "guidelineRevisions"
   | "guidelines"
   | "labelSets"
@@ -88,7 +79,6 @@ type PlatformCollection =
   | "projectRecipes"
   | "recipeVersions"
   | "recipes"
-  | "reviewCases"
   | "rounds"
   | "splitMaps"
   | "storagePolicies"
@@ -369,10 +359,6 @@ export async function loadPlatformProject(
     feedbackSets,
     models,
     guidelines,
-    guidelineProposals,
-    guidelineImpacts,
-    feedbackEvents,
-    reviewCases,
     trainingRuns,
     recipes,
     baseModels,
@@ -404,18 +390,6 @@ export async function loadPlatformProject(
       loadOptionalCollection(() =>
         request<Guideline[]>(`/workflow-guidelines?${query}`),
       ),
-    ),
-    loadWhen("guidelineProposals", () =>
-      request<GuidelineProposal[]>(`/workflow-guidelines/proposals?${query}`),
-    ),
-    loadWhen("guidelineImpacts", () =>
-      request<GuidelineImpact[]>(`/workflow-guidelines/impact-evaluations?${query}`),
-    ),
-    loadWhen("feedbackEvents", () =>
-      request<FeedbackEvent[]>(`/feedback-runs/events?${query}`),
-    ),
-    loadWhen("reviewCases", () =>
-      request<ReviewCase[]>(`/feedback-runs/review-cases?${query}`),
     ),
     loadWhen("trainingRuns", () =>
       request<TrainingRun[]>(`/training-runs?${query}`),
@@ -509,10 +483,6 @@ export async function loadPlatformProject(
     modelEvaluations,
     guidelines,
     guidelineRevisions,
-    guidelineProposals,
-    guidelineImpacts,
-    feedbackEvents,
-    reviewCases,
     trainingRuns,
     recipes,
     baseModels,
@@ -1135,49 +1105,6 @@ export async function createTaskWithVersion(
   return post<TaskVersion>("/tasks/versions", { ...payload, task_definition_id: task.id });
 }
 
-export interface TrainingDataDraft {
-  name: string;
-  datasetVersionId: number;
-  taskVersionId: number;
-  labelSource: "existing_label_set" | "dataset_field";
-  labelSetVersionId: number | null;
-  labelField: string;
-  inputField: string;
-  trainPercent: number;
-  validationPercent: number;
-}
-
-export async function createTrainingDataset(
-  projectId: number,
-  draft: TrainingDataDraft,
-): Promise<TrainingDatasetVersion> {
-  const response = await post<{
-    training_dataset_version: TrainingDatasetVersion;
-    label_set_version_id: number;
-    split_map_id: number;
-    split_counts: Record<string, number>;
-    group_count: number;
-  }>("/datasets/training-versions/compose", {
-    project_id: projectId,
-    name: draft.name.trim(),
-    dataset_version_id: draft.datasetVersionId,
-    task_version_id: draft.taskVersionId,
-    input_field: draft.inputField.trim(),
-    label_field:
-      draft.labelSource === "dataset_field"
-        ? draft.labelField.trim()
-        : null,
-    label_set_version_id:
-      draft.labelSource === "existing_label_set"
-        ? draft.labelSetVersionId
-        : null,
-    train_percent: draft.trainPercent,
-    validation_percent: draft.validationPercent,
-    seed: 42,
-  });
-  return response.training_dataset_version;
-}
-
 export function getAnnotationRound(roundId: number): Promise<AnnotationRound> {
   return request<AnnotationRound>(`/rounds/${roundId}`);
 }
@@ -1197,44 +1124,6 @@ export function listWorkspaceRoundWorkContexts(
   return requestRoundPages<RoundWorkContext>(
     `/workspaces/${workspaceId}/my-work/rounds`,
   );
-}
-
-export interface CycleDraft {
-  name: string;
-  goal: "expand_pool" | "reannotate" | "guideline_pilot" | "error_remediation";
-  taskVersionId: number;
-  datasetVersionId: number;
-  baselineModelVersionId: number | null;
-  feedbackSources: Array<
-    Omit<
-      LearningFeedbackSource,
-      | "provider"
-      | "external_model_id"
-      | "exact_revision"
-      | "configuration"
-      | "data_egress_policy"
-    > & {
-      producer_type: LearningFeedbackProducer;
-      provider?: string | null;
-      external_model_id?: string | null;
-      exact_revision?: string | null;
-      configuration?: Record<string, unknown>;
-      data_egress_policy?: Record<string, unknown>;
-    }
-  >;
-}
-
-export function createCycle(projectId: number, draft: CycleDraft): Promise<LearningCycle> {
-  return post<LearningCycle>("/cycles", {
-    project_id: projectId,
-    name: draft.name.trim(),
-    goal: draft.goal,
-    task_version_id: draft.taskVersionId,
-    source_dataset_version_id: draft.datasetVersionId,
-    baseline_model_version_id: draft.baselineModelVersionId,
-    feedback_sources: draft.feedbackSources,
-    metadata: {},
-  });
 }
 
 export interface RoundDraft {
@@ -1319,7 +1208,7 @@ export interface FeedbackScoringDraft {
   modelVersionId: number;
 }
 
-export function createFeedbackRun(
+function createFeedbackRun(
   projectId: number,
   draft: FeedbackScoringDraft,
 ): Promise<FeedbackRun> {
@@ -1335,7 +1224,7 @@ export function createFeedbackRun(
   });
 }
 
-export function materializeFeedbackRun(
+function materializeFeedbackRun(
   projectId: number,
   feedbackRunId: number,
 ): Promise<FeedbackRun> {
@@ -1449,21 +1338,6 @@ export function revealRoundFeedback(
   );
 }
 
-export function recordFeedbackDecision(
-  projectId: number,
-  exposureId: number,
-  annotationDecisionId: number,
-  decision: "accepted" | "modified" | "rejected" | "ignored",
-): Promise<void> {
-  return post<void>("/feedback-runs/decisions", {
-    project_id: projectId,
-    feedback_exposure_id: exposureId,
-    round_annotation_decision_id: annotationDecisionId,
-    decision,
-    details: {},
-  });
-}
-
 export function transitionRound(
   projectId: number,
   roundId: number,
@@ -1491,36 +1365,6 @@ export function publishRoundLabelSet(
     submission_ids: payload.submissionIds,
     parent_version_id: null,
     composition_policy: "replace",
-  });
-}
-
-export interface GuidelineDraft {
-  name: string;
-  description: string;
-  taskDefinitionId: number;
-  taskVersionId: number;
-  markdown: string;
-  rationale: string;
-}
-
-export async function createGuidelineWithRevision(
-  projectId: number,
-  draft: GuidelineDraft,
-): Promise<GuidelineRevision> {
-  const guideline = await post<Guideline>("/workflow-guidelines", {
-    project_id: projectId,
-    task_definition_id: draft.taskDefinitionId,
-    name: draft.name.trim(),
-    description: draft.description.trim() || null,
-  });
-  return post<GuidelineRevision>("/workflow-guidelines/revisions", {
-    project_id: projectId,
-    guideline_id: guideline.id,
-    task_version_id: draft.taskVersionId,
-    markdown: draft.markdown,
-    rationale: draft.rationale.trim() || null,
-    diff_summary: {},
-    source_proposal_ids: [],
   });
 }
 

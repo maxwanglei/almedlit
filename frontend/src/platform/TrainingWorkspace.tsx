@@ -15,7 +15,6 @@ import {
   cancelTrainingRun,
   createExecutionEnvironment,
   createStoragePolicy,
-  createTrainingDataset,
   createTrainingOnlyProject,
   findWorkspaceTrainingRun,
   launchTrainingRun,
@@ -66,7 +65,6 @@ export interface TrainingWorkspaceProps {
   initialTaskVersionId?: number | null;
   initialLabelSetVersionId?: number | null;
   initialTrainingDatasetVersionId?: number | null;
-  initialTrainingDatasetId?: number | null;
   search?: string;
   currentUserId: number;
   currentUserName: string;
@@ -77,7 +75,7 @@ export interface TrainingWorkspaceProps {
   onProjectCreated?: (project: Project) => void | Promise<void>;
 }
 
-type TrainingDialog = "dataset" | "task" | "trainingData" | null;
+type TrainingDialog = "dataset" | "task" | null;
 
 export function trainingDraftKey(
   workspaceId: number,
@@ -985,7 +983,6 @@ function NewTraining({
         }
         creatorLabel={currentUserName}
         title="New training"
-        showRecentRuns={false}
         initialDatasetId={projectId === initialProjectId ? initialDatasetId : null}
         initialTrainingDatasetVersionId={projectId === initialProjectId ? initialTrainingDatasetVersionId : null}
         initialEnvironmentId={
@@ -1258,7 +1255,6 @@ function TrainingData({
           taskPurpose="training"
           data={data}
           busy={busy}
-          initialDatasetId={initialDatasetId}
           onClose={() => {
             setDialog(null);
           }}
@@ -1268,20 +1264,11 @@ function TrainingData({
           onCreateTask={(draft) =>
             mutate(() => resourceCreation.createTask(draft))
           }
-          onPrepareTrainingData={(draft) =>
-            mutate(() => createTrainingDataset(projectId, draft))
-          }
-          onCreateCycle={async () => {
-            throw new Error("Learning cycles are planned for a later release.");
-          }}
           onCreateRound={async () => {
             throw new Error("Rounds are managed from Projects.");
           }}
           onScoreFeedback={async () => {
             throw new Error("Model scoring is managed from Projects.");
-          }}
-          onCreateGuideline={async () => {
-            throw new Error("Guideline Learning is planned for a later release.");
           }}
         />
       ) : null}

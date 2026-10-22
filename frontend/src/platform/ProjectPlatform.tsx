@@ -41,11 +41,8 @@ import type { Dataset, PlatformProjectData, ProjectModule } from "./types";
 export type PlatformDialogKind =
   | "dataset"
   | "task"
-  | "trainingData"
-  | "cycle"
   | "round"
   | "feedbackScore"
-  | "guideline"
   | null;
 
 interface ProjectPlatformProps {
@@ -209,7 +206,6 @@ export default function ProjectPlatform({
           onOpenRound={onOpenRound}
           currentUserId={currentUserId}
           canManage={canManageAnnotation}
-          canScore={false}
           projectId={project.id}
           onCreateScore={() => onDialogChange("feedbackScore")}
           onRefresh={onRefresh}

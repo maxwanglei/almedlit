@@ -452,7 +452,6 @@ function Application(): React.ReactElement {
   const queryDatasetVersionId = positiveInteger(routeSearch.get("datasetVersionId") ?? undefined);
   const queryTaskVersionId = positiveInteger(routeSearch.get("taskVersionId") ?? undefined);
   const queryLabelSetVersionId = positiveInteger(routeSearch.get("labelSetVersionId") ?? undefined);
-  const queryTrainingDatasetId = positiveInteger(routeSearch.get("trainingDatasetId") ?? undefined);
   const queryTrainingDatasetVersionId = positiveInteger(
     routeSearch.get("trainingDatasetVersionId") ?? undefined,
   );
@@ -1805,10 +1804,8 @@ function Application(): React.ReactElement {
                 isPersonalWorkspace={activeWorkspaceIsIndividual}
                 onClose={() => setPlatformDialog(null)}
                 onCreateDataset={platform.addDataset}
-                onCreateCycle={platform.addCycle}
                 onCreateRound={platform.addRound}
                 onScoreFeedback={platform.scoreFeedback}
-                onCreateGuideline={platform.addGuideline}
                 onCreateTask={async (draft) => {
                   await platform.addTask(draft);
                   if (activeWorkspaceId !== null) {
@@ -1816,7 +1813,6 @@ function Application(): React.ReactElement {
                     await loadProjects(routedProject.id, true, activeWorkspaceId).catch(() => undefined);
                   }
                 }}
-                onPrepareTrainingData={platform.prepareTrainingData}
               />
             </Suspense>
           ) : undefined
@@ -1848,7 +1844,6 @@ function Application(): React.ReactElement {
         initialDatasetVersionId={queryDatasetVersionId}
         initialTaskVersionId={queryTaskVersionId}
         initialLabelSetVersionId={queryLabelSetVersionId}
-        initialTrainingDatasetId={queryTrainingDatasetId}
         initialTrainingDatasetVersionId={queryTrainingDatasetVersionId}
         currentUserId={currentUserId}
         currentUserName={currentUsername}

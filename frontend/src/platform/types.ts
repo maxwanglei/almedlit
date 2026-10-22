@@ -410,58 +410,6 @@ export interface GuidelineRevision extends VersionedResource {
   approved_at: string | null;
 }
 
-export interface GuidelineProposal extends VersionedResource {
-  project_id: number;
-  guideline_id: number;
-  base_revision_id: number | null;
-  feedback_event_ids: number[];
-  proposed_change: Record<string, unknown>;
-  rationale: string;
-  status: string;
-  resulting_revision_id: number | null;
-}
-
-export interface GuidelineImpact extends VersionedResource {
-  project_id: number;
-  guideline_revision_id: number;
-  pilot_round_id: number;
-  protected_split_map_id: number | null;
-  status: string;
-  metrics: Record<string, unknown>;
-  passed: boolean | null;
-  completed_at: string | null;
-}
-
-export interface FeedbackEvent extends VersionedResource {
-  project_id: number;
-  event_type:
-    | "correction"
-    | "iaa_disagreement"
-    | "model_disagreement"
-    | "adjudication"
-    | "drift"
-    | "evaluation_failure"
-    | "llm_critique";
-  cycle_id: number | null;
-  annotation_round_id: number | null;
-  round_item_id: number | null;
-  feedback_candidate_id: number | null;
-  severity: "low" | "medium" | "high" | "critical";
-  payload: Record<string, unknown>;
-  occurred_at: string;
-  created_by_user_id: number | null;
-}
-
-export interface ReviewCase extends VersionedResource {
-  project_id: number;
-  feedback_event_id: number;
-  case_type: string;
-  assigned_to_user_id: number | null;
-  status: string;
-  resolution: Record<string, unknown>;
-  resolved_at: string | null;
-}
-
 export interface TrainingRecipeDescriptor {
   schema_version: "training-recipe-descriptor-v1";
   key: string;
@@ -664,10 +612,6 @@ export interface PlatformProjectData {
   modelEvaluations: ModelEvaluation[];
   guidelines: Guideline[];
   guidelineRevisions: GuidelineRevision[];
-  guidelineProposals: GuidelineProposal[];
-  guidelineImpacts: GuidelineImpact[];
-  feedbackEvents: FeedbackEvent[];
-  reviewCases: ReviewCase[];
   trainingRuns: TrainingRun[];
   recipes: TrainingRecipeDescriptor[];
   baseModels: BaseModelAsset[];
@@ -701,10 +645,6 @@ export const EMPTY_PLATFORM_PROJECT_DATA: PlatformProjectData = {
   modelEvaluations: [],
   guidelines: [],
   guidelineRevisions: [],
-  guidelineProposals: [],
-  guidelineImpacts: [],
-  feedbackEvents: [],
-  reviewCases: [],
   trainingRuns: [],
   recipes: [],
   baseModels: [],

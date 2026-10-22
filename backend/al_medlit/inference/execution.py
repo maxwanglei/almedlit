@@ -29,6 +29,7 @@ from al_medlit.inference.decoder import (
     decode_evidence_blocks,
 )
 from al_medlit.inference.models import EvidenceCandidatePrediction, InferenceRun, InferenceWindow
+from al_medlit.inference.scores import label_probabilities, synthetic_logits
 from al_medlit.lineage.service import add_lineage_edge, register_stored_artifact
 from al_medlit.project.models import Project
 from al_medlit.training.compute.base import ComputeBackend, ComputeBackendError, JobBundle
@@ -48,16 +49,6 @@ from al_medlit.training.runner import (
 
 def _token_count(text: str) -> int:
     return max(1, len(text.split()))
-
-
-def _synthetic_logits(ordinal: int) -> tuple[float, float, float]:
-    # A deterministic two-sentence evidence span exercises B/I/O decoding and
-    # overlapping-window averaging without requiring torch or network access.
-    if ordinal == 0:
-        return (0.0, 6.0, 0.0)
-    if ordinal == 1:
-        return (0.0, 0.0, 6.0)
-    return (6.0, 0.0, 0.0)
 
 
 def _window_score_kind(checkpoint_manifest: dict) -> ScoreKind:
@@ -371,7 +362,7 @@ def _execute_claimed_local_inference(
             if synthetic_mode:
                 window_logits.append(
                     {
-                        sentence.ordinal: _synthetic_logits(sentence.ordinal)
+                        sentence.ordinal: synthetic_logits(sentence.ordinal)
                         for sentence in selected_sentences
                     }
                 )
@@ -401,14 +392,9 @@ def _execute_claimed_local_inference(
                         inside = positive
                 else:
                     labels = [str(value) for value in values]
-                one_hot = {
-                    "O": (1.0, 0.0, 0.0),
-                    "B": (0.0, 1.0, 0.0),
-                    "I": (0.0, 0.0, 1.0),
-                }
                 window_logits.append(
                     {
-                        sentence.ordinal: one_hot[labels[index]]
+                        sentence.ordinal: label_probabilities(labels[index])
                         for index, sentence in enumerate(selected_sentences)
                     }
                 )
@@ -476,11 +462,6 @@ def _execute_claimed_local_inference(
                     examples,
                     config=predictor.config,
                 )
-                one_hot = {
-                    "O": (1.0, 0.0, 0.0),
-                    "B": (0.0, 1.0, 0.0),
-                    "I": (0.0, 0.0, 1.0),
-                }
                 labels_by_ordinal = {
                     ordinal: label
                     for example, labels in zip(examples, predicted, strict=True)
@@ -492,7 +473,7 @@ def _execute_claimed_local_inference(
                 }
                 window_logits.append(
                     {
-                        sentence.ordinal: one_hot[labels_by_ordinal[sentence.ordinal]]
+                        sentence.ordinal: label_probabilities(labels_by_ordinal[sentence.ordinal])
                         for sentence in selected_sentences
                     }
                 )

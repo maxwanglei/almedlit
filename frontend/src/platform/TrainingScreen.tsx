@@ -8,7 +8,6 @@ import type { BaseModelAsset } from "@/types/api";
 import {
   PlatformEmpty,
   PlatformPageHeader,
-  PlatformSection,
   PlatformStatus,
   formatStatus,
   shortHash,
@@ -131,21 +130,6 @@ function modelNameMatches(left: string, right: string): boolean {
   );
 }
 
-function runRecipeLabel(
-  data: PlatformProjectData,
-  recipeVersionId: number,
-): string {
-  const version = data.recipeVersions.find(
-    (item) => item.id === recipeVersionId,
-  );
-  if (!version) return `Recipe version ${recipeVersionId}`;
-  const registered = data.projectRecipes.find(
-    (item) => item.id === version.training_recipe_id,
-  );
-  const descriptor = data.recipes.find((item) => item.key === registered?.key);
-  return `${descriptor?.label ?? registered?.name ?? "Training recipe"} · v${version.version_number}`;
-}
-
 function storageEncryptionLabel(
   encryption: Record<string, unknown>,
 ): string {
@@ -257,8 +241,6 @@ export default function TrainingScreen({
   contextLabel,
   creatorLabel,
   title = "Train",
-  showRecentRuns = true,
-  onOpenRun,
   initialDatasetId,
   initialTrainingDatasetVersionId,
   initialEnvironmentId,
@@ -272,8 +254,6 @@ export default function TrainingScreen({
   contextLabel?: string;
   creatorLabel?: string;
   title?: string;
-  showRecentRuns?: boolean;
-  onOpenRun?: (runId: number) => void;
   initialDatasetId?: number | null;
   initialTrainingDatasetVersionId?: number | null;
   initialEnvironmentId?: number | null;
@@ -1043,56 +1023,6 @@ export default function TrainingScreen({
         </div>
       </section>
 
-      {showRecentRuns ? (
-        <PlatformSection title="Recent runs" description="Run state is separate from model identity.">
-        {data.trainingRuns.length ? (
-          <div
-            className="platform-table-scroll platform-table-scroll--summary"
-            role="region"
-            aria-label="Recent training runs table"
-            tabIndex={0}
-          >
-            <table className="platform-table platform-table--summary">
-              <thead><tr><th scope="col">Run</th><th scope="col">Model</th><th scope="col">Training data</th><th scope="col">Recipe</th><th scope="col">Environment</th><th scope="col">Status</th></tr></thead>
-              <tbody>
-                {data.trainingRuns.map((run) => (
-                  <tr key={run.id}>
-                    <td data-label="Run" data-priority="identity">
-                      {onOpenRun ? (
-                        <button
-                          type="button"
-                          className="platform-text-action"
-                          onClick={() => onOpenRun(run.id)}
-                        >
-                          Run {run.id}
-                        </button>
-                      ) : (
-                        <strong>Run {run.id}</strong>
-                      )}
-                      <span>Seed {run.seed}</span>
-                    </td>
-                    <td data-label="Model">{data.models.find((item) => item.id === run.registered_model_id)?.name ?? `Model ${run.registered_model_id}`}</td>
-                    <td data-label="Training data">{data.trainingDatasets.find((item) => item.id === run.training_dataset_version_id)?.name ?? `Dataset version ${run.training_dataset_version_id}`}</td>
-                    <td data-label="Recipe">{runRecipeLabel(data, run.recipe_version_id)}</td>
-                    <td data-label="Environment">{data.environments.find((item) => item.id === run.environment_id)?.name ?? `Environment ${run.environment_id}`}</td>
-                    <td data-label="Status" data-priority="status">
-                      <PlatformStatus value={run.status} />
-                      {run.failure_reason ? (
-                        <span className="platform-run-failure">
-                          {run.failure_reason}
-                        </span>
-                      ) : null}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <p className="platform-inline-empty">No training runs yet.</p>
-        )}
-        </PlatformSection>
-      ) : null}
     </div>
   );
 }

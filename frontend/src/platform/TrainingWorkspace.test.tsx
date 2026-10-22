@@ -38,7 +38,6 @@ const mocks = vi.hoisted(() => ({
   createExecutionEnvironment: vi.fn(),
   createStoragePolicy: vi.fn(),
   createTaskWithVersion: vi.fn(),
-  createTrainingDataset: vi.fn(),
   createTrainingOnlyProject: vi.fn(),
   findWorkspaceTrainingRun: vi.fn(),
   launchTrainingRun: vi.fn(),

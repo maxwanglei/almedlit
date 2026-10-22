@@ -4,7 +4,6 @@ from al_medlit.training.compute.base import (
     JobBundle,
     JobState,
 )
-from al_medlit.training.compute.local import LocalComputeBackend
 from al_medlit.training.compute.slurm import SSHSlurmComputeBackend, SSHSlurmConfig
 
 __all__ = [
@@ -12,7 +11,6 @@ __all__ = [
     "ComputeSubmission",
     "JobBundle",
     "JobState",
-    "LocalComputeBackend",
     "SSHSlurmComputeBackend",
     "SSHSlurmConfig",
 ]

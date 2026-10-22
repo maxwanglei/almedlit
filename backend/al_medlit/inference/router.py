@@ -27,10 +27,7 @@ from al_medlit.inference.schemas import (
     PredictionReviewRead,
 )
 from al_medlit.model_artifacts.service import artifact_package_access_restrictions
-from al_medlit.training.compute_profiles import (
-    build_compute_backend,
-    get_compute_profile,
-)
+from al_medlit.training.compute_profiles import get_compute_profile
 from al_medlit.training.models import ModelCheckpoint
 from al_medlit.workspace.capability_dependencies import enforce_capability
 
@@ -182,11 +179,7 @@ def cancel_inference_run(
     enforce_capability(db, project_id=run.project_id, key="inference")
     if run.compute_profile.backend == "ssh_slurm":
         enforce_capability(db, project_id=run.project_id, key="hpc_training")
-    return service.cancel_inference_run_with_backend(
-        db,
-        run_id=run.id,
-        backend=build_compute_backend(run.compute_profile),
-    )
+    return service.cancel_inference_run(db, run.id)
 
 
 @router.post("/inference/runs/{run_id}/execute", response_model=InferenceRunRead)

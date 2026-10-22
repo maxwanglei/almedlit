@@ -10,25 +10,15 @@ import {
 
 import {
   acceptInvite,
-  archiveArtifactPackage,
-  archiveBaseModel,
-  downloadArtifactPackageFile,
-  downloadExport,
-  downloadSubmission,
   getMe,
-  getProjectIaa,
   getWorkspaceCapabilities,
-  importBaseModel,
   listAdminUsers,
   listBaseModels,
   listDocumentSummaries,
   listInferenceRuns,
-  listInferenceWindows,
   login,
   request,
   requestBlob,
-  setBaseModelReadiness,
-  uploadBaseModel,
 } from "./client";
 
 function installStorage(): void {
@@ -81,7 +71,6 @@ describe("API authentication failures", () => {
   it.each([
     { name: "document summaries", load: () => listDocumentSummaries(7), path: "/api/documents", marker: "summary=true" },
     { name: "inference runs", load: () => listInferenceRuns(7), path: "/api/projects/7/inference/runs", marker: "limit=100" },
-    { name: "inference windows", load: () => listInferenceWindows(8), path: "/api/inference/runs/8/windows", marker: "limit=100" },
   ])("loads all bounded pages for $name", async ({ load, path, marker }) => {
     const first = Array.from({ length: 100 }, (_, id) => ({ id }));
     const fetchMock = vi.fn()
@@ -311,86 +300,7 @@ describe("API authentication failures", () => {
     expect(membershipChanged).toHaveBeenCalledOnce();
   });
 
-  it("downloads submission bytes with the cookie session", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response("submission contents", {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-
-    const blob = await downloadSubmission(17);
-
-    expect(await blob.text()).toBe("submission contents");
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/submissions/17/download",
-      expect.objectContaining({
-        credentials: "same-origin",
-      }),
-    );
-    expect(fetchMock.mock.calls[0]?.[1]?.headers).not.toHaveProperty("Authorization");
-  });
-
-  it("downloads export bytes with the cookie session", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response("training data", {
-        status: 200,
-        headers: { "Content-Type": "application/x-ndjson" },
-      }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-
-    const blob = await downloadExport(29);
-
-    expect(await blob.text()).toBe("training data");
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/exports/29/download",
-      expect.objectContaining({
-        credentials: "same-origin",
-      }),
-    );
-    expect(fetchMock.mock.calls[0]?.[1]?.headers).not.toHaveProperty("Authorization");
-  });
-
-  it("downloads an authorized package file without exposing a storage key", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response("weights", { status: 200 }));
-    vi.stubGlobal("fetch", fetchMock);
-
-    const blob = await downloadArtifactPackageFile(41, 73);
-
-    expect(await blob.text()).toBe("weights");
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/artifact-packages/41/files/73/download",
-      expect.objectContaining({
-        credentials: "same-origin",
-      }),
-    );
-    expect(fetchMock.mock.calls[0]?.[1]?.headers).not.toHaveProperty("Authorization");
-  });
-
-  it("requests the manager-approved archive lifecycle", async () => {
-    document.cookie = "al_medlit_csrf=csrf-value";
-    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      package_id: 41,
-      archived_at: "2026-01-01T00:00:00Z",
-      purge_after: "2026-01-08T00:00:00Z",
-    }), { status: 202, headers: { "Content-Type": "application/json" } }));
-    vi.stubGlobal("fetch", fetchMock);
-
-    await archiveArtifactPackage(41);
-
-    expect(fetchMock).toHaveBeenCalledWith(
-      "/api/artifact-packages/41/archive",
-      expect.objectContaining({
-        method: "POST",
-        credentials: "same-origin",
-        headers: expect.objectContaining({ "X-CSRF-Token": "csrf-value" }),
-      }),
-    );
-  });
-
-  it("normalizes base-model packages and uses audited manager lifecycle endpoints", async () => {
+  it("normalizes available base-model packages", async () => {
     const wireAsset = {
       id: 61,
       project_id: 7,
@@ -433,144 +343,13 @@ describe("API authentication failures", () => {
       .mockResolvedValueOnce(new Response(JSON.stringify([wireAsset]), {
         status: 200,
         headers: { "Content-Type": "application/json" },
-      }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ ...wireAsset, readiness: "quarantined" }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ ...wireAsset, readiness: "archived", archived_at: "2026-01-02T00:00:00Z" }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
       }));
     vi.stubGlobal("fetch", fetchMock);
 
     const assets = await listBaseModels(7, { includeArchived: true });
     expect(assets[0]?.package).toMatchObject({ kind: "base_model", format: "safetensors" });
-    await setBaseModelReadiness(61, { readiness: "quarantined", reason: "Review required" });
-    await archiveBaseModel(61);
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/projects/7/base-models?include_archived=true");
-    expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/base-models/61/readiness");
-    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
-      method: "PATCH",
-      body: JSON.stringify({ readiness: "quarantined", reason: "Review required" }),
-    });
-    expect(fetchMock.mock.calls[2]?.[0]).toBe("/api/base-models/61/archive");
-    expect(fetchMock.mock.calls[2]?.[1]).toMatchObject({ method: "POST" });
-  });
-
-  it("stages an exact base revision by JSON import or multipart upload", async () => {
-    const wireAsset = {
-      id: 62,
-      project_id: 7,
-      package_id: 52,
-      provider: "huggingface",
-      source_model_id: "lab/tiny",
-      exact_revision: "deadbeef",
-      display_name: "Tiny model",
-      model_family: "llm_finetune",
-      model_type: "causal_lm",
-      license_name: "Apache-2.0",
-      license_url: null,
-      license_terms_sha256: null,
-      access_mode: "execution_only",
-      readiness: "ready",
-      archived_at: null,
-      metadata: {},
-      created_at: "2026-01-01T00:00:00Z",
-      package: {
-        id: 52,
-        project_id: 7,
-        package_kind: "base_model",
-        package_format: "safetensors",
-        schema_version: "1",
-        model_family: "llm_finetune",
-        model_type: "causal_lm",
-        readiness: "ready",
-        deployable: true,
-        manifest_digest: "a".repeat(64),
-        logical_size_bytes: 7,
-        file_count: 1,
-        files: [],
-        references: [],
-        retention: { pinned: true, expires_at: null },
-        created_at: "2026-01-01T00:00:00Z",
-      },
-    };
-    const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify(wireAsset), {
-      status: 201,
-      headers: { "Content-Type": "application/json" },
-    }));
-    vi.stubGlobal("fetch", fetchMock);
-    const common = {
-      provider: "huggingface",
-      source_model_id: "lab/tiny",
-      exact_revision: "deadbeef",
-      display_name: "Tiny model",
-      model_family: "llm_finetune" as const,
-      model_type: "causal_lm",
-      license_name: "Apache-2.0",
-      access_mode: "execution_only" as const,
-    };
-
-    await importBaseModel(7, { ...common, source_package_id: 51 });
-    const file = new File(["weights"], "model.safetensors", {
-      type: "application/octet-stream",
-    });
-    await uploadBaseModel(7, {
-      ...common,
-      package_format: "safetensors",
-      files: [{
-        relative_path: "model.safetensors",
-        role: "model_file",
-        content_type: "application/octet-stream",
-      }],
-    }, [file]);
-
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/projects/7/base-models/import");
-    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
-      method: "POST",
-      body: JSON.stringify({ ...common, source_package_id: 51 }),
-      headers: { "Content-Type": "application/json" },
-    });
-    const uploadRequest = fetchMock.mock.calls[1]?.[1] as RequestInit;
-    expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/projects/7/base-models/upload");
-    expect(uploadRequest.method).toBe("POST");
-    expect(uploadRequest.headers).not.toHaveProperty("Content-Type");
-    expect(uploadRequest.body).toBeInstanceOf(FormData);
-    const multipart = uploadRequest.body as FormData;
-    expect(JSON.parse(String(multipart.get("metadata")))).toMatchObject({
-      exact_revision: "deadbeef",
-      package_format: "safetensors",
-      files: [{ relative_path: "model.safetensors" }],
-    });
-    expect(multipart.getAll("files")).toHaveLength(1);
-  });
-
-  it("selects legacy null-guideline IAA rounds explicitly and numeric rounds by ID", async () => {
-    const fetchMock = vi.fn().mockImplementation(async () =>
-      new Response("{}", {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-    const baseParams = {
-      annotationType: "evidence_block" as const,
-      documentId: 11,
-      targetVersionId: 13,
-      structureVersionId: 17,
-    };
-
-    await getProjectIaa(7, { ...baseParams, guidelineVersionId: null });
-    await getProjectIaa(7, { ...baseParams, guidelineVersionId: 19 });
-
-    expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "/api/projects/7/iaa?annotation_type=evidence_block&document_id=11&target_version_id=13&structure_version_id=17&legacy_guideline=true",
-    );
-    expect(fetchMock.mock.calls[1]?.[0]).toBe(
-      "/api/projects/7/iaa?annotation_type=evidence_block&document_id=11&target_version_id=13&structure_version_id=17&guideline_version_id=19",
-    );
   });
 });
 

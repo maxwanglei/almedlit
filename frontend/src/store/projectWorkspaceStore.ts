@@ -3,7 +3,6 @@ import { immer } from "zustand/middleware/immer";
 
 import {
   type AssignmentScope,
-  getProject,
   getProjectProgress,
   listDocumentSummaries,
   listMyWorkProjects,
@@ -38,7 +37,6 @@ interface ProjectWorkspaceState {
     workspaceId?: number | null,
     assignmentScoped?: boolean,
   ) => Promise<number | null>;
-  loadProject: (projectId: number) => Promise<Project>;
   loadProjectData: (
     projectId: number,
     force?: boolean,
@@ -86,7 +84,6 @@ function initialProjectWorkspaceState() {
 }
 
 let projectListRequestId = 0;
-let projectRequestId = 0;
 let projectDataRequestId = 0;
 
 export const useProjectWorkspaceStore = create<ProjectWorkspaceState>()(
@@ -123,7 +120,6 @@ export const useProjectWorkspaceStore = create<ProjectWorkspaceState>()(
       }),
     reset: () => {
       projectListRequestId += 1;
-      projectRequestId += 1;
       projectDataRequestId += 1;
       set((state) => {
         Object.assign(state, initialProjectWorkspaceState());
@@ -207,35 +203,6 @@ export const useProjectWorkspaceStore = create<ProjectWorkspaceState>()(
             state.loading = false;
           });
         }
-      }
-    },
-    loadProject: async (projectId) => {
-      const requestId = ++projectRequestId;
-      set((state) => {
-        state.error = null;
-      });
-      try {
-        const project = await getProject(projectId);
-        if (requestId !== projectRequestId) {
-          return project;
-        }
-        set((state) => {
-          const index = state.projects.findIndex((candidate) => candidate.id === project.id);
-          if (index >= 0) {
-            state.projects[index] = project;
-          } else {
-            state.projects.unshift(project);
-          }
-          state.selectedProjectId = project.id;
-        });
-        return project;
-      } catch (caught) {
-        if (requestId === projectRequestId) {
-          set((state) => {
-            state.error = caught instanceof Error ? caught.message : "Unable to load project";
-          });
-        }
-        throw caught;
       }
     },
     loadProjectData: async (projectId, force = false, scope = "all") => {

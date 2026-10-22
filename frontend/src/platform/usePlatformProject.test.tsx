@@ -26,15 +26,11 @@ function deferred<T>(): {
 }
 
 const mocks = vi.hoisted(() => ({
-  createCycle: vi.fn(),
   createDatasetWithVersion: vi.fn(),
-  createGuidelineWithRevision: vi.fn(),
   createRound: vi.fn(),
   getAnnotationRound: vi.fn(),
   transitionRound: vi.fn(),
   createTaskWithVersion: vi.fn(),
-  createTrainingDataset: vi.fn(),
-  launchTrainingRun: vi.fn(),
   loadPlatformProject: vi.fn(),
   updateProjectModules: vi.fn(),
 }));
@@ -65,22 +61,22 @@ describe("usePlatformProject load scope", () => {
       { initialProps: { projectId: 7 } },
     );
     await waitFor(() => expect(result.current.loading).toBe(false));
-    const previousAddCycle = result.current.addCycle;
+    const previousAddTask = result.current.addTask;
     rerender({ projectId: 8 });
-    await expect(previousAddCycle({ name: "Cycle", goal: "expand_pool", taskVersionId: 1, datasetVersionId: 2, baselineModelVersionId: null, feedbackSources: [] })).rejects.toThrow(/active project changed/);
-    expect(mocks.createCycle).not.toHaveBeenCalled();
+    await expect(previousAddTask({ name: "Classification", key: "classification", description: "", taskKind: "classification", labelValues: ["include", "exclude"] })).rejects.toThrow(/active project changed/);
+    expect(mocks.createTaskWithVersion).not.toHaveBeenCalled();
   });
 
   it("rejects a mutation that finishes after its project context changed", async () => {
     const pending = deferred<void>();
-    mocks.createCycle.mockReturnValue(pending.promise);
+    mocks.createTaskWithVersion.mockReturnValue(pending.promise);
     const { result, rerender } = renderHook(
       ({ projectId }: { projectId: number }) => usePlatformProject(projectId, 5, true, "data"),
       { initialProps: { projectId: 7 } },
     );
     await waitFor(() => expect(result.current.loading).toBe(false));
     let operation!: Promise<void>;
-    act(() => { operation = result.current.addCycle({ name: "Cycle", goal: "expand_pool", taskVersionId: 1, datasetVersionId: 2, baselineModelVersionId: null, feedbackSources: [] }); });
+    act(() => { operation = result.current.addTask({ name: "Classification", key: "classification", description: "", taskKind: "classification", labelValues: ["include", "exclude"] }); });
     const rejected = expect(operation).rejects.toThrow(/active project changed/);
     rerender({ projectId: 8 });
     await act(async () => { pending.resolve(); await rejected; });
@@ -96,7 +92,7 @@ describe("usePlatformProject load scope", () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
     mocks.loadPlatformProject.mockReturnValueOnce(pendingReload.promise);
     let operation!: Promise<void>;
-    act(() => { operation = result.current.addCycle({ name: "Cycle", goal: "expand_pool", taskVersionId: 1, datasetVersionId: 2, baselineModelVersionId: null, feedbackSources: [] }); });
+    act(() => { operation = result.current.addTask({ name: "Classification", key: "classification", description: "", taskKind: "classification", labelValues: ["include", "exclude"] }); });
     const rejected = expect(operation).rejects.toThrow(/active project changed/);
     await waitFor(() => expect(result.current.loading).toBe(true));
     rerender({ projectId: 8 });
@@ -496,25 +492,4 @@ describe("usePlatformProject resource creation retries", () => {
     await act(() => result.current.addDataset(dataset));
     expect(mocks.createDatasetWithVersion).toHaveBeenNthCalledWith(3, 7, dataset, expect.any(Function), undefined);
   });
-});
-
-it("retries project launches with one attempt and handles the displayed failure", async () => {
-  const draft = { modelName: "Baseline", taskVersionId: 1, trainingDatasetVersionId: 2,
-    recipeKey: "linear", recipeVersionId: null, environmentId: 3, storagePolicyId: 4,
-    seed: 42, config: {}, evaluationPlan: {} };
-  mocks.launchTrainingRun.mockRejectedValueOnce(new Error("Response lost")).mockResolvedValue({ id: 151 });
-  const { result, rerender } = renderHook(({ projectId }) => usePlatformProject(projectId, 5, true, "train"),
-    { initialProps: { projectId: 7 } });
-  await waitFor(() => expect(result.current.loading).toBe(false));
-  await act(async () => { await expect(result.current.launch(draft)).rejects.toThrow("Response lost"); });
-  expect(result.current.error).toBe("Response lost");
-  await act(() => result.current.launch(draft));
-  const firstAttempt = mocks.launchTrainingRun.mock.calls[0]?.[3];
-  expect(firstAttempt).toMatchObject({ key: expect.any(String) });
-  expect(mocks.launchTrainingRun.mock.calls[1]?.[3]).toBe(firstAttempt);
-  await act(() => result.current.launch({ ...draft, seed: 73 }));
-  expect(mocks.launchTrainingRun.mock.calls[2]?.[3].key).not.toBe(firstAttempt.key);
-  rerender({ projectId: 8 });
-  await act(() => result.current.launch(draft));
-  expect(mocks.launchTrainingRun.mock.calls[3]?.[3].key).not.toBe(firstAttempt.key);
 });

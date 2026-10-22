@@ -37,7 +37,6 @@ from al_medlit.lineage.models import (
     LineageArtifact,
 )
 from al_medlit.project.models import Project, ProjectTask
-from al_medlit.training.compute_profiles import build_compute_backend
 from al_medlit.training.models import (
     ComputeProfile,
     ModelCheckpoint,
@@ -423,11 +422,7 @@ def test_cancel_during_local_execution_is_not_overwritten(
 
     def cancel(db: Session) -> str:
         run = service.get_inference_run(db, run_id)
-        return service.cancel_inference_run_with_backend(
-            db,
-            run_id=run.id,
-            backend=build_compute_backend(run.compute_profile),
-        ).status
+        return service.cancel_inference_run(db, run.id).status
 
     worker = _Worker(postgres_session_factory)
     worker.start("executor", execute)

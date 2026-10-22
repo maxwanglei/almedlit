@@ -425,7 +425,7 @@ describe("TrainingScreen base-model selection", () => {
     ]);
   });
 
-  it("shows model reuse and resolves recent run recipe, data, and failure details", async () => {
+  it("reuses the existing model identity when launching its next version", async () => {
     const user = userEvent.setup();
     const data = trainingData([classicalRecipe], []);
     data.models = [
@@ -437,51 +437,6 @@ describe("TrainingScreen base-model selection", () => {
         lifecycle_status: "active",
       },
     ];
-    data.projectRecipes = [
-      {
-        id: 121,
-        project_id: 1,
-        key: classicalRecipe.key,
-        name: classicalRecipe.label,
-        description: classicalRecipe.description,
-      },
-    ];
-    data.recipeVersions = [
-      {
-        id: 122,
-        project_id: 1,
-        training_recipe_id: 121,
-        version_number: 3,
-        trainer_plugin_key: classicalRecipe.trainer_key,
-        trainer_plugin_version: classicalRecipe.version,
-        compatible_task_kinds: ["classification"],
-        environment_class: "classical-cpu",
-        config_schema: classicalRecipe.config_schema,
-        default_config: {},
-        evaluation_defaults: { splits: ["test"] },
-        content_hash: "d".repeat(64),
-      },
-    ];
-    data.trainingRuns = [
-      {
-        id: 151,
-        project_id: 1,
-        registered_model_id: 81,
-        task_version_id: 12,
-        training_dataset_version_id: 51,
-        recipe_version_id: 122,
-        environment_id: 131,
-        storage_policy_id: 141,
-        idempotency_key: "failed-run",
-        status: "failed",
-        seed: 42,
-        config: {},
-        evaluation_plan: { splits: ["test"] },
-        output_model_version_id: null,
-        failure_code: "runtime_verification_failed",
-        failure_reason: "Worker image verification failed.",
-      },
-    ];
 
     render(
       <TrainingScreen
@@ -490,16 +445,6 @@ describe("TrainingScreen base-model selection", () => {
         onLaunch={vi.fn()}
       />,
     );
-
-    expect(
-      screen.getByRole("cell", { name: "Relevance training set" }),
-    ).toBeTruthy();
-    expect(
-      screen.getByRole("cell", {
-        name: "TF-IDF logistic regression · v3",
-      }),
-    ).toBeTruthy();
-    expect(screen.getByText("Worker image verification failed.")).toBeTruthy();
 
     await user.click(await screen.findByRole("button", { name: "Continue" }));
     const modelName = screen.getByRole("textbox", { name: "Model name" });

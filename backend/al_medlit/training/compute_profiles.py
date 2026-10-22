@@ -2,7 +2,6 @@
 
 from sqlalchemy.orm import Session
 
-from al_medlit.core.config import settings
 from al_medlit.core.exceptions import NotFoundError
 from al_medlit.training.compute.base import ComputeBackend
 from al_medlit.training.compute.registry import (
@@ -19,17 +18,9 @@ def get_compute_profile(db: Session, profile_id: int) -> ComputeProfile:
     return profile
 
 
-def build_compute_backend(
-    profile: ComputeProfile,
-    *,
-    durable_local: bool | None = None,
-) -> ComputeBackend:
+def build_compute_backend(profile: ComputeProfile) -> ComputeBackend:
     """Build a backend without persisting infrastructure credentials."""
 
     register_builtin_compute_backends()
     config = dict(profile.config)
-    if profile.backend == "local" and durable_local is not None:
-        config["synchronous"] = not durable_local
-        if durable_local:
-            config["runtime_root"] = settings.local_attempt_root
     return compute_backends.get(profile.backend).build(config)

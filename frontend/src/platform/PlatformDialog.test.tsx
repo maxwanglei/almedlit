@@ -26,12 +26,9 @@ function Harness(): React.ReactElement {
           busy={false}
           onClose={() => setOpen(false)}
           onCreateDataset={complete}
-          onCreateCycle={complete}
           onCreateRound={complete}
           onScoreFeedback={complete}
-          onCreateGuideline={complete}
           onCreateTask={complete}
-          onPrepareTrainingData={complete}
         />
       ) : null}
     </>
@@ -200,12 +197,9 @@ function renderCreationDialog(kind: "dataset" | "task") {
       busy={false}
       onClose={onClose}
       onCreateDataset={onCreateDataset}
-      onCreateCycle={complete}
       onCreateRound={complete}
       onScoreFeedback={complete}
-      onCreateGuideline={complete}
       onCreateTask={onCreateTask}
-      onPrepareTrainingData={complete}
     />,
   );
   return { onCreateDataset, onCreateTask, onClose };
@@ -419,12 +413,9 @@ describe("PlatformDialog accessibility", () => {
         busy={false}
         onClose={onClose}
         onCreateDataset={complete}
-        onCreateCycle={complete}
         onCreateRound={onCreateRound}
         onScoreFeedback={complete}
-        onCreateGuideline={complete}
         onCreateTask={complete}
-        onPrepareTrainingData={complete}
       />,
     );
 
@@ -461,7 +452,7 @@ describe("PlatformDialog accessibility", () => {
     const data = learningProjectData();
     data.datasetVersions = data.datasetVersions.map((version) => ({ ...version, item_count: 0 }));
     const complete = vi.fn();
-    render(<PlatformDialog kind="round" data={data} busy={false} currentUserId={7} onClose={vi.fn()} onCreateDataset={complete} onCreateCycle={complete} onCreateRound={complete} onScoreFeedback={complete} onCreateGuideline={complete} onCreateTask={complete} onPrepareTrainingData={complete} />);
+    render(<PlatformDialog kind="round" data={data} busy={false} currentUserId={7} onClose={vi.fn()} onCreateDataset={complete} onCreateRound={complete} onScoreFeedback={complete} onCreateTask={complete} />);
     expect(screen.getByRole<HTMLSelectElement>("combobox", { name: "Dataset version" }).options.length).toBe(0);
     expect(screen.getByRole<HTMLButtonElement>("button", { name: /^Create/ }).disabled).toBe(true);
     expect(screen.getByRole("button", { name: "Create" }).getAttribute("aria-busy")).toBeNull();
@@ -480,12 +471,9 @@ describe("PlatformDialog accessibility", () => {
         busy={false}
         onClose={vi.fn()}
         onCreateDataset={onCreateDataset}
-        onCreateCycle={complete}
         onCreateRound={complete}
         onScoreFeedback={complete}
-        onCreateGuideline={complete}
         onCreateTask={complete}
-        onPrepareTrainingData={complete}
       />,
     );
 
@@ -518,12 +506,9 @@ describe("PlatformDialog accessibility", () => {
         busy={false}
         onClose={vi.fn()}
         onCreateDataset={complete}
-        onCreateCycle={complete}
         onCreateRound={complete}
         onScoreFeedback={onScoreFeedback}
-        onCreateGuideline={complete}
         onCreateTask={complete}
-        onPrepareTrainingData={complete}
       />,
     );
 
@@ -552,12 +537,9 @@ describe("PlatformDialog accessibility", () => {
         busy={false}
         onClose={vi.fn()}
         onCreateDataset={complete}
-        onCreateCycle={complete}
         onCreateRound={onCreateRound}
         onScoreFeedback={complete}
-        onCreateGuideline={complete}
         onCreateTask={complete}
-        onPrepareTrainingData={complete}
       />,
     );
 

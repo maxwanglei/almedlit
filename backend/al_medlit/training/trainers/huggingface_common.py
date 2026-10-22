@@ -286,39 +286,6 @@ def temporary_trainer_directory() -> tempfile.TemporaryDirectory[str]:
     return tempfile.TemporaryDirectory(prefix="al-medlit-trainer-")
 
 
-def mixed_precision_flags(config: Mapping) -> dict[str, bool]:
-    precision = config.get("mixed_precision", "none")
-    return {
-        "fp16": precision == "fp16",
-        "bf16": precision == "bf16",
-    }
-
-
-def training_arguments(
-    *,
-    transformers,
-    config: Mapping,
-    output_dir: str,
-    seed: int,
-) -> Any:
-    return transformers.TrainingArguments(
-        output_dir=output_dir,
-        overwrite_output_dir=True,
-        num_train_epochs=config["epochs"],
-        per_device_train_batch_size=config["batch_size"],
-        per_device_eval_batch_size=config["batch_size"],
-        gradient_accumulation_steps=config["gradient_accumulation_steps"],
-        learning_rate=config["learning_rate"],
-        save_strategy="no",
-        report_to=[],
-        remove_unused_columns=False,
-        seed=seed,
-        data_seed=seed,
-        save_safetensors=True,
-        **mixed_precision_flags(config),
-    )
-
-
 def _move_to_device(value, device):
     if hasattr(value, "to"):
         return value.to(device)

@@ -87,8 +87,3 @@ export function normalizeArtifactPackage(value: unknown): ArtifactPackage {
     })),
   };
 }
-
-export function normalizeArtifactPackages(value: unknown): ArtifactPackage[] {
-  const items = Array.isArray(value) ? value : (value as { items: unknown[] }).items;
-  return (items ?? []).map(normalizeArtifactPackage);
-}

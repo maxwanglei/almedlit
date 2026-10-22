@@ -40,6 +40,7 @@ from al_medlit.lineage.service import (
 from al_medlit.model_artifacts.models import ArtifactPackageRetention, BaseModelAsset
 from al_medlit.project.models import Project, ProjectTask, TaskAssignment
 from al_medlit.training.compute.base import ComputeBackend, JobBundle, JobState
+from al_medlit.training.compute_profiles import build_compute_backend
 from al_medlit.training.models import ComputeProfile, ModelCheckpoint
 from al_medlit.training.preflight import quantization_profile_ready
 from al_medlit.training.windowing import (
@@ -507,22 +508,11 @@ def reconcile_inference_run(
     return run
 
 
-def cancel_inference_run(db: Session, run_id: int) -> InferenceRun:
-    run = lock_inference_run(db, run_id)
-    if run.status in TERMINAL_RUN_STATUSES:
-        return run
-    run.status = "cancelled"
-    run.completed_at = datetime.now(UTC)
-    db.commit()
-    db.refresh(run)
-    return run
-
-
-def cancel_inference_run_with_backend(
+def cancel_inference_run(
     db: Session,
-    *,
     run_id: int,
-    backend: ComputeBackend,
+    *,
+    backend: ComputeBackend | None = None,
 ) -> InferenceRun:
     run = lock_inference_run(db, run_id)
     if run.status not in OPEN_RUN_STATUSES:
@@ -533,7 +523,8 @@ def cancel_inference_run_with_backend(
         # Local runs execute in process; the claim's job id names no backend job.
         state = JobState(status="cancelled", raw_state="CANCELLED_LOCAL_RUN")
     else:
-        state = backend.cancel(run.external_job_id)
+        selected_backend = backend or build_compute_backend(run.compute_profile)
+        state = selected_backend.cancel(run.external_job_id)
     _apply_run_state(run, state)
     db.commit()
     db.refresh(run)

@@ -1,20 +1,11 @@
 import type {
   Annotation,
   AnnotationCreate,
-  AnnotationSet,
-  AnnotationSetCreate,
   AnnotationSubmission,
   AnnotationSubmissionCreate,
   AnnotationUpdate,
   AnnotationWorkbench,
-  ArtifactPackage,
   BaseModelAsset,
-  BaseModelImportWrite,
-  BaseModelReadinessWrite,
-  BaseModelUploadWrite,
-  CorpusSnapshot,
-  CorpusSnapshotCreate,
-  Document,
   DocumentSummary,
   DocumentStructureRead,
   EvidenceAdjudicationCreate,
@@ -29,19 +20,11 @@ import type {
   EvidenceTargetCreate,
   EvidenceTargetVersion,
   EvidenceTargetVersionCreate,
-  ExportArtifact,
-  ExportCreate,
-  ExportFormat,
   GuidelineVersion,
   GuidelineVersionCreate,
   ImportPreviewResponse,
   ImportResponse,
-  InferenceRun,
   InferenceRunSummary,
-  InferenceRunCreate,
-  InferenceWindow,
-  IaaReport,
-  LineageGraph,
   EvidenceCandidatePrediction,
   PredictionReview,
   PredictionReviewCreate,
@@ -53,7 +36,6 @@ import type {
   ProjectTaskCreate,
   ProjectTaskUpdate,
   ProjectUpdate,
-  SubmissionKind,
   TaskAssignment,
   TaskAssignmentCreate,
   TaskAssignmentStatus,
@@ -81,10 +63,7 @@ import {
   publishSessionChange,
   publishMembershipChange,
 } from "@/auth/session";
-import {
-  normalizeArtifactPackage,
-  normalizeArtifactPackages,
-} from "@/api/artifactPackagesAdapter";
+import { normalizeArtifactPackage } from "@/api/artifactPackagesAdapter";
 
 const API_BASE = "/api";
 const CSRF_COOKIE_NAME = "al_medlit_csrf";
@@ -265,10 +244,6 @@ export function listMyWorkProjects(workspaceId: number): Promise<Project[]> {
   return request<Project[]>(`/projects/my-work?${params.toString()}`);
 }
 
-export function getProject(projectId: number): Promise<Project> {
-  return request<Project>(`/projects/${projectId}`);
-}
-
 export function createProject(payload: ProjectCreate): Promise<Project> {
   return request<Project>("/projects", {
     method: "POST",
@@ -301,13 +276,6 @@ async function listDocumentPages<T extends DocumentSummary>(
     documents.push(...page);
   } while (page.length === 100);
   return documents;
-}
-
-export function listDocuments(
-  projectId: number,
-  options: { scope?: AssignmentScope } = {},
-): Promise<Document[]> {
-  return listDocumentPages<Document>(projectId, options);
 }
 
 export function listDocumentSummaries(
@@ -349,16 +317,6 @@ export function rebuildDocumentStructure(
     method: "POST",
     body: JSON.stringify({ activate }),
   });
-}
-
-export function activateDocumentStructure(
-  documentId: number,
-  versionId: number,
-): Promise<DocumentStructureRead> {
-  return request<DocumentStructureRead>(
-    `/documents/${documentId}/structure/${versionId}/activate`,
-    { method: "POST" },
-  );
 }
 
 export function previewPubmedImport(
@@ -405,12 +363,6 @@ export function updateProjectTask(
   return request<ProjectTask>(`/projects/${projectId}/tasks/${taskId}`, {
     method: "PATCH",
     body: JSON.stringify(payload),
-  });
-}
-
-export function deleteProjectTask(projectId: number, taskId: number): Promise<void> {
-  return request<void>(`/projects/${projectId}/tasks/${taskId}`, {
-    method: "DELETE",
   });
 }
 
@@ -527,12 +479,6 @@ export function reopenPersonalTaskAssignment(
     `/projects/${projectId}/assignments/${assignmentId}/reopen`,
     { method: "POST" },
   );
-}
-
-export function deleteTaskAssignment(projectId: number, assignmentId: number): Promise<void> {
-  return request<void>(`/projects/${projectId}/assignments/${assignmentId}`, {
-    method: "DELETE",
-  });
 }
 
 export function getProjectProgress(
@@ -724,30 +670,6 @@ export function adjudicateEvidence(
   );
 }
 
-export function getProjectIaa(
-  projectId: number,
-  params: {
-    annotationType: "evidence_block";
-    documentId: number;
-    targetVersionId: number;
-    structureVersionId: number;
-    guidelineVersionId?: number | null;
-  },
-): Promise<IaaReport> {
-  const query = new URLSearchParams({
-    annotation_type: params.annotationType,
-    document_id: String(params.documentId),
-    target_version_id: String(params.targetVersionId),
-    structure_version_id: String(params.structureVersionId),
-  });
-  if (params.guidelineVersionId === null) {
-    query.set("legacy_guideline", "true");
-  } else if (params.guidelineVersionId !== undefined) {
-    query.set("guideline_version_id", String(params.guidelineVersionId));
-  }
-  return request<IaaReport>(`/projects/${projectId}/iaa?${query.toString()}`);
-}
-
 export function createSubmission(
   projectId: number,
   documentId: number,
@@ -760,121 +682,6 @@ export function createSubmission(
       body: JSON.stringify(payload),
     },
   );
-}
-
-export function listSubmissions(
-  projectId: number,
-  filters: {
-    documentId?: number;
-    annotatorUserId?: number;
-    annotatorId?: string;
-    kind?: SubmissionKind;
-    scope?: AssignmentScope;
-  } = {},
-): Promise<AnnotationSubmission[]> {
-  const params = new URLSearchParams();
-  if (filters.documentId !== undefined) {
-    params.set("document_id", String(filters.documentId));
-  }
-  if (filters.annotatorUserId !== undefined) {
-    params.set("annotator_user_id", String(filters.annotatorUserId));
-  }
-  if (filters.annotatorId !== undefined) {
-    params.set("annotator_id", filters.annotatorId);
-  }
-  if (filters.kind !== undefined) {
-    params.set("kind", filters.kind);
-  }
-  if (filters.scope !== undefined) {
-    params.set("scope", filters.scope);
-  }
-  const query = params.toString();
-  return request<AnnotationSubmission[]>(
-    `/projects/${projectId}/submissions${query ? `?${query}` : ""}`,
-  );
-}
-
-export function deleteSubmission(submissionId: number): Promise<void> {
-  return request<void>(`/submissions/${submissionId}`, {
-    method: "DELETE",
-  });
-}
-
-export async function downloadSubmission(submissionId: number): Promise<Blob> {
-  const response = await requestResponse(`/submissions/${submissionId}/download`);
-  return response.blob();
-}
-
-export function createCorpusSnapshot(
-  projectId: number,
-  payload: CorpusSnapshotCreate,
-): Promise<CorpusSnapshot> {
-  return request<CorpusSnapshot>(`/projects/${projectId}/corpus-snapshots`, {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-
-export function listCorpusSnapshots(projectId: number): Promise<CorpusSnapshot[]> {
-  return request<CorpusSnapshot[]>(`/projects/${projectId}/corpus-snapshots`);
-}
-
-export function getCorpusSnapshot(snapshotId: number): Promise<CorpusSnapshot> {
-  return request<CorpusSnapshot>(`/corpus-snapshots/${snapshotId}`);
-}
-
-export function createAnnotationSet(
-  projectId: number,
-  payload: AnnotationSetCreate,
-): Promise<AnnotationSet> {
-  return request<AnnotationSet>(`/projects/${projectId}/annotation-sets`, {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-
-export function listAnnotationSets(projectId: number): Promise<AnnotationSet[]> {
-  return request<AnnotationSet[]>(`/projects/${projectId}/annotation-sets`);
-}
-
-export function getAnnotationSet(annotationSetId: number): Promise<AnnotationSet> {
-  return request<AnnotationSet>(`/annotation-sets/${annotationSetId}`);
-}
-
-export function getLineageGraph(artifactId: number): Promise<LineageGraph> {
-  return request<LineageGraph>(`/lineage/artifacts/${artifactId}/graph`);
-}
-
-export function listExportFormats(): Promise<ExportFormat[]> {
-  return request<ExportFormat[]>("/export-formats");
-}
-
-export function createExport(projectId: number, payload: ExportCreate): Promise<ExportArtifact> {
-  return request<ExportArtifact>(`/projects/${projectId}/exports`, {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-
-export function listExports(projectId: number): Promise<ExportArtifact[]> {
-  return request<ExportArtifact[]>(`/projects/${projectId}/exports`);
-}
-
-export async function downloadExport(exportId: number): Promise<Blob> {
-  const response = await requestResponse(`/exports/${exportId}/download`);
-  return response.blob();
-}
-
-export async function listArtifactPackages(projectId: number): Promise<ArtifactPackage[]> {
-  const response = await request<unknown>(
-    `/projects/${projectId}/artifact-packages`,
-  );
-  return normalizeArtifactPackages(response);
-}
-
-export async function getArtifactPackage(packageId: number): Promise<ArtifactPackage> {
-  const response = await request<unknown>(`/artifact-packages/${packageId}`);
-  return normalizeArtifactPackage(response);
 }
 
 function normalizeBaseModelAsset(value: unknown): BaseModelAsset {
@@ -896,90 +703,6 @@ export async function listBaseModels(
   return response.map(normalizeBaseModelAsset);
 }
 
-export async function importBaseModel(
-  projectId: number,
-  payload: BaseModelImportWrite,
-): Promise<BaseModelAsset> {
-  const response = await request<unknown>(`/projects/${projectId}/base-models/import`, {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-  return normalizeBaseModelAsset(response);
-}
-
-export async function uploadBaseModel(
-  projectId: number,
-  metadata: BaseModelUploadWrite,
-  files: File[],
-): Promise<BaseModelAsset> {
-  const body = new FormData();
-  body.append("metadata", JSON.stringify(metadata));
-  for (const file of files) body.append("files", file, file.name);
-  const response = await request<unknown>(`/projects/${projectId}/base-models/upload`, {
-    method: "POST",
-    body,
-  });
-  return normalizeBaseModelAsset(response);
-}
-
-export async function setBaseModelReadiness(
-  assetId: number,
-  payload: BaseModelReadinessWrite,
-): Promise<BaseModelAsset> {
-  const response = await request<unknown>(`/base-models/${assetId}/readiness`, {
-    method: "PATCH",
-    body: JSON.stringify(payload),
-  });
-  return normalizeBaseModelAsset(response);
-}
-
-export async function archiveBaseModel(assetId: number): Promise<BaseModelAsset> {
-  const response = await request<unknown>(`/base-models/${assetId}/archive`, {
-    method: "POST",
-  });
-  return normalizeBaseModelAsset(response);
-}
-
-export async function downloadArtifactPackageFile(
-  packageId: number,
-  fileId: number,
-): Promise<Blob> {
-  const response = await requestResponse(
-    `/artifact-packages/${packageId}/files/${fileId}/download`,
-  );
-  return response.blob();
-}
-
-export function archiveArtifactPackage(packageId: number): Promise<{
-  package_id: number;
-  archived_at: string;
-  purge_after: string;
-}> {
-  return request(`/artifact-packages/${packageId}/archive`, { method: "POST" });
-}
-
-export function purgeArtifactPackage(packageId: number, reason: string): Promise<{
-  package_id: number;
-  archived_at: string;
-  purge_after: string;
-  purged_at: string | null;
-}> {
-  return request(`/artifact-packages/${packageId}/purge`, {
-    method: "POST",
-    body: JSON.stringify({ reason }),
-  });
-}
-
-export function launchInferenceRun(
-  projectId: number,
-  payload: InferenceRunCreate,
-): Promise<InferenceRun> {
-  return request<InferenceRun>(`/projects/${projectId}/inference/runs`, {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-}
-
 async function listInferencePages<T>(path: string): Promise<T[]> {
   const items: T[] = [];
   let page: T[];
@@ -992,20 +715,6 @@ async function listInferencePages<T>(path: string): Promise<T[]> {
 
 export function listInferenceRuns(projectId: number): Promise<InferenceRunSummary[]> {
   return listInferencePages<InferenceRunSummary>(`/projects/${projectId}/inference/runs`);
-}
-
-export function getInferenceRun(runId: number): Promise<InferenceRun> {
-  return request<InferenceRun>(`/inference/runs/${runId}`);
-}
-
-export function cancelInferenceRun(runId: number): Promise<InferenceRun> {
-  return request<InferenceRun>(`/inference/runs/${runId}/cancel`, {
-    method: "POST",
-  });
-}
-
-export function listInferenceWindows(runId: number): Promise<InferenceWindow[]> {
-  return listInferencePages<InferenceWindow>(`/inference/runs/${runId}/windows`);
 }
 
 export interface InferencePredictionFilters {
@@ -1040,12 +749,6 @@ export function listInferencePredictions(
   return request<EvidenceCandidatePrediction[]>(
     `/inference/runs/${runId}/predictions${query ? `?${query}` : ""}`,
   );
-}
-
-export function getInferencePrediction(
-  predictionId: number,
-): Promise<EvidenceCandidatePrediction> {
-  return request<EvidenceCandidatePrediction>(`/inference/predictions/${predictionId}`);
 }
 
 export function reviewInferencePrediction(

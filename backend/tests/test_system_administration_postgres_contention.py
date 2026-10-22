@@ -714,7 +714,7 @@ def test_inference_cancel_waits_for_submission_and_cancels_its_job(
         cached = db.get(InferenceRun, run_id)
         assert cached.external_job_id is None
         db.info["cancelling"] = True
-        return inference_service.cancel_inference_run_with_backend(
+        return inference_service.cancel_inference_run(
             db, run_id=run_id, backend=backend,
         ).status
 

@@ -1,106 +1,74 @@
 import { formatTaskKind } from "@/lib/taskPresentation";
 import { NativeInput, NativeSelect, NativeTextarea } from "@/components/NativeField";
 import ValidatedForm from "@/components/ValidatedForm";
-import { useId, useMemo, useState } from "react";
+import { useId, useState } from "react";
 import { Button } from "@astryxdesign/core/Button";
 import {
-  BookOpen,
   BrainCircuit,
   Database,
   Repeat2,
-  RefreshCw,
-  Split,
   X,
 } from "lucide-react";
 
 import DialogFrame from "@/components/DialogFrame";
 
 import { validateDatasetDraft, validateTaskDraft } from "./api";
-import { formatCount, formatStatus } from "./components";
+import { formatCount } from "./components";
 import type {
-  CycleDraft,
   DatasetDraft,
   FeedbackScoringDraft,
-  GuidelineDraft,
   RoundDraft,
   TaskDraft,
-  TrainingDataDraft,
 } from "./api";
 import type { PlatformDialogKind } from "./ProjectPlatform";
-import type {
-  LearningFeedbackProducer,
-  PlatformProjectData,
-} from "./types";
+import type { PlatformProjectData } from "./types";
 
 interface PlatformDialogProps {
   kind: Exclude<PlatformDialogKind, null>;
   data: PlatformProjectData;
   busy: boolean;
-  initialDatasetId?: number | null;
-  initialDatasetVersionId?: number | null;
-  initialTaskVersionId?: number | null;
   currentUserId?: number | null;
   isPersonalWorkspace?: boolean;
   taskPurpose?: "annotation" | "training";
   onClose: () => void;
   onCreateDataset: (draft: DatasetDraft) => Promise<void>;
-  onCreateCycle: (draft: CycleDraft) => Promise<void>;
   onCreateRound: (draft: RoundDraft) => Promise<void>;
   onScoreFeedback: (draft: FeedbackScoringDraft) => Promise<void>;
-  onCreateGuideline: (draft: GuidelineDraft) => Promise<void>;
   onCreateTask: (draft: TaskDraft) => Promise<void>;
-  onPrepareTrainingData: (draft: TrainingDataDraft) => Promise<void>;
 }
 
 const ICONS = {
   dataset: Database,
   task: BrainCircuit,
-  trainingData: Split,
-  cycle: RefreshCw,
   round: Repeat2,
   feedbackScore: BrainCircuit,
-  guideline: BookOpen,
 };
 
 const TITLES = {
   dataset: "Import source data",
   task: "Define NLP task",
-  trainingData: "Prepare training data",
-  cycle: "Start learning cycle",
   round: "Create annotation round",
   feedbackScore: "Score dataset with model",
-  guideline: "Create guideline",
 };
 
 export default function PlatformDialog({
   kind,
   data,
   busy,
-  initialDatasetId,
-  initialDatasetVersionId,
-  initialTaskVersionId,
   currentUserId,
   isPersonalWorkspace = false,
   taskPurpose = "annotation",
   onClose,
   onCreateDataset,
-  onCreateCycle,
   onCreateRound,
   onScoreFeedback,
-  onCreateGuideline,
   onCreateTask,
-  onPrepareTrainingData,
 }: PlatformDialogProps): React.ReactElement {
   const titleId = useId();
   const Icon = ICONS[kind];
-  const defaultDatasetVersion = useMemo(() => {
-    if (initialDatasetVersionId && data.datasetVersions.some((version) => version.id === initialDatasetVersionId)) return initialDatasetVersionId;
-    const matching = data.datasetVersions
-      .filter((version) => !initialDatasetId || version.dataset_id === initialDatasetId)
-      .sort((left, right) => right.version_number - left.version_number)[0];
-    return matching?.id ?? data.datasetVersions[0]?.id ?? 0;
-  }, [data.datasetVersions, initialDatasetId, initialDatasetVersionId]);
-  const defaultTaskVersion = initialTaskVersionId && data.taskVersions.some((task) => task.id === initialTaskVersionId) ? initialTaskVersionId : data.taskVersions[0]?.id ?? 0;
+  const defaultDatasetVersion = [...data.datasetVersions]
+    .sort((left, right) => right.version_number - left.version_number)[0]?.id ?? 0;
+  const defaultTaskVersion = data.taskVersions[0]?.id ?? 0;
   const [formError, setFormError] = useState<string | null>(null);
 
   async function submit(operation: () => Promise<void>): Promise<void> {
@@ -151,24 +119,6 @@ export default function PlatformDialog({
           return onCreateTask(draft);
         })} />
       ) : null}
-      {kind === "trainingData" ? (
-        <TrainingDataForm
-          data={data}
-          busy={busy}
-          defaultDatasetVersion={defaultDatasetVersion}
-          defaultTaskVersion={defaultTaskVersion}
-          onSubmit={(draft) => submit(() => onPrepareTrainingData(draft))}
-        />
-      ) : null}
-      {kind === "cycle" ? (
-        <CycleForm
-          data={data}
-          busy={busy}
-          defaultDatasetVersion={defaultDatasetVersion}
-          defaultTaskVersion={defaultTaskVersion}
-          onSubmit={(draft) => submit(() => onCreateCycle(draft))}
-        />
-      ) : null}
       {kind === "round" ? (
         <RoundForm
           data={data}
@@ -185,14 +135,6 @@ export default function PlatformDialog({
           busy={busy}
           defaultDatasetVersion={defaultDatasetVersion}
           onSubmit={(draft) => submit(() => onScoreFeedback(draft))}
-        />
-      ) : null}
-      {kind === "guideline" ? (
-        <GuidelineForm
-          data={data}
-          busy={busy}
-          defaultTaskVersion={defaultTaskVersion}
-          onSubmit={(draft) => submit(() => onCreateGuideline(draft))}
         />
       ) : null}
       {formError ? <p className="platform-dialog-error" role="alert">{formError}</p> : null}
@@ -416,359 +358,6 @@ function TaskForm({
         <small id={labelsHelpId}>NER requires at least one entity label. Separate multiple labels with commas.</small>
       ) : null}
       <FormActions busy={busy} />
-    </ValidatedForm>
-  );
-}
-
-function TrainingDataForm({
-  data,
-  busy,
-  defaultDatasetVersion,
-  defaultTaskVersion,
-  onSubmit,
-}: {
-  data: PlatformProjectData;
-  busy: boolean;
-  defaultDatasetVersion: number;
-  defaultTaskVersion: number;
-  onSubmit: (draft: TrainingDataDraft) => Promise<void>;
-}): React.ReactElement {
-  const defaultLabelSet = data.labelSets.find(
-    (labels) =>
-      labels.dataset_version_id === defaultDatasetVersion &&
-      labels.task_version_id === defaultTaskVersion &&
-      labels.composition_policy !== "exclude",
-  );
-  const [name, setName] = useState("");
-  const [taskVersionId, setTaskVersionId] = useState(defaultTaskVersion);
-  const [datasetVersionId, setDatasetVersionId] = useState(defaultDatasetVersion);
-  const [inputField, setInputField] = useState("text");
-  const [labelField, setLabelField] = useState("label");
-  const [labelSource, setLabelSource] = useState<
-    TrainingDataDraft["labelSource"]
-  >(defaultLabelSet ? "existing_label_set" : "dataset_field");
-  const [labelSetVersionId, setLabelSetVersionId] = useState(
-    defaultLabelSet?.id ?? 0,
-  );
-  const [trainPercent, setTrainPercent] = useState(80);
-  const [validationPercent, setValidationPercent] = useState(10);
-  const testPercent = 100 - trainPercent - validationPercent;
-  const compatibleLabelSets = data.labelSets.filter(
-    (labels) =>
-      labels.dataset_version_id === datasetVersionId &&
-      labels.task_version_id === taskVersionId &&
-      labels.composition_policy !== "exclude",
-  );
-  const selectCompatibleLabelSet = (
-    nextDatasetVersionId: number,
-    nextTaskVersionId: number,
-  ): void => {
-    const next = data.labelSets.find(
-      (labels) =>
-        labels.dataset_version_id === nextDatasetVersionId &&
-        labels.task_version_id === nextTaskVersionId &&
-        labels.composition_policy !== "exclude",
-    );
-    setLabelSetVersionId(next?.id ?? 0);
-  };
-  const labelSourceIncomplete =
-    labelSource === "existing_label_set"
-      ? !compatibleLabelSets.some((labels) => labels.id === labelSetVersionId)
-      : !labelField.trim();
-  return (
-    <ValidatedForm className="platform-dialog-form" onSubmit={(event) => {
-      event.preventDefault();
-      void onSubmit({
-        name,
-        taskVersionId,
-        datasetVersionId,
-        inputField,
-        labelSource,
-        labelSetVersionId:
-          labelSource === "existing_label_set" ? labelSetVersionId : null,
-        labelField,
-        trainPercent,
-        validationPercent,
-      });
-    }}>
-      <label><span>Training dataset name</span><NativeInput required value={name} onChange={(event) => setName(event.target.value)} /></label>
-      <ResourceSelectors
-        data={data}
-        taskVersionId={taskVersionId}
-        datasetVersionId={datasetVersionId}
-        onTaskChange={(nextTaskVersionId) => {
-          setTaskVersionId(nextTaskVersionId);
-          selectCompatibleLabelSet(datasetVersionId, nextTaskVersionId);
-        }}
-        onDatasetChange={(nextDatasetVersionId) => {
-          setDatasetVersionId(nextDatasetVersionId);
-          selectCompatibleLabelSet(nextDatasetVersionId, taskVersionId);
-        }}
-      />
-      <label><span>Input field</span><NativeInput required value={inputField} onChange={(event) => setInputField(event.target.value)} /></label>
-      <fieldset className="platform-fieldset">
-        <legend>Label source</legend>
-        <div className="platform-option-list">
-          <label data-disabled={!compatibleLabelSets.length}>
-            <NativeInput
-              type="radio"
-              name="training-label-source"
-              checked={labelSource === "existing_label_set"}
-              disabled={!compatibleLabelSets.length}
-              onChange={() => setLabelSource("existing_label_set")}
-            />
-            <span>
-              <strong>Existing label set</strong>
-              <small>Use imported, human, or adjudicated labels without changing them.</small>
-            </span>
-          </label>
-          <label>
-            <NativeInput
-              type="radio"
-              name="training-label-source"
-              checked={labelSource === "dataset_field"}
-              onChange={() => setLabelSource("dataset_field")}
-            />
-            <span>
-              <strong>Dataset field</strong>
-              <small>Extract preserved source labels into a separate immutable label set.</small>
-            </span>
-          </label>
-        </div>
-      </fieldset>
-      {labelSource === "existing_label_set" ? (
-        <label>
-          <span>Label set</span>
-          <NativeSelect
-            required
-            value={labelSetVersionId}
-            onChange={(event) => setLabelSetVersionId(Number(event.target.value))}
-          >
-            <option value={0}>Select a compatible label set</option>
-            {compatibleLabelSets.map((labels) => (
-              <option key={labels.id} value={labels.id}>
-                {labels.name} · v{labels.version_number} · {formatStatus(labels.source_kind)} · {formatCount(labels.label_count, "label")}
-              </option>
-            ))}
-          </NativeSelect>
-        </label>
-      ) : (
-        <label>
-          <span>Imported label field</span>
-          <NativeInput
-            required
-            value={labelField}
-            onChange={(event) => setLabelField(event.target.value)}
-          />
-        </label>
-      )}
-      <div className="platform-form-grid">
-        <label>
-          <span>Train percent</span>
-          <NativeInput type="number" min={1} max={98} value={trainPercent} onChange={(event) => setTrainPercent(Number(event.target.value))} />
-        </label>
-        <label>
-          <span>Validation percent</span>
-          <NativeInput type="number" min={1} max={98} value={validationPercent} onChange={(event) => setValidationPercent(Number(event.target.value))} />
-        </label>
-      </div>
-      <p className="platform-form-note">
-        Test: {testPercent}% · protected from training, selection, prompt tuning, and guideline mining.
-      </p>
-      <FormActions
-        busy={busy}
-        disabled={
-          !taskVersionId ||
-          !datasetVersionId ||
-          labelSourceIncomplete ||
-          testPercent < 1
-        }
-      />
-    </ValidatedForm>
-  );
-}
-
-function CycleForm({
-  data,
-  busy,
-  defaultDatasetVersion,
-  defaultTaskVersion,
-  onSubmit,
-}: {
-  data: PlatformProjectData;
-  busy: boolean;
-  defaultDatasetVersion: number;
-  defaultTaskVersion: number;
-  onSubmit: (draft: CycleDraft) => Promise<void>;
-}): React.ReactElement {
-  type SourceChoice = "registered_model" | LearningFeedbackProducer;
-  const [name, setName] = useState("");
-  const [goal, setGoal] = useState<CycleDraft["goal"]>("reannotate");
-  const [taskVersionId, setTaskVersionId] = useState(defaultTaskVersion);
-  const [datasetVersionId, setDatasetVersionId] = useState(defaultDatasetVersion);
-  const [baselineModelVersionId, setBaselineModelVersionId] = useState(0);
-  const compatibleModelVersions = data.modelVersions.filter(
-    (version) => version.task_version_id === taskVersionId,
-  );
-  const [sourceType, setSourceType] = useState<SourceChoice>(
-    compatibleModelVersions.length ? "registered_model" : "rule",
-  );
-  const [sourceName, setSourceName] = useState("");
-  const [provider, setProvider] = useState("");
-  const [externalModelId, setExternalModelId] = useState("");
-  const [exactRevision, setExactRevision] = useState("");
-  const [egressPolicy, setEgressPolicy] = useState("");
-  const sourceIncomplete =
-    (sourceType === "registered_model" && !baselineModelVersionId) ||
-    (sourceType === "external_llm" &&
-      (!sourceName.trim() ||
-        !provider.trim() ||
-        !externalModelId.trim() ||
-        !exactRevision.trim() ||
-        !egressPolicy.trim())) ||
-    (sourceType !== "registered_model" &&
-      sourceType !== "external_llm" &&
-      !sourceName.trim());
-  return (
-    <ValidatedForm className="platform-dialog-form" onSubmit={(event) => {
-      event.preventDefault();
-      const feedbackSources =
-        sourceType === "registered_model"
-          ? []
-          : [{
-              producer_type: sourceType,
-              name: sourceName.trim(),
-              provider: sourceType === "external_llm" ? provider.trim() : null,
-              external_model_id:
-                sourceType === "external_llm" ? externalModelId.trim() : null,
-              exact_revision:
-                sourceType === "external_llm" ? exactRevision.trim() : null,
-              configuration: {},
-              data_egress_policy:
-                sourceType === "external_llm"
-                  ? { policy_reference: egressPolicy.trim() }
-                  : {},
-            }];
-      void onSubmit({
-        name,
-        goal,
-        taskVersionId,
-        datasetVersionId,
-        baselineModelVersionId:
-          sourceType === "registered_model" ? baselineModelVersionId || null : null,
-        feedbackSources,
-      });
-    }}>
-      <label><span>Cycle name</span><NativeInput required value={name} onChange={(event) => setName(event.target.value)} /></label>
-      <label>
-        <span>Goal</span>
-        <NativeSelect value={goal} onChange={(event) => setGoal(event.target.value as CycleDraft["goal"])}>
-          <option value="reannotate">Re-annotate with feedback</option>
-          <option value="expand_pool">Expand the data pool</option>
-          <option value="guideline_pilot">Pilot a guideline</option>
-          <option value="error_remediation">Remediate errors</option>
-        </NativeSelect>
-      </label>
-      <ResourceSelectors
-        data={data}
-        taskVersionId={taskVersionId}
-        datasetVersionId={datasetVersionId}
-        onTaskChange={(nextTaskVersionId) => {
-          setTaskVersionId(nextTaskVersionId);
-          setBaselineModelVersionId(0);
-        }}
-        onDatasetChange={setDatasetVersionId}
-      />
-      <label>
-        <span>Feedback source</span>
-        <NativeSelect
-          value={sourceType}
-          onChange={(event) => {
-            setSourceType(event.target.value as SourceChoice);
-            setBaselineModelVersionId(0);
-          }}
-        >
-          <option value="registered_model" disabled={!compatibleModelVersions.length}>
-            Registered model
-          </option>
-          <option value="external_llm">External LLM</option>
-          <option value="rule">Rule system</option>
-          <option value="dictionary">Dictionary</option>
-          <option value="ensemble">Ensemble</option>
-          <option value="human_disagreement">Human disagreement</option>
-        </NativeSelect>
-      </label>
-      {sourceType === "registered_model" ? (
-        <label>
-          <span>Model version</span>
-          <NativeSelect
-            required
-            value={baselineModelVersionId}
-            onChange={(event) => setBaselineModelVersionId(Number(event.target.value))}
-          >
-            <option value={0}>Select a compatible model</option>
-            {compatibleModelVersions.map((version) => {
-              const model = data.models.find(
-                (item) => item.id === version.registered_model_id,
-              );
-              return (
-                <option key={version.id} value={version.id}>
-                  {model?.name ?? "Model"} · v{version.version_number}
-                </option>
-              );
-            })}
-          </NativeSelect>
-        </label>
-      ) : (
-        <label>
-          <span>Source name</span>
-          <NativeInput
-            required
-            value={sourceName}
-            onChange={(event) => setSourceName(event.target.value)}
-          />
-        </label>
-      )}
-      {sourceType === "external_llm" ? (
-        <>
-          <label>
-            <span>Provider</span>
-            <NativeInput
-              required
-              value={provider}
-              onChange={(event) => setProvider(event.target.value)}
-            />
-          </label>
-          <label>
-            <span>Provider model ID</span>
-            <NativeInput
-              required
-              value={externalModelId}
-              onChange={(event) => setExternalModelId(event.target.value)}
-            />
-          </label>
-          <label>
-            <span>Exact model revision</span>
-            <NativeInput
-              required
-              value={exactRevision}
-              onChange={(event) => setExactRevision(event.target.value)}
-            />
-          </label>
-          <label>
-            <span>Data-egress policy</span>
-            <NativeInput
-              required
-              value={egressPolicy}
-              onChange={(event) => setEgressPolicy(event.target.value)}
-            />
-          </label>
-        </>
-      ) : null}
-      <FormActions
-        busy={busy}
-        disabled={!taskVersionId || !datasetVersionId || sourceIncomplete}
-      />
     </ValidatedForm>
   );
 }
@@ -1245,51 +834,6 @@ function RoundForm({
         uncertaintyIncomplete ||
         (!openToAllAnnotators && !annotatorUserIds.length)
       } />
-    </ValidatedForm>
-  );
-}
-
-function GuidelineForm({
-  data,
-  busy,
-  defaultTaskVersion,
-  onSubmit,
-}: {
-  data: PlatformProjectData;
-  busy: boolean;
-  defaultTaskVersion: number;
-  onSubmit: (draft: GuidelineDraft) => Promise<void>;
-}): React.ReactElement {
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-  const [taskVersionId, setTaskVersionId] = useState(defaultTaskVersion);
-  const [markdown, setMarkdown] = useState("");
-  const [rationale, setRationale] = useState("");
-  const taskVersion = data.taskVersions.find((item) => item.id === taskVersionId);
-  return (
-    <ValidatedForm className="platform-dialog-form" onSubmit={(event) => {
-      event.preventDefault();
-      if (!taskVersion) return;
-      void onSubmit({
-        name,
-        description,
-        taskDefinitionId: taskVersion.task_definition_id,
-        taskVersionId,
-        markdown,
-        rationale,
-      });
-    }}>
-      <label><span>Name</span><NativeInput required value={name} onChange={(event) => setName(event.target.value)} /></label>
-      <label>
-        <span>Task version</span>
-        <NativeSelect value={taskVersionId} onChange={(event) => setTaskVersionId(Number(event.target.value))}>
-          {data.taskVersions.map((task) => <option key={task.id} value={task.id}>{formatTaskKind(task.task_kind, task.annotation_ui?.preset)} · v{task.version_number}</option>)}
-        </NativeSelect>
-      </label>
-      <label><span>Description</span><NativeInput value={description} onChange={(event) => setDescription(event.target.value)} /></label>
-      <label><span>Guideline content</span><NativeTextarea required rows={10} value={markdown} onChange={(event) => setMarkdown(event.target.value)} /></label>
-      <label><span>Rationale</span><NativeTextarea rows={3} value={rationale} onChange={(event) => setRationale(event.target.value)} /></label>
-      <FormActions busy={busy} disabled={!taskVersion} />
     </ValidatedForm>
   );
 }

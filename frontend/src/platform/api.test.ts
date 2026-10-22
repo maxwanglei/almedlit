@@ -9,12 +9,10 @@ import {
   addRoundDecision,
   createDatasetWithVersion,
   createExecutionEnvironment,
-  createFeedbackRun,
   createRound,
   createStoragePolicy,
   createTaskWithVersion,
   createTrainingOnlyProject,
-  createTrainingDataset,
   getRoundWorkContext,
   getFeedbackRun,
   launchTrainingRun,
@@ -24,7 +22,7 @@ import {
   listWorkspaceTrainingRuns,
   loadPlatformProject,
   loadRoundWork,
-  materializeFeedbackRun,
+  scoreFeedbackRun,
   validateDatasetDraft,
   validateTaskDraft,
   verifyExecutionEnvironment,
@@ -675,8 +673,7 @@ describe("platform API orchestration", () => {
       modelVersionId: 81,
     };
 
-    const created = await createFeedbackRun(7, draft);
-    await materializeFeedbackRun(7, created.id);
+    const created = await scoreFeedbackRun(7, draft);
     await getFeedbackRun(7, created.id);
 
     expect(mocks.request.mock.calls.map(([path]) => path)).toEqual([
@@ -746,10 +743,6 @@ describe("platform API orchestration", () => {
     expect(data.trainingRuns).toEqual([{ id: 151 }]);
     expect(data.modelEvaluations).toEqual([{ id: 152 }]);
     expect(data.cycles).toEqual([]);
-    expect(data.guidelineProposals).toEqual([]);
-    expect(data.guidelineImpacts).toEqual([]);
-    expect(data.feedbackEvents).toEqual([]);
-    expect(data.reviewCases).toEqual([]);
     expect(paths).not.toContain("/feedback-runs?project_id=7");
     expect(paths).not.toContain("/feedback-runs/sets?project_id=7");
     expect(paths).not.toContain("/workflow-guidelines?project_id=7");
@@ -1106,89 +1099,6 @@ describe("platform API orchestration", () => {
     expect(form.get("exact_revision")).toBe("a".repeat(40));
     expect(form.get("config_name")).toBe("default");
     expect(form.get("license_identifier")).toBe("Apache-2.0");
-  });
-
-  it("delegates label preservation and protected grouped splits to the server", async () => {
-    mocks.request.mockImplementation(async (path: string) => {
-      if (path === "/datasets/training-versions/compose") {
-        return {
-          training_dataset_version: { id: 51 },
-          label_set_version_id: 31,
-          split_map_id: 41,
-          split_counts: { train: 70, validation: 15, test: 15 },
-          group_count: 100,
-        };
-      }
-      throw new Error(`Unexpected request: ${path}`);
-    });
-
-    await createTrainingDataset(7, {
-      name: "Screening train",
-      datasetVersionId: 22,
-      taskVersionId: 12,
-      labelSource: "dataset_field",
-      labelSetVersionId: null,
-      labelField: "label",
-      inputField: "text",
-      trainPercent: 70,
-      validationPercent: 15,
-    });
-
-    expect(mocks.request.mock.calls.map(([path]) => path)).toEqual([
-      "/datasets/training-versions/compose",
-    ]);
-    expect(bodyOf(mocks.request.mock.calls[0])).toMatchObject({
-      project_id: 7,
-      name: "Screening train",
-      dataset_version_id: 22,
-      task_version_id: 12,
-      input_field: "text",
-      label_field: "label",
-      label_set_version_id: null,
-      train_percent: 70,
-      validation_percent: 15,
-      seed: 42,
-    });
-    expect(bodyOf(mocks.request.mock.calls[0])).not.toHaveProperty("items");
-    expect(bodyOf(mocks.request.mock.calls[0])).not.toHaveProperty(
-      "assignments",
-    );
-  });
-
-  it("reuses an immutable label set without reposting annotation labels", async () => {
-    mocks.request.mockImplementation(async (path: string) => {
-      if (path === "/datasets/training-versions/compose") {
-        return {
-          training_dataset_version: { id: 51 },
-          label_set_version_id: 35,
-          split_map_id: 41,
-          split_counts: { train: 3, validation: 1, test: 1 },
-          group_count: 5,
-        };
-      }
-      throw new Error(`Unexpected request: ${path}`);
-    });
-
-    await createTrainingDataset(7, {
-      name: "Adjudicated screening train",
-      datasetVersionId: 22,
-      taskVersionId: 12,
-      labelSource: "existing_label_set",
-      labelSetVersionId: 35,
-      labelField: "",
-      inputField: "text",
-      trainPercent: 70,
-      validationPercent: 15,
-    });
-
-    expect(mocks.request.mock.calls.map(([path]) => path)).toEqual([
-      "/datasets/training-versions/compose",
-    ]);
-    expect(bodyOf(mocks.request.mock.calls[0])).toMatchObject({
-      label_field: null,
-      label_set_version_id: 35,
-      input_field: "text",
-    });
   });
 
   it("materializes targeted selection before creating an annotation round", async () => {

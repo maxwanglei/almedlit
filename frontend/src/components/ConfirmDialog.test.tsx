@@ -13,13 +13,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import ConfirmDialog from "./ConfirmDialog";
 
 function DialogHarness({
-  requiredReason = false,
   busy = false,
   onConfirm = vi.fn(),
 }: {
-  requiredReason?: boolean;
   busy?: boolean;
-  onConfirm?: (reason: string) => void | Promise<void>;
+  onConfirm?: () => void | Promise<void>;
 }): React.ReactElement {
   const [open, setOpen] = useState(false);
   return (
@@ -33,7 +31,6 @@ function DialogHarness({
         description="This permanently removes the selected item."
         confirmLabel="Delete item"
         busy={busy}
-        requiredReason={requiredReason}
         onCancel={() => setOpen(false)}
         onConfirm={onConfirm}
       />
@@ -62,23 +59,6 @@ describe("ConfirmDialog", () => {
 
     expect(screen.queryByRole("alertdialog")).toBeNull();
     expect(document.activeElement).toBe(trigger);
-  });
-
-  it("requires a trimmed audit reason before confirmation", () => {
-    const onConfirm = vi.fn();
-    render(<DialogHarness requiredReason onConfirm={onConfirm} />);
-    fireEvent.click(screen.getByRole("button", { name: "Delete item" }));
-
-    const confirm = screen.getAllByRole("button", {
-      name: "Delete item",
-    })[1] as HTMLButtonElement;
-    expect(confirm.disabled).toBe(true);
-    fireEvent.change(screen.getByLabelText("Audit reason"), {
-      target: { value: "  Duplicate import  " },
-    });
-    expect(confirm.disabled).toBe(false);
-    fireEvent.click(confirm);
-    expect(onConfirm).toHaveBeenCalledWith("Duplicate import");
   });
 
   it("blocks cancellation and confirmation while busy", () => {

@@ -19,7 +19,6 @@ const mocks = vi.hoisted(() => ({
   addRoundDecision: vi.fn(),
   loadRoundWork: vi.fn(),
   publishRoundLabelSet: vi.fn(),
-  recordFeedbackDecision: vi.fn(),
   revealRoundFeedback: vi.fn(),
   submitRoundDecisions: vi.fn(),
   transitionRound: vi.fn(),
@@ -259,7 +258,6 @@ describe("RoundWorkbench", () => {
     }));
     expect(mocks.transitionRound).not.toHaveBeenCalled();
     expect(mocks.revealRoundFeedback).not.toHaveBeenCalled();
-    expect(mocks.recordFeedbackDecision).not.toHaveBeenCalled();
     expect(onRefresh).toHaveBeenCalledOnce();
   });
 
@@ -380,7 +378,6 @@ describe("RoundWorkbench", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Save decision" }));
     await waitFor(() => expect(mocks.addRoundDecision).toHaveBeenCalledWith(7, expect.objectContaining({ feedbackDecision: { exposureId: 701, decision: "accepted" } })));
-    expect(mocks.recordFeedbackDecision).not.toHaveBeenCalled();
     await screen.findByText("Decision saved.");
   });
 

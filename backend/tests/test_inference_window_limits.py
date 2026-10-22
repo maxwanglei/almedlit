@@ -83,7 +83,7 @@ def test_remote_inference_rejects_oversized_sentences_before_prediction(
         prediction_calls.append(ordinal)
         return (6.0, 0.0, 0.0)
 
-    monkeypatch.setattr(runner, "_synthetic_inference_logits", record_prediction)
+    monkeypatch.setattr(runner, "synthetic_logits", record_prediction)
 
     with pytest.raises(runner.RunnerError, match="Oversized sentence"):
         runner.run_inference_job(manifest_path)

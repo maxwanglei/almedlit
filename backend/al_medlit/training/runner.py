@@ -24,6 +24,7 @@ from al_medlit.core.archive import (
     ArchiveExtractionLimits,
     extract_zip_bounded,
 )
+from al_medlit.inference.scores import label_probabilities, synthetic_logits
 
 RUNNER_SCHEMA_VERSION = "al-medlit-job-v1"
 RESULT_SCHEMA_VERSION = "al-medlit-job-result-v1"
@@ -542,7 +543,7 @@ def _evaluate_checkpoint_splits(
                     row_logits = None
                 elif synthetic_mode:
                     row_logits = [
-                        _synthetic_inference_logits(int(sentence.get("ordinal", index)))
+                        synthetic_logits(int(sentence.get("ordinal", index)))
                         for index, sentence in enumerate(sentences)
                     ]
                     row_predictions = None
@@ -1363,14 +1364,6 @@ def _resolve_materialized_package(
     return package_root
 
 
-def _synthetic_inference_logits(ordinal: int) -> tuple[float, float, float]:
-    if ordinal == 0:
-        return (0.0, 6.0, 0.0)
-    if ordinal == 1:
-        return (0.0, 0.0, 6.0)
-    return (6.0, 0.0, 0.0)
-
-
 def run_inference_job(manifest_path: str | Path) -> dict:
     manifest_file = Path(manifest_path).resolve()
     bundle_root = manifest_file.parent
@@ -1608,11 +1601,6 @@ def run_inference_job(manifest_path: str | Path) -> dict:
                 )
                 inside = False
                 previous_ordinal = None
-                label_logits = {
-                    "O": [1.0, 0.0, 0.0],
-                    "B": [0.0, 1.0, 0.0],
-                    "I": [0.0, 0.0, 1.0],
-                }
                 for sentence, prediction in zip(ordered_sentences, predictions, strict=True):
                     if predictor.produces_sentence_scores:
                         positive = float(prediction) >= predictor.config.sentence_score_threshold
@@ -1622,11 +1610,11 @@ def run_inference_job(manifest_path: str | Path) -> dict:
                         previous_ordinal = sentence.ordinal
                     else:
                         label = str(prediction)
-                    conventional_logits[str(sentence.ordinal)] = label_logits[label]
+                    conventional_logits[str(sentence.ordinal)] = label_probabilities(label)
             for window in result.windows:
                 if synthetic_mode:
                     logits = {
-                        str(sentence.ordinal): list(_synthetic_inference_logits(sentence.ordinal))
+                        str(sentence.ordinal): list(synthetic_logits(sentence.ordinal))
                         for sentence in window.sentences
                     }
                 elif conventional:
@@ -1686,11 +1674,6 @@ def run_inference_job(manifest_path: str | Path) -> dict:
                         examples,
                         config=predictor.config,
                     )
-                    one_hot = {
-                        "O": [1.0, 0.0, 0.0],
-                        "B": [0.0, 1.0, 0.0],
-                        "I": [0.0, 0.0, 1.0],
-                    }
                     labels_by_ordinal = {
                         ordinal: label
                         for example, labels in zip(examples, predicted, strict=True)
@@ -1701,7 +1684,9 @@ def run_inference_job(manifest_path: str | Path) -> dict:
                         )
                     }
                     logits = {
-                        str(sentence.ordinal): one_hot[labels_by_ordinal[sentence.ordinal]]
+                        str(sentence.ordinal): label_probabilities(
+                            labels_by_ordinal[sentence.ordinal]
+                        )
                         for sentence in window.sentences
                     }
                 else:

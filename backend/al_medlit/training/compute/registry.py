@@ -2,48 +2,18 @@ from typing import Protocol
 
 from al_medlit.core.exceptions import ValidationError
 from al_medlit.training.compute.base import CommandRunner, ComputeBackend
-from al_medlit.training.compute.config import (
-    LocalComputeConfig,
-    SSHSlurmProfileConfig,
-)
-from al_medlit.training.compute.local import LocalComputeBackend
+from al_medlit.training.compute.config import SSHSlurmProfileConfig
 from al_medlit.training.compute.slurm import SSHSlurmComputeBackend
 
 
 class ComputeBackendPlugin(Protocol):
     key: str
 
-    def validate_config(self, config: dict) -> dict: ...
-
     def build(self, config: dict, runner: CommandRunner | None = None) -> ComputeBackend: ...
-
-
-class LocalComputePlugin:
-    key = "local"
-
-    def validate_config(self, config: dict) -> dict:
-        return LocalComputeConfig.model_validate({**config, "backend": self.key}).model_dump(
-            mode="json",
-            exclude={"backend"},
-        )
-
-    def build(self, config: dict, runner: CommandRunner | None = None):
-        validated = LocalComputeConfig.model_validate({**config, "backend": self.key})
-        return LocalComputeBackend(
-            runner,
-            runtime_root=validated.runtime_root,
-            synchronous=validated.synchronous,
-            stale_heartbeat_seconds=validated.stale_heartbeat_seconds,
-        )
 
 
 class SSHSlurmComputePlugin:
     key = "ssh_slurm"
-
-    def validate_config(self, config: dict) -> dict:
-        validated = SSHSlurmProfileConfig.model_validate({**config, "backend": self.key})
-        validated.to_runtime_config()
-        return validated.model_dump(mode="json", exclude={"backend"})
 
     def build(self, config: dict, runner: CommandRunner | None = None):
         validated = SSHSlurmProfileConfig.model_validate({**config, "backend": self.key})
@@ -73,7 +43,7 @@ compute_backends = ComputeBackendRegistry()
 
 
 def register_builtin_compute_backends() -> None:
-    for plugin in (LocalComputePlugin(), SSHSlurmComputePlugin()):
+    for plugin in (SSHSlurmComputePlugin(),):
         try:
             compute_backends.register(plugin)
         except ValidationError as exc:

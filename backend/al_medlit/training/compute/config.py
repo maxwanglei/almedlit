@@ -4,7 +4,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from al_medlit.core.config import settings
 from al_medlit.training.compute.slurm import SlurmResources, SSHSlurmConfig
 from al_medlit.training.runtime_profiles import (
     RUNTIME_PROFILES,
@@ -13,28 +12,6 @@ from al_medlit.training.runtime_profiles import (
     runtime_profile_report_sha256,
     validate_ready_runtime_report,
 )
-
-
-class LocalComputeConfig(BaseModel):
-    backend: Literal["local"] = "local"
-    runtime_root: Path = Field(
-        default_factory=lambda: Path(settings.local_attempt_root)
-    )
-    synchronous: bool = False
-    stale_heartbeat_seconds: int = Field(default=180, ge=30, le=3600)
-    verified_capabilities: tuple[Literal["cuda", "ascend", "qlora_4bit"], ...] = ()
-    worker_image_digest: str | None = None
-    capability_report_sha256: str | None = None
-    runtime_profile: RuntimeProfileKey = "auto"
-    verified_dependencies: tuple[str, ...] = ()
-    readiness_report: RuntimeReadinessReport | None = None
-
-    model_config = {"extra": "forbid"}
-
-    @model_validator(mode="after")
-    def validate_capability_attestation(self):
-        _validate_capability_attestation(self)
-        return self
 
 
 class SlurmResourcesConfig(BaseModel):
@@ -100,18 +77,6 @@ class SSHSlurmProfileConfig(BaseModel):
             command_timeout_seconds=self.command_timeout_seconds,
             transfer_timeout_seconds=self.transfer_timeout_seconds,
         )
-
-
-def validate_compute_config(backend: str, config: dict) -> dict:
-    payload = {**config, "backend": backend}
-    if backend == "local":
-        validated = LocalComputeConfig.model_validate(payload)
-    elif backend == "ssh_slurm":
-        validated = SSHSlurmProfileConfig.model_validate(payload)
-        validated.to_runtime_config()
-    else:
-        raise ValueError(f"Unknown compute backend '{backend}'")
-    return validated.model_dump(mode="json", exclude={"backend"})
 
 
 def _validate_capability_attestation(config) -> None:

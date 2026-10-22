@@ -6771,24 +6771,6 @@ select:disabled {
   line-height: 1.5;
 }
 
-.confirm-dialog-reason {
-  display: grid;
-  gap: 8px;
-  color: var(--text-secondary);
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.confirm-dialog-reason textarea {
-  width: 100%;
-  resize: vertical;
-  padding: 8px;
-  color: var(--text-primary);
-  background: var(--surface-raised);
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-}
-
 .confirm-dialog-actions {
   display: flex;
   justify-content: flex-end;

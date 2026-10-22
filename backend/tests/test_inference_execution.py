@@ -15,6 +15,7 @@ from al_medlit.evidence.models import EvidenceTargetVersion
 from al_medlit.inference import execution, service
 from al_medlit.inference.models import EvidenceCandidatePrediction, InferenceWindow
 from al_medlit.lineage.models import LineageArtifact
+from al_medlit.training.compute.base import JobState
 from al_medlit.training.model_types.catalog import builtin_model_descriptors
 from al_medlit.training.model_types.evidence_conventional import model as conventional
 from al_medlit.training.runner import RESULT_SCHEMA_VERSION
@@ -296,13 +297,13 @@ def test_local_inference_rejects_oversized_sentences_before_prediction(
         document_text=document_text,
     )
     prediction_calls = []
-    original_predict = execution._synthetic_logits
+    original_predict = execution.synthetic_logits
 
     def predict(ordinal):
         prediction_calls.append(ordinal)
         return original_predict(ordinal)
 
-    monkeypatch.setattr(execution, "_synthetic_logits", predict)
+    monkeypatch.setattr(execution, "synthetic_logits", predict)
 
     with pytest.raises(ValidationError, match="Oversized sentence") as error:
         execution.execute_local_inference(
@@ -410,6 +411,11 @@ def test_cancel_route_releases_a_local_run_whose_executor_died_after_claim(
     assert scope.run.status == "running"
 
     headers = {"Authorization": f"Bearer {create_access_token(scope.user.id)}"}
+    monkeypatch.setattr(
+        service,
+        "build_compute_backend",
+        lambda _: pytest.fail("Local cancellation must not construct a scheduler backend"),
+    )
     cancelled = client.post(f"/api/inference/runs/{scope.run.id}/cancel", headers=headers)
     assert cancelled.status_code == 200, cancelled.text
     assert cancelled.json()["status"] == "cancelled"
@@ -449,3 +455,24 @@ def test_inference_window_validation_leaves_no_partial_windows_for_earlier_targe
 
     db.commit()
     assert db.query(InferenceWindow).filter(InferenceWindow.run_id == scope.run.id).count() == 0
+
+
+def test_remote_cancellation_uses_the_scheduler_backend(db, monkeypatch):
+    scope = _inference_scope(db, run_status="running")
+    scope.run.compute_profile.backend = "ssh_slurm"
+    scope.run.external_job_id = "slurm:123"
+    db.commit()
+    cancelled_jobs = []
+
+    def cancel(job_id):
+        cancelled_jobs.append(job_id)
+        return JobState(status="cancelled", raw_state="CANCELLED")
+
+    backend = SimpleNamespace(cancel=cancel)
+    monkeypatch.setattr(service, "build_compute_backend", lambda _: backend)
+
+    run = service.cancel_inference_run(db, scope.run.id)
+
+    assert cancelled_jobs == ["slurm:123"]
+    assert run.status == "cancelled"
+    assert run.completed_at is not None

@@ -4,6 +4,7 @@
   "private": true,
   "description": "AL-MedLit annotation UI — React + TypeScript",
   "scripts": {
+    "audit:reachability": "node scripts/audit-reachability.mjs --check",
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",

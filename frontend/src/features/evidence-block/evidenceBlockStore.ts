@@ -18,22 +18,10 @@ export interface EvidenceSelection {
   endOrdinal: number;
 }
 
-export interface EvidenceServerCommand {
-  key: string;
-  operation: "create" | "update" | "delete" | "merge" | "split";
-  annotationIds: number[];
-  undo: () => Promise<void>;
-  redo: () => Promise<void>;
-}
-
 interface EvidenceBlockState {
   scope: EvidenceScope | null;
   selection: EvidenceSelection | null;
   selectedAnnotationId: number | null;
-  requestGeneration: number;
-  past: EvidenceServerCommand[];
-  future: EvidenceServerCommand[];
-  commandPending: boolean;
   reset: () => void;
   setScope: (scope: EvidenceScope | null) => void;
   startSelection: (sentenceId: number, ordinal: number) => void;
@@ -46,9 +34,6 @@ interface EvidenceBlockState {
   ) => void;
   clearSelection: () => void;
   selectAnnotation: (annotationId: number | null) => void;
-  recordCommand: (command: EvidenceServerCommand) => void;
-  undo: () => Promise<void>;
-  redo: () => Promise<void>;
 }
 
 function scopesMatch(left: EvidenceScope | null, right: EvidenceScope | null): boolean {
@@ -60,24 +45,16 @@ function scopesMatch(left: EvidenceScope | null, right: EvidenceScope | null): b
 }
 
 export const useEvidenceBlockStore = create<EvidenceBlockState>()(
-  immer((set, get) => ({
+  immer((set) => ({
     scope: null,
     selection: null,
     selectedAnnotationId: null,
-    requestGeneration: 0,
-    past: [],
-    future: [],
-    commandPending: false,
 
     reset: () =>
       set((state) => {
         state.scope = null;
         state.selection = null;
         state.selectedAnnotationId = null;
-        state.past = [];
-        state.future = [];
-        state.commandPending = false;
-        state.requestGeneration += 1;
       }),
 
     setScope: (scope) =>
@@ -88,9 +65,6 @@ export const useEvidenceBlockStore = create<EvidenceBlockState>()(
         state.scope = scope;
         state.selection = null;
         state.selectedAnnotationId = null;
-        state.past = [];
-        state.future = [];
-        state.requestGeneration += 1;
       }),
 
     startSelection: (sentenceId, ordinal) =>
@@ -147,67 +121,5 @@ export const useEvidenceBlockStore = create<EvidenceBlockState>()(
       set((state) => {
         state.selectedAnnotationId = annotationId;
       }),
-
-    recordCommand: (command) =>
-      set((state) => {
-        state.past.push(command);
-        state.future = [];
-      }),
-
-    undo: async () => {
-      const state = get();
-      const command = state.past[state.past.length - 1];
-      const generation = state.requestGeneration;
-      if (!command || state.commandPending) {
-        return;
-      }
-      set((draft) => {
-        draft.commandPending = true;
-      });
-      try {
-        await command.undo();
-        set((draft) => {
-          if (draft.requestGeneration !== generation) {
-            return;
-          }
-          draft.past.pop();
-          draft.future.push(command);
-        });
-      } finally {
-        set((draft) => {
-          if (draft.requestGeneration === generation) {
-            draft.commandPending = false;
-          }
-        });
-      }
-    },
-
-    redo: async () => {
-      const state = get();
-      const command = state.future[state.future.length - 1];
-      const generation = state.requestGeneration;
-      if (!command || state.commandPending) {
-        return;
-      }
-      set((draft) => {
-        draft.commandPending = true;
-      });
-      try {
-        await command.redo();
-        set((draft) => {
-          if (draft.requestGeneration !== generation) {
-            return;
-          }
-          draft.future.pop();
-          draft.past.push(command);
-        });
-      } finally {
-        set((draft) => {
-          if (draft.requestGeneration === generation) {
-            draft.commandPending = false;
-          }
-        });
-      }
-    },
   })),
 );

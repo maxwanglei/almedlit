@@ -8,15 +8,12 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 
 import pytest
 
 from al_medlit.training.compute.base import CommandResult, ComputeBackendError, JobBundle
-from al_medlit.training.compute.config import validate_compute_config
-from al_medlit.training.compute.local import LocalComputeBackend
-from al_medlit.training.compute.local_worker import run as run_local_worker
+from al_medlit.training.compute.config import SSHSlurmProfileConfig
 from al_medlit.training.compute.slurm import (
     SlurmResources,
     SSHSlurmComputeBackend,
@@ -97,110 +94,6 @@ def _slurm_config(tmp_path):
         apptainer_image=PurePosixPath("/images/al-medlit.sif"),
         apptainer_module="apptainer/1.3.6",
     )
-
-
-def test_local_backend_is_idempotent_and_never_uses_a_shell(tmp_path):
-    runner = FakeRunner([_result(stdout="trained")])
-    backend = LocalComputeBackend(runner)
-    bundle = JobBundle(
-        job_key="job-1",
-        command=("python", "train.py"),
-        local_bundle_path=tmp_path,
-    )
-    first = backend.submit(bundle)
-    second = backend.submit(bundle)
-
-    assert first.status == "succeeded"
-    assert second.metadata == {"idempotent": True}
-    assert runner.commands == [("python", "train.py")]
-
-
-def test_local_backend_classifies_a_stale_worker_heartbeat(tmp_path):
-    backend = LocalComputeBackend(
-        runtime_root=tmp_path,
-        stale_heartbeat_seconds=30,
-    )
-    job_root = tmp_path / "job-1"
-    job_root.mkdir()
-    (job_root / "status.json").write_text(
-        json.dumps(
-            {
-                "status": "running",
-                "raw_state": "RUNNING",
-                "updated_at": (datetime.now(UTC) - timedelta(minutes=5)).isoformat(),
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    state = backend.poll("local:job-1")
-
-    assert state.status == "failed"
-    assert state.raw_state == "STALE_HEARTBEAT"
-    assert state.reason == "Local worker heartbeat became stale"
-
-
-def test_local_cancel_refuses_to_signal_a_reused_pid(tmp_path, monkeypatch):
-    backend = LocalComputeBackend(runtime_root=tmp_path)
-    job_root = tmp_path / "job-1"
-    job_root.mkdir()
-    now = datetime.now(UTC).isoformat()
-    (job_root / "status.json").write_text(
-        json.dumps({"status": "running", "raw_state": "RUNNING", "updated_at": now}),
-        encoding="utf-8",
-    )
-    (job_root / "process-identity.json").write_text(
-        json.dumps(
-            {
-                "pid": 1234,
-                "start_identity": "old-process-start",
-                "launch_token": "launch-token",
-                "created_at": now,
-            }
-        ),
-        encoding="utf-8",
-    )
-    signalled = []
-    monkeypatch.setattr(
-        LocalComputeBackend,
-        "_process_start_identity",
-        staticmethod(lambda _pid: "reused-process-start"),
-    )
-    monkeypatch.setattr("al_medlit.training.compute.local.os.killpg", signalled.append)
-
-    state = backend.cancel("local:job-1")
-
-    assert state.status == "cancelled"
-    assert signalled == []
-    assert (job_root / "cancel-requested.json").is_file()
-
-
-def test_local_worker_honors_shared_cancellation_marker(tmp_path):
-    cancel_path = tmp_path / "cancel-requested.json"
-    cancel_path.write_text("{}", encoding="utf-8")
-    specification = {
-        "schema_version": "local-process-v1",
-        "command": [sys.executable, "-c", "import time; time.sleep(60)"],
-        "cwd": str(tmp_path),
-        "environment": {},
-        "status_path": str(tmp_path / "status.json"),
-        "stdout_path": str(tmp_path / "stdout.log"),
-        "stderr_path": str(tmp_path / "stderr.log"),
-        "identity_path": str(tmp_path / "process-identity.json"),
-        "cancel_path": str(cancel_path),
-        "launch_token": "test-launch-token",
-        "heartbeat_interval_seconds": 1,
-    }
-    spec_path = tmp_path / "process.json"
-    spec_path.write_text(json.dumps(specification), encoding="utf-8")
-
-    run_local_worker(spec_path)
-
-    status = json.loads((tmp_path / "status.json").read_text())
-    assert status["status"] == "cancelled"
-    assert status["raw_state"] == "CANCELLED"
-    assert status["launch_token"] == "test-launch-token"
-    assert status["updated_at"]
 
 
 def test_slurm_commands_enforce_batch_mode_and_strict_host_keys(tmp_path):
@@ -377,7 +270,9 @@ def test_concurrent_slurm_submissions_share_one_job_and_sentinel(tmp_path, monke
     )
     monkeypatch.setattr(backend, "_upload_verified_bundle", lambda _bundle: None)
     bundle = JobBundle(
-        job_key="inference-1", command=("true",), local_bundle_path=tmp_path,
+        job_key="inference-1",
+        command=("true",),
+        local_bundle_path=tmp_path,
     )
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [executor.submit(backend.submit, bundle) for _ in range(2)]
@@ -387,8 +282,7 @@ def test_concurrent_slurm_submissions_share_one_job_and_sentinel(tmp_path, monke
                 # The old shell reaches two sbatch invocations; the fixed
                 # shell leaves one contender waiting on the submission lock.
                 if len(list(attempts.glob("job-*"))) >= 2 or (
-                    len(list(attempts.glob("lock-*"))) == 2
-                    and list(attempts.glob("job-*"))
+                    len(list(attempts.glob("lock-*"))) == 2 and list(attempts.glob("job-*"))
                 ):
                     break
                 time.sleep(0.01)
@@ -446,29 +340,38 @@ def test_slurm_parsers_reject_untrusted_job_ids_and_map_failures():
 
 def test_quantization_capability_attestation_is_image_bound():
     digest = "a" * 64
-    validated = validate_compute_config(
-        "local",
+    profile = {
+        "host": "cluster.example.org",
+        "username": "alice",
+        "known_hosts_file": "/tmp/known_hosts",
+        "remote_root": "/remote/jobs",
+        "resources": {"account": "test"},
+        "apptainer_image": "/images/runtime.sif",
+        "apptainer_module": "apptainer",
+    }
+    validated = SSHSlurmProfileConfig.model_validate(
         {
+            **profile,
             "verified_capabilities": ["cuda", "qlora_4bit"],
             "worker_image_digest": digest,
             "capability_report_sha256": "b" * 64,
         },
     )
-    assert validated["verified_capabilities"] == ["cuda", "qlora_4bit"]
+    assert validated.verified_capabilities == ("cuda", "qlora_4bit")
 
     with pytest.raises(ValueError, match="also requires verified CUDA"):
-        validate_compute_config(
-            "local",
+        SSHSlurmProfileConfig.model_validate(
             {
+                **profile,
                 "verified_capabilities": ["qlora_4bit"],
                 "worker_image_digest": digest,
                 "capability_report_sha256": "b" * 64,
             },
         )
     with pytest.raises(ValueError, match="worker_image_digest"):
-        validate_compute_config(
-            "local",
+        SSHSlurmProfileConfig.model_validate(
             {
+                **profile,
                 "verified_capabilities": ["cuda"],
                 "capability_report_sha256": "b" * 64,
             },
@@ -540,6 +443,7 @@ def test_slurm_transfers_sharded_checkpoint_packages_without_an_archive(tmp_path
     base_file.parent.mkdir()
     base_file.write_bytes(b"approved base model shard")
     (tmp_path / "job.sbatch").write_text("#!/bin/bash\n", encoding="utf-8")
+
     def package_item(path):
         return {
             "path": path.relative_to(tmp_path).as_posix(),
@@ -547,6 +451,7 @@ def test_slurm_transfers_sharded_checkpoint_packages_without_an_archive(tmp_path
             "checksum_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
             "size_bytes": path.stat().st_size,
         }
+
     (tmp_path / "job.json").write_text(
         json.dumps(
             {
@@ -586,9 +491,7 @@ def test_slurm_transfers_sharded_checkpoint_packages_without_an_archive(tmp_path
     assert any(path.startswith(remote_checkpoint) for path in runner.remote_files)
     assert not any(path.endswith("checkpoint.zip") for path in runner.remote_files)
     cache_payloads = [
-        payload
-        for path, payload in runner.remote_files.items()
-        if "/.base-model-cache/" in path
+        payload for path, payload in runner.remote_files.items() if "/.base-model-cache/" in path
     ]
     assert cache_payloads == [base_file.read_bytes()]
 
