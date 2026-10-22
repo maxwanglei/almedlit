@@ -84,12 +84,3 @@ PROJECT.md
 # Keep local investigation artifacts out of source control.
 .audit/*
 
-# Version the UI contract and its agent entrypoint.
-!/design-system/
-/design-system/*
-!/design-system/al-medlit-learning-platform/
-/design-system/al-medlit-learning-platform/*
-!/design-system/al-medlit-learning-platform/MASTER.md
-!/frontend/.claude/
-/frontend/.claude/*
-!/frontend/.claude/CLAUDE.md
