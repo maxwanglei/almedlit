@@ -56,10 +56,12 @@ services:
       - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/certs
 
   minio:
-    # Use MinIO's official Quay registry; the Docker Hub image is unavailable.
-    # Keep the human-auditable release tag and immutable multi-architecture
-    # manifest digest together. Update both only after validating an upgrade.
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    # The release images reject anonymous pulls. Build the pinned sources
+    # so startup keeps the same server and client versions.
+    build:
+      context: ..
+      dockerfile: infra/docker/minio.Dockerfile
+      target: minio
     restart: unless-stopped
     command: server /data --console-address ":9001" --certs-dir /certs
     environment:
@@ -84,7 +86,10 @@ services:
         condition: service_completed_successfully
 
   minio-app-init:
-    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+    build:
+      context: ..
+      dockerfile: infra/docker/minio.Dockerfile
+      target: mc
     restart: "no"
     entrypoint: ["/bin/sh", "/scripts/provision-minio-app.sh"]
     environment:

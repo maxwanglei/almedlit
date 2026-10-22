@@ -38,10 +38,6 @@ MINIO_CA_PATH_LINE = "AL_MEDLIT_STORAGE_CA_CERT_PATH: /etc/al-medlit/minio-certs
 MINIO_CERT_MOUNT_LINE = (
     "- ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro"
 )
-PINNED_MINIO_IMAGE = (
-    "quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z"
-    "@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e"
-)
 HEAVY_TRAINING_PACKAGES = {
     "bitsandbytes",
     "peft",
@@ -211,17 +207,35 @@ def test_frontend_proxy_rate_limits_public_auth_and_api_is_loopback_only():
     assert "AL_MEDLIT_AUTH_RATE: ${AL_MEDLIT_AUTH_RATE:-10r/m}" in compose
 
 
-def test_compose_pins_minio_to_a_dated_release_manifest():
+def test_compose_builds_minio_from_pinned_release_sources():
     compose = (ROOT_DIR / "infra" / "docker-compose.yml").read_text()
+    dockerfile = (ROOT_DIR / "infra" / "docker" / "minio.Dockerfile").read_text()
 
-    assert f"image: {PINNED_MINIO_IMAGE}" in compose
-    assert "minio/minio:latest" not in compose
-    assert re.fullmatch(
-        r"quay\.io/minio/minio:RELEASE\.\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z"
-        r"@sha256:[0-9a-f]{64}",
-        PINNED_MINIO_IMAGE,
-    )
+    for service, target, module in (
+        (
+            "minio", "minio",
+            "github.com/minio/minio@v0.0.0-20250907161309-07c3a429bfed",
+        ),
+        (
+            "minio-app-init", "mc",
+            "github.com/minio/mc@v0.0.0-20250813083541-7394ce0dd2a8",
+        ),
+    ):
+        service_match = re.search(
+            rf"^  {service}:\n(.*?)(?=^  [\w-]+:|\Z)",
+            compose,
+            re.MULTILINE | re.DOTALL,
+        )
+        assert service_match is not None
+        service_config = service_match.group(1)
+        assert "    build:\n      context: ..\n" in service_config
+        assert "      dockerfile: infra/docker/minio.Dockerfile\n" in service_config
+        assert f"      target: {target}\n" in service_config
+        assert "    image:" not in service_config
+        assert f"FROM runtime AS {target}\n" in dockerfile
+        assert module in dockerfile
 
+    assert "@latest" not in dockerfile
 
 def test_frontend_proxy_sets_security_headers_for_all_responses():
     nginx = (ROOT_DIR / "frontend" / "nginx" / "default.conf.template").read_text()
