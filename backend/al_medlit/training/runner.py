@@ -496,18 +496,16 @@ def _evaluate_checkpoint_splits(
                 for index, sequence in enumerate(canonical_sentence_groups(rows))
             ]
         if neural:
-            documents = documents_from_window_rows(rows)
+            documents = documents_from_window_rows(
+                rows, max_sentences=predictor.config.max_sentences_per_document,
+            )
             predictions = predict_neural_model(
                 predictor,
                 documents,
                 device=device_override or str(config.get("device", "auto")),
             )
-            prediction_by_scope = {
-                (item.document_id, str(item.target_id)): item for item in predictions
-            }
-            for document in documents:
+            for document, prediction in zip(documents, predictions, strict=True):
                 target_id = str(document.target_id)
-                prediction = prediction_by_scope[(document.document_id, target_id)]
                 group = _empty_prediction_group(groups, document.document_id, target_id)
                 group["target_text"] = document.target_text
                 ordinals = document.sentence_ordinals or tuple(range(len(document.sentences)))
@@ -1109,10 +1107,12 @@ def _train_neural_checkpoint(
         plugin = plugins[model_type]
         config = plugin.validate_config(raw_config)
         training_documents = documents_from_window_rows(
-            _selected_training_rows(dataset_path, target_version_id)
+            _selected_training_rows(dataset_path, target_version_id),
+            max_sentences=config.max_sentences_per_document,
         )
         validation_documents = documents_from_window_rows(
-            _evaluation_rows(dataset_path, target_version_id, "validation")
+            _evaluation_rows(dataset_path, target_version_id, "validation"),
+            max_sentences=config.max_sentences_per_document,
         )
 
         def validation_selector(bundle, _epoch: int) -> NeuralCheckpointScore:
@@ -1326,9 +1326,7 @@ def _resolve_hf_model_root(source: Path, *, label: str) -> Path:
         None,
     )
     if model_root is None:
-        raise RunnerError(
-            f"The immutable {label} package must contain a Hugging Face config.json"
-        )
+        raise RunnerError(f"The immutable {label} package must contain a Hugging Face config.json")
     return model_root
 
 
@@ -1420,6 +1418,7 @@ def run_inference_job(manifest_path: str | Path) -> dict:
 
     predictor = None
     peft_tokenizer = None
+    marker_tokenizer = None
     torch = None
     if synthetic_mode:
 
@@ -1522,6 +1521,7 @@ def run_inference_job(manifest_path: str | Path) -> dict:
         _device_name, runtime_device = _resolve_torch_device(torch, predictor.config.device)
         predictor.model.to(torch.device(runtime_device))
         predictor.model.eval()
+        marker_tokenizer = predictor.tokenizer
 
         def token_counter(text: str) -> int:
             return max(1, len(predictor.tokenizer.encode(text, add_special_tokens=False)))
@@ -1538,11 +1538,18 @@ def run_inference_job(manifest_path: str | Path) -> dict:
     builder = EvidenceBlockWindowBuilder(
         token_counter,
         WindowBuilderConfig(
-            max_tokens=int(window_config["max_tokens"]),
+            max_tokens=(
+                min(int(window_config["max_tokens"]), predictor.config.max_length)
+                if marker_tokenizer is not None
+                else int(window_config["max_tokens"])
+            ),
             overlap_tokens=int(window_config["overlap_tokens"]),
             target_conditioning=checkpoint["training_mode"] == "conditioned",
             require_reviewed_gold=False,
             reject_oversized_sentences=True,
+            reserved_special_tokens=(3 if predictor.config.target_conditioning else 2)
+            if marker_tokenizer is not None
+            else 4,
         ),
     )
     output_windows = []
@@ -1556,6 +1563,11 @@ def run_inference_job(manifest_path: str | Path) -> dict:
                 text=sentence["text"],
                 start_char=sentence["start_char"],
                 end_char=sentence["end_char"],
+                token_count=(
+                    1 + len(marker_tokenizer.encode(sentence["text"], add_special_tokens=False))
+                    if marker_tokenizer is not None
+                    else None
+                ),
             )
             for sentence in document["sentences"]
         ]
@@ -1571,6 +1583,13 @@ def run_inference_job(manifest_path: str | Path) -> dict:
                         text=target["text"],
                     ),
                     sentences=sentence_inputs,
+                    target_token_count=(
+                        1 + len(marker_tokenizer.encode(target["text"], add_special_tokens=False))
+                        if predictor.config.target_conditioning
+                        else 0
+                    )
+                    if marker_tokenizer is not None
+                    else None,
                 )
             except WindowBuildError as exc:
                 raise RunnerError(str(exc)) from exc
@@ -1928,9 +1947,7 @@ def run_training_job(manifest_path: str | Path) -> dict:
             "runtime": training_metrics.get("runtime") or {},
             # The checkpoint's discovery metadata is bound to the held-out test
             # cohort. Validation remains the only checkpoint-selection split.
-            "evaluation_fingerprint": (
-                evaluations.get("test", {}).get("evaluation_fingerprint")
-            ),
+            "evaluation_fingerprint": (evaluations.get("test", {}).get("evaluation_fingerprint")),
         }
     )
     _write_json(checkpoint_root / "manifest.json", checkpoint_manifest)

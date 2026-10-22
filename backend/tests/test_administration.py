@@ -45,7 +45,7 @@ def _create_admin(db, username: str = "system-admin"):
 
 
 def _token_from_action(action: dict) -> str:
-    return action["url"].rsplit("/", 1)[-1]
+    return action["url"].split("#token=", 1)[1]
 
 
 def test_membershipless_superuser_can_list_users_but_workspace_admin_cannot(client, db):

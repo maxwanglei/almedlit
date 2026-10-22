@@ -549,6 +549,8 @@ def assert_task_assigned(
         query = query.filter(TaskAssignment.structure_version_id == structure_version_id)
     if guideline_version_id is not None or match_guideline_version:
         query = query.filter(TaskAssignment.guideline_version_id == guideline_version_id)
+    if require_mutable_assignment:
+        query = query.order_by(TaskAssignment.status.in_(MUTABLE_ASSIGNMENT_STATUSES).desc())
     query = query.order_by(
         (TaskAssignment.status == "withdrawn").asc(),
         TaskAssignment.id.desc(),

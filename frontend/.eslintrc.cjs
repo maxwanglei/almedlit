@@ -17,6 +17,11 @@ module.exports = {
   plugins: ["@typescript-eslint", "react-hooks"],
   extends: ["eslint:recommended", "plugin:@typescript-eslint/recommended"],
   ignorePatterns: ["dist", "node_modules"],
+  overrides: [{
+    files: ["e2e/**/*.ts", "playwright.config.ts"],
+    env: { node: true },
+    parserOptions: { project: "./tsconfig.e2e.json" },
+  }],
   rules: {
     "@typescript-eslint/consistent-type-imports": "error",
     "react-hooks/exhaustive-deps": "warn",

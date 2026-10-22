@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 import math
@@ -541,6 +542,71 @@ class SSHSlurmComputeBackend:
         if result.returncode != 0:
             raise ComputeBackendError(result.stderr or "Remote job cleanup failed")
 
+    def cleanup_expired_base_models(self) -> None:
+        cache = self.config.remote_root / ".base-model-cache"
+        exists = self._run(self.ssh_argv(("test", "-d", str(cache))))
+        if exists.returncode == 1:
+            return
+        if exists.returncode != 0:
+            raise ComputeBackendError(exists.stderr or "Unable to inspect remote base-model cache")
+        result = self._run(
+            self.ssh_argv(
+                (
+                    "find",
+                    str(cache),
+                    "-type",
+                    "f",
+                    "-links",
+                    "1",
+                    "-atime",
+                    "+30",
+                    "-delete",
+                )
+            )
+        )
+        if result.returncode != 0:
+            raise ComputeBackendError(result.stderr or "Remote base-model cleanup failed")
+
+    def collect_scheduler_logs(self, *, job_key: str, output_root: Path) -> None:
+        output_root.mkdir(parents=True, exist_ok=True)
+        for name in ("scheduler.stdout", "scheduler.stderr"):
+            remote = self.remote_job_directory(job_key) / name
+            exists = self._run(self.ssh_argv(("test", "-f", str(remote))))
+            if exists.returncode == 1:
+                continue
+            if exists.returncode != 0:
+                raise ComputeBackendError(exists.stderr or "Unable to inspect scheduler log")
+            size = self.remote_file_size(job_key=job_key, remote_relative_path=name)
+            destination = output_root / name
+            if size > 4 * 1024 * 1024:
+                tail = self._run(
+                    self.ssh_argv(
+                        (
+                            "bash",
+                            "-o",
+                            "pipefail",
+                            "-c",
+                            f"tail -c 4194304 -- {shlex.quote(str(remote))} | base64",
+                        )
+                    )
+                )
+                if tail.returncode != 0:
+                    raise ComputeBackendError(tail.stderr or "Unable to read scheduler log tail")
+                payload = base64.b64decode("".join(tail.stdout.split()), validate=True)
+                if len(payload) > 4 * 1024 * 1024:
+                    raise ComputeBackendError("Scheduler log tail exceeds the transfer byte limit")
+                destination.write_bytes(
+                    b"[scheduler log truncated to final 4194304 bytes]\n" + payload
+                )
+                continue
+            self._download_remote_file(
+                job_key=job_key,
+                remote_relative_path=name,
+                destination=destination,
+            )
+            if destination.stat().st_size != size:
+                raise ComputeBackendError("Scheduler log changed during transfer")
+
     def artifact_download_command(
         self,
         *,
@@ -740,6 +806,7 @@ class SSHSlurmComputeBackend:
 
     def render_sbatch_script(self, bundle: JobBundle) -> str:
         resources = self.config.resources
+        remote_directory = self.remote_job_directory(bundle.job_key)
         directives = [
             "#!/bin/bash",
             f"#SBATCH --job-name={bundle.job_key[:80]}",
@@ -749,8 +816,8 @@ class SSHSlurmComputeBackend:
             f"#SBATCH --ntasks-per-node={resources.tasks_per_node}",
             f"#SBATCH --cpus-per-task={resources.cpus_per_task}",
             f"#SBATCH --mem={resources.memory}",
-            "#SBATCH --output=slurm-%j.out",
-            "#SBATCH --error=slurm-%j.err",
+            f"#SBATCH --output={remote_directory}/scheduler.stdout",
+            f"#SBATCH --error={remote_directory}/scheduler.stderr",
         ]
         if resources.partition:
             directives.append(f"#SBATCH --partition={resources.partition}")
@@ -758,7 +825,6 @@ class SSHSlurmComputeBackend:
             directives.append(f"#SBATCH --qos={resources.qos}")
         if resources.gres:
             directives.append(f"#SBATCH --gres={resources.gres}")
-        remote_directory = self.remote_job_directory(bundle.job_key)
         command = (
             "apptainer",
             "exec",

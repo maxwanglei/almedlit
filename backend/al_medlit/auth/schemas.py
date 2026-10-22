@@ -53,6 +53,10 @@ class SessionResponse(BaseModel):
     authenticated: bool = True
 
 
+class ActionTokenRequest(BaseModel):
+    token: str = Field(min_length=1, max_length=512)
+
+
 class WorkspaceMembershipRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

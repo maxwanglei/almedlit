@@ -20,6 +20,7 @@ from .common import (
     _project,
     _require_actor_role,
     _scoped,
+    _scoped_many,
     _validate_task_output,
 )
 from .feedback_sets import persist_feedback_set_version
@@ -340,14 +341,12 @@ def create_feedback_set(
     _optional_package(db, data.project_id, data.artifact_package_id)
     seen: set[tuple[int, str]] = set()
     candidate_payloads = []
+    items_by_id = _scoped_many(
+        db, models.DatasetItem, (candidate.dataset_item_id for candidate in data.candidates),
+        data.project_id, "Dataset item",
+    )
     for candidate in data.candidates:
-        item = _scoped(
-            db,
-            models.DatasetItem,
-            candidate.dataset_item_id,
-            data.project_id,
-            "Dataset item",
-        )
+        item = items_by_id[candidate.dataset_item_id]
         if item.dataset_version_id != run.dataset_version_id:
             raise ValidationError("Feedback candidates must belong to the run dataset version")
         identity = (candidate.dataset_item_id, candidate.candidate_key)

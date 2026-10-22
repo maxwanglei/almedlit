@@ -135,6 +135,8 @@ export interface Document {
   active_structure_version_id: number | null;
 }
 
+export type DocumentSummary = Omit<Document, "text" | "sentences">;
+
 export type DocumentStructureStatus = "pending" | "ready" | "failed" | "superseded";
 
 export interface DocumentStructureVersion {

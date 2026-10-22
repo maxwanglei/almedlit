@@ -145,8 +145,8 @@ function PreloadRecoveryNotice(): React.ReactElement | null {
 
 function ApplicationRecovery(): React.ReactElement {
   const location = useLocation();
-  const publicRoute = inviteTokenFromPath(location.pathname) !== null ||
-    accountActionTokenFromPath(location.pathname) !== null;
+  const publicRoute = inviteTokenFromPath(location.pathname, location.hash) !== null ||
+    accountActionTokenFromPath(location.pathname, location.hash) !== null;
   return (
     <RouteErrorBoundary
       resetKey={`${location.pathname}${location.search}${location.hash}`}
@@ -361,8 +361,11 @@ function isEntryPath(pathname: string): boolean {
 }
 
 /** Extract the token from `/invites/:token`, or null when not that route. */
-function inviteTokenFromPath(pathname: string): string | null {
+function inviteTokenFromPath(pathname: string, hash: string): string | null {
   const segments = normalizePathname(pathname).split("/").filter(Boolean);
+  if (segments.length === 1 && segments[0] === "invites") {
+    return new URLSearchParams(hash.slice(1)).get("token");
+  }
   if (segments.length !== 2 || segments[0] !== "invites") {
     return null;
   }
@@ -374,8 +377,11 @@ function inviteTokenFromPath(pathname: string): string | null {
 }
 
 /** Extract the token from `/account-actions/:token`, or null otherwise. */
-function accountActionTokenFromPath(pathname: string): string | null {
+function accountActionTokenFromPath(pathname: string, hash: string): string | null {
   const segments = normalizePathname(pathname).split("/").filter(Boolean);
+  if (segments.length === 1 && segments[0] === "account-actions") {
+    return new URLSearchParams(hash.slice(1)).get("token");
+  }
   if (segments.length !== 2 || segments[0] !== "account-actions") {
     return null;
   }
@@ -454,8 +460,8 @@ function Application(): React.ReactElement {
   const sessionGenerationRef = useRef(0);
   const pendingWorkspaceSwitchRef = useRef(false);
   const pathname = normalizePathname(location.pathname);
-  const inviteToken = inviteTokenFromPath(location.pathname);
-  const accountActionToken = accountActionTokenFromPath(location.pathname);
+  const inviteToken = inviteTokenFromPath(location.pathname, location.hash);
+  const accountActionToken = accountActionTokenFromPath(location.pathname, location.hash);
   const workspaceRoute = resolveWorkspaceRoute(pathname);
   const routeSearch = new URLSearchParams(location.search);
   const myWorkProjectId = positiveInteger(routeSearch.get("project") ?? undefined);

@@ -169,6 +169,7 @@ class Settings(BaseSettings):
                     "placeholder value. Set a strong unique secret before starting "
                     "the API; generate one with: openssl rand -hex 32"
                 )
+            _validate_deployment_password(secret, "AL_MEDLIT_STORAGE_SECRET_KEY")
 
         url = make_url(self.database_url)
         # A URL without a host is a local file database (SQLite) and carries no
@@ -182,6 +183,15 @@ class Settings(BaseSettings):
                     "strong unique password before starting the API; generate one "
                     "with: openssl rand -hex 32"
                 )
+            _validate_deployment_password(db_password, "AL_MEDLIT_DATABASE_URL")
+
+
+def _validate_deployment_password(secret: str, setting_name: str) -> None:
+    if len(secret.encode("utf-8")) < 16 or len(set(secret)) < 8:
+        raise RuntimeError(
+            f"{setting_name} must contain at least 16 UTF-8 bytes and 8 distinct "
+            "characters. Generate a unique secret with: openssl rand -hex 32"
+        )
 
 
 settings = Settings()

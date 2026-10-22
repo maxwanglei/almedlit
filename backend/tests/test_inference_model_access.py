@@ -151,7 +151,7 @@ def test_inference_enforces_selected_checkpoint_package_policy(
     assert response.status_code == expected, response.text
 
 
-def test_idempotent_launch_checks_the_returned_runs_checkpoint_policy(
+def test_idempotent_launch_rejects_a_different_requested_checkpoint(
     db,
     client,
     object_storage,
@@ -208,4 +208,4 @@ def test_idempotent_launch_checks_the_returned_runs_checkpoint_policy(
             "idempotency_key": scope.run.idempotency_key,
         },
     )
-    assert response.status_code == 403, response.text
+    assert response.status_code == 409, response.text

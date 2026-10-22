@@ -1,5 +1,6 @@
 from collections import defaultdict
 
+from al_medlit.core.exceptions import ValidationError
 from al_medlit.corpus.models import Document, DocumentSentence
 from al_medlit.evidence.models import EvidenceTargetVersion
 from al_medlit.export.registry import ExportContext
@@ -21,7 +22,7 @@ class EvidenceBlocksJSONLFormat:
     def iter_rows(self, context: ExportContext):
         annotation_set = context.annotation_set
         if annotation_set is None:
-            raise ValueError("evidence-blocks-v1 requires an annotation set")
+            raise ValidationError("evidence-blocks-v1 requires an annotation set")
         for item in annotation_set.items:
             document = context.db.get(Document, item.document_id)
             target_version = context.db.get(EvidenceTargetVersion, item.target_version_id)
@@ -64,14 +65,17 @@ class TrainingWindowsJSONLFormat:
     def iter_rows(self, context: ExportContext):
         annotation_set = context.annotation_set
         if annotation_set is None:
-            raise ValueError("training-windows-v1 requires an annotation set")
+            raise ValidationError("training-windows-v1 requires an annotation set")
         options = context.options
-        config = WindowBuilderConfig(
-            max_tokens=int(options.get("max_tokens", 4096)),
-            overlap_tokens=int(options.get("overlap_tokens", 512)),
-            reserved_special_tokens=int(options.get("reserved_special_tokens", 4)),
-            target_conditioning=bool(options.get("target_conditioning", True)),
-        )
+        try:
+            config = WindowBuilderConfig(
+                max_tokens=int(options.get("max_tokens", 4096)),
+                overlap_tokens=int(options.get("overlap_tokens", 512)),
+                reserved_special_tokens=int(options.get("reserved_special_tokens", 4)),
+                target_conditioning=bool(options.get("target_conditioning", True)),
+            )
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise ValidationError("Invalid training window options") from exc
         # Export-time counts are deterministic estimates. The trainer invokes the
         # same builder with its exact pinned tokenizer before launching a job.
         builder = EvidenceBlockWindowBuilder(_whitespace_token_count, config)

@@ -370,7 +370,7 @@ def _issue_account_action_locked(
         details={"expires_at": expires_at.isoformat()},
     )
     return AccountActionLink(
-        url=f"/account-actions/{raw_token}",
+        url=f"/account-actions#token={raw_token}",
         expires_at=expires_at,
         purpose=purpose,
     )

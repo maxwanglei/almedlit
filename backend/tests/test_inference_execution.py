@@ -47,6 +47,9 @@ class _RemoteResultBackend:
         self.run_id = run_id
         self.inference_result = inference_result
 
+    def collect_scheduler_logs(self, *, job_key, output_root):
+        pass
+
     def collect_outputs(self, *, job_key, output_root, limits):
         (output_root / "inference-result.json").write_text(
             json.dumps(self.inference_result),

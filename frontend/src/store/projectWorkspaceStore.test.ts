@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   getProject,
   getProjectProgress,
-  listDocuments,
+  listDocumentSummaries,
   listMyWorkProjects,
   listProjects,
   listTaskAssignments,
@@ -15,7 +15,7 @@ import { useProjectWorkspaceStore } from "./projectWorkspaceStore";
 vi.mock("@/api/client", () => ({
   getProject: vi.fn(),
   getProjectProgress: vi.fn(),
-  listDocuments: vi.fn(),
+  listDocumentSummaries: vi.fn(),
   listMyWorkProjects: vi.fn(),
   listProjects: vi.fn(),
   listTaskAssignments: vi.fn(),
@@ -97,7 +97,7 @@ describe("project workspace store", () => {
   beforeEach(() => {
     vi.mocked(getProject).mockReset();
     vi.mocked(getProjectProgress).mockReset();
-    vi.mocked(listDocuments).mockReset();
+    vi.mocked(listDocumentSummaries).mockReset();
     vi.mocked(listMyWorkProjects).mockReset();
     vi.mocked(listProjects).mockReset();
     vi.mocked(listTaskAssignments).mockReset();
@@ -112,7 +112,7 @@ describe("project workspace store", () => {
     const projectBAssignments = deferred<TaskAssignment[]>();
     const projectBProgress = deferred<ProjectProgress>();
 
-    vi.mocked(listDocuments).mockImplementation((projectId) =>
+    vi.mocked(listDocumentSummaries).mockImplementation((projectId) =>
       projectId === 1 ? projectADocuments.promise : projectBDocuments.promise,
     );
     vi.mocked(listTaskAssignments).mockImplementation((projectId) =>
@@ -271,7 +271,7 @@ describe("project workspace store", () => {
     const newDocuments = deferred<Document[]>();
     const newAssignments = deferred<TaskAssignment[]>();
     const newProgress = deferred<ProjectProgress>();
-    vi.mocked(listDocuments)
+    vi.mocked(listDocumentSummaries)
       .mockImplementationOnce(() => oldDocuments.promise)
       .mockImplementationOnce(() => newDocuments.promise);
     vi.mocked(listTaskAssignments)

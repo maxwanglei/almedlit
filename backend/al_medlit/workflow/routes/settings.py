@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from al_medlit.auth.dependencies import get_current_user
 from al_medlit.auth.models import User
+from al_medlit.auth.tenancy import assert_project_member, lock_project_member_for_mutation
 from al_medlit.core.database import get_db
 from al_medlit.workflow import access, schemas
 
@@ -21,12 +22,11 @@ def get_project_modules(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    access.authorize_project_read(
+    assert_project_member(
         db,
         current_user,
         project_id,
         min_role="trainer",
-        module=("data", "annotate", "learning", "train", "models", "guidelines", "activity"),
     )
     return access.module_configuration(db, project_id)
 
@@ -41,11 +41,10 @@ def update_project_modules(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    access.authorize_project_write(
+    lock_project_member_for_mutation(
         db,
         current_user,
         project_id,
         min_role="manager",
-        module=("data", "annotate", "learning", "train", "models", "guidelines", "activity"),
     )
     return access.update_project_modules(db, project_id, payload.selected)

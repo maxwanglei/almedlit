@@ -7,7 +7,7 @@ import {
   getDocumentStructure,
 } from "@/api/client";
 import type {
-  Document,
+  DocumentSummary,
   EvidenceAdjudicationRead,
   EvidenceAdjudicationCreate,
   TaskAssignment,
@@ -33,7 +33,7 @@ function scopeKey(scope: AdjudicationScope): string {
   ].join(":");
 }
 
-function documentName(documents: Document[], documentId: number): string {
+function documentName(documents: DocumentSummary[], documentId: number): string {
   const document = documents.find((item) => item.id === documentId);
   return (
     document?.title ??
@@ -50,7 +50,7 @@ export default function EvidenceAdjudicationPanel({
   onSetup,
 }: {
   projectId: number;
-  documents: Document[];
+  documents: DocumentSummary[];
   assignments: TaskAssignment[];
   allowSoloGold: boolean;
   onSetup?: () => void;

@@ -217,7 +217,8 @@ def _model_class(torch, config: EvidenceBiLSTMConfig | EvidenceCNNConfig):
         def forward(self, *, input_ids, token_mask, sentence_mask, labels=None):
             batch_size, sentence_count, token_count = input_ids.shape
             flattened = input_ids.reshape(batch_size * sentence_count, token_count)
-            embedded = self.embedding(flattened).transpose(1, 2)
+            flattened_mask = token_mask.reshape(batch_size * sentence_count, token_count)
+            embedded = (self.embedding(flattened) * flattened_mask.unsqueeze(-1)).transpose(1, 2)
             maximum_kernel = max(config.token_kernel_sizes)
             if token_count < maximum_kernel:
                 embedded = torch.nn.functional.pad(
@@ -227,12 +228,21 @@ def _model_class(torch, config: EvidenceBiLSTMConfig | EvidenceCNNConfig):
             features = []
             for convolution in self.token_convolutions:
                 convolved = torch.relu(convolution(embedded))
+                valid_windows = (flattened_mask.sum(dim=1) - convolution.kernel_size[0] + 1).clamp(
+                    min=1
+                )
+                positions = torch.arange(convolved.shape[2], device=convolved.device)
+                convolved = convolved.masked_fill(
+                    positions[None, None, :] >= valid_windows[:, None, None],
+                    -torch.inf,
+                )
                 features.append(torch.amax(convolved, dim=2))
             sentence_features = torch.cat(features, dim=1).reshape(
                 batch_size,
                 sentence_count,
                 -1,
             )
+            sentence_features = sentence_features * sentence_mask.unsqueeze(-1)
             contextual = torch.relu(
                 self.context_convolution(sentence_features.transpose(1, 2))
             ).transpose(1, 2)
@@ -245,10 +255,14 @@ def _model_class(torch, config: EvidenceBiLSTMConfig | EvidenceCNNConfig):
 def _output_with_loss(torch, logits, labels):
     loss = None
     if labels is not None:
-        loss = torch.nn.functional.cross_entropy(
-            logits.reshape(-1, 3),
-            labels.reshape(-1),
-            ignore_index=-100,
+        loss = (
+            torch.nn.functional.cross_entropy(
+                logits.reshape(-1, 3),
+                labels.reshape(-1),
+                ignore_index=-100,
+            )
+            if (labels != -100).any()
+            else logits.sum() * 0
         )
     return {"loss": loss, "logits": logits}
 
@@ -258,10 +272,12 @@ def build_neural_bundle(
     vocabulary: EvidenceVocabulary,
 ) -> EvidenceNeuralBundle:
     torch = _import_torch()
-    _seed_everything(torch, config)
     model_class = _model_class(torch, config)
+    with torch.random.fork_rng(devices=[]):
+        torch.random.default_generator.manual_seed(config.seed)
+        model = model_class(len(vocabulary))
     return EvidenceNeuralBundle(
-        model=model_class(len(vocabulary)),
+        model=model,
         vocabulary=vocabulary,
         config=config,
     )
@@ -325,6 +341,7 @@ def fit_neural_model(
     selected_vocabulary = vocabulary or build_vocabulary(training_documents, config)
     bundle = build_neural_bundle(config, selected_vocabulary)
     torch = _import_torch()
+    _seed_everything(torch, config)
     preflight = require_neural_device(config.device)
     device = torch.device(preflight.torch_device)
     bundle.model.to(device)

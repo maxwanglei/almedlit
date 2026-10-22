@@ -10,7 +10,7 @@ from al_medlit.lineage.models import ImmutableRecordError
 from al_medlit.workflow import models, schemas
 from al_medlit.workflow.services import labels
 from al_medlit.workflow.services.common import _canonical_hash
-from al_medlit.workflow.services.preparation import is_source_item_in_prepared_holdout
+from al_medlit.workflow.services.holdouts import protected_dataset_item_ids
 from al_medlit.workspace.models import WorkspaceMember
 
 
@@ -603,10 +603,10 @@ def test_shared_article_stays_together_and_prepared_holdout_maps_to_source(clien
             common_splits.add(split.assignments[key])
         for source in origin["origins"]:
             raw = db.get(models.DatasetItem, source["dataset_item_id"])
-            assert is_source_item_in_prepared_holdout(db, raw, task["id"]) == (
+            assert (raw.id in protected_dataset_item_ids(db, [raw], task["id"])) == (
                 split.assignments[key] == "test"
             )
-            assert not is_source_item_in_prepared_holdout(db, raw, task["id"] + 1000)
+            assert not protected_dataset_item_ids(db, [raw], task["id"] + 1000)
     assert len(common_splits) == 1
 
 
@@ -656,7 +656,7 @@ def test_source_split_holdout_survives_source_revision_without_explicit_map_sele
         .filter_by(dataset_version_id=source["id"], stable_key="paper-4")
         .one()
     )
-    assert is_source_item_in_prepared_holdout(db, source_item, task["id"])
+    assert source_item.id in protected_dataset_item_ids(db, [source_item], task["id"])
     missing_test_label = _source(
         client,
         project,

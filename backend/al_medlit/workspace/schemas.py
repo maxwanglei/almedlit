@@ -3,7 +3,7 @@ from typing import Self
 
 from pydantic import BaseModel, Field, model_validator
 
-from al_medlit.auth.schemas import validate_public_password
+from al_medlit.auth.schemas import ActionTokenRequest, validate_public_password
 
 
 class WorkspaceCreate(BaseModel):
@@ -106,6 +106,10 @@ class InviteAccept(BaseModel):
 
 class JoinRequestCreate(BaseModel):
     message: str | None = None
+
+
+class InviteTokenAccept(InviteAccept, ActionTokenRequest):
+    pass
 
 
 class JoinRequestRead(BaseModel):

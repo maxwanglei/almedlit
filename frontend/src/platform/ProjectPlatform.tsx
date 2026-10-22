@@ -9,7 +9,7 @@ import {
 } from "@/navigation/AccessContext";
 import { canAccessProjectSection } from "@/navigation/moduleNavigation";
 import type {
-  Document,
+  DocumentSummary,
   Project,
   ProjectProgress,
   ProjectTask,
@@ -50,7 +50,7 @@ interface ProjectPlatformProps {
   search?: string;
   project: Project;
   projects: Project[];
-  documents: Document[];
+  documents: DocumentSummary[];
   assignments: TaskAssignment[];
   progress: ProjectProgress | null;
   data: PlatformProjectData;

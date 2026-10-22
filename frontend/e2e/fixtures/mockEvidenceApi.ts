@@ -1,6 +1,8 @@
 import type { Page, Route } from "@playwright/test";
+import { registerMockContext } from "./test";
 
-export type MockWorkspaceRole = "annotator" | "manager" | "personal";
+import { createMockAccess, hasMockAccessRule, capabilitiesFor, enforceMockAccess, type MockAccessState, type MockAccessOptions, type MockWorkspaceRole } from "./mockAccess";
+export type { MockWorkspaceRole } from "./mockAccess";
 
 export interface CapturedApiRequest {
   method: string;
@@ -10,6 +12,7 @@ export interface CapturedApiRequest {
 }
 
 export interface EvidenceApiMockState {
+  access: MockAccessState;
   requests: CapturedApiRequest[];
   unhandledRequests: string[];
   annotations: Array<Record<string, unknown>>;
@@ -106,6 +109,8 @@ const project = {
   description: "Deterministic Playwright fixture",
   annotation_schema: { labels: { evidence_block: [] } },
   annotation_validation_mode: "strict",
+  workflow_task_count: 0,
+  workflow_round_count: 0,
   tasks: [evidenceTask],
   settings: {},
   workspace_id: 1,
@@ -274,6 +279,9 @@ function prediction(
 }
 
 function json(route: Route, body: unknown, status = 200): Promise<void> {
+  if (status < 400 && !hasMockAccessRule(route)) {
+    return route.fulfill({ status: 501, contentType: "application/json", body: JSON.stringify({ detail: `Missing fixture access rule: ${route.request().method()} ${new URL(route.request().url()).pathname}` }) });
+  }
   return route.fulfill({
     status,
     contentType: "application/json",
@@ -296,10 +304,15 @@ function requestBody(route: Route): unknown {
 export async function installEvidenceApiMock(
   page: Page,
   role: MockWorkspaceRole,
+  options: MockAccessOptions & { access?: MockAccessState } = {},
 ): Promise<EvidenceApiMockState> {
-  const assignments =
-    role === "manager" ? [assignment(51, 2, "alice"), assignment(52, 3, "bob")] : [assignment(51, 2, "alice")];
+  registerMockContext(page.context());
+  const access = options.access ?? createMockAccess(role, options);
+  const assignments = [assignment(51, 2, "alice"), assignment(52, 3, "bob")];
+  const username = access.username;
+  const assignmentBypass = (): boolean => ["manager", "admin"].includes(access.workspaces.get(access.projects.get(1)?.workspaceId ?? 1)?.role ?? "");
   const state: EvidenceApiMockState = {
+    access,
     requests: [],
     unhandledRequests: [],
     annotations: [],
@@ -337,7 +350,7 @@ export async function installEvidenceApiMock(
       target_version_id: 101,
       structure_version_id: 201,
       guideline_version_id: 301,
-      reviewer_user_id: 2,
+      reviewer_user_id: access.userId,
       intervals: [],
       events: [],
       fully_reviewed: false,
@@ -353,13 +366,15 @@ export async function installEvidenceApiMock(
     const body = requestBody(route);
     state.requests.push({ method, pathname: url.pathname, search: url.search, body });
 
+    if (await enforceMockAccess(route, access)) return;
+
     if (method === "GET" && url.pathname === "/api/auth/me") {
       const isManager = role === "manager";
       const isPersonal = role === "personal";
       return json(route, {
         user: {
-          id: isManager ? 1 : 2,
-          username: isManager ? "manager" : "alice",
+          id: access.userId,
+          username,
           display_name: isManager ? "Project Manager" : "Alice Annotator",
           is_active: true,
           is_superuser: false,
@@ -369,24 +384,20 @@ export async function installEvidenceApiMock(
             workspace_id: 1,
             workspace_name: isPersonal ? "Alice's Workspace" : "Evidence Team",
             workspace_kind: isPersonal ? "individual" : "team",
-            role: isPersonal ? "admin" : role,
+            role: access.workspaces.get(1)?.role,
           },
         ],
       });
     }
     if (method === "GET" && url.pathname === "/api/workspaces/1/capabilities") {
-      return json(route, {
-        preset: "full_loop",
-        overrides: [],
-        effective: ["annotation", "lineage", "export", "training", "inference"],
-        blocked: {},
-      });
+      return json(route, capabilitiesFor(access));
     }
     if (method === "GET" && url.pathname === "/api/projects") {
       return json(route, [project]);
     }
     if (method === "GET" && url.pathname === "/api/projects/my-work") {
-      return json(route, [project]);
+      return json(route, state.assignments.some((item) => item.assignee_user_id === access.userId && item.status !== "withdrawn")
+        ? [{ ...project, settings: {} }] : []);
     }
     if (
       method === "GET" &&
@@ -400,35 +411,47 @@ export async function installEvidenceApiMock(
     if (method === "GET" && url.pathname === "/api/documents") {
       return json(route, [documentFixture]);
     }
-    if (method === "GET" && url.pathname === "/api/projects/1/assignments") {
-      return json(route, state.assignments);
-    }
-    if (method === "GET" && url.pathname === "/api/projects/1/progress") {
+    if (method === "GET" && ["/api/projects/1/assignments", "/api/projects/1/progress"].includes(url.pathname)) {
+      const progress = url.pathname.endsWith("/progress");
+      const restricted = !assignmentBypass();
+      const scope = url.searchParams.get("scope");
+      const assignee = url.searchParams.get("assignee_user_id");
+      const annotator = url.searchParams.get("annotator_id");
+      if (!progress && restricted && ((assignee !== null && Number(assignee) !== access.userId) || (annotator !== null && annotator !== username))) {
+        return json(route, { detail: "Cannot view another annotator's assignments" }, 403);
+      }
+      if (restricted && scope === "all") {
+        return json(route, { detail: `Insufficient workspace role to view all ${progress ? "progress" : "assignments"}` }, 403);
+      }
+      const mine = scope === "mine" || (scope === null && restricted);
+      const visible = state.assignments.filter((item) => {
+        if (mine && item.assignee_user_id !== access.userId) return false;
+        if (progress) return true;
+        if (!mine && assignee !== null && item.assignee_user_id !== Number(assignee)) return false;
+        if (!mine && annotator !== null && item.annotator_id !== annotator) return false;
+        return ["document_id", "task_id", "target_version_id", "status"].every((key) => {
+          const value = url.searchParams.get(key);
+          return value === null || item[key] === (key === "status" ? value : Number(value));
+        });
+      });
+      if (!progress) return json(route, visible);
+      const counts = (items: typeof visible) => {
+        const by_status: Record<string, number> = {};
+        for (const item of items) {
+          const status = String(item.status);
+          by_status[status] = (by_status[status] ?? 0) + 1;
+        }
+        return { total: items.length, by_status };
+      };
       return json(route, {
         project_id: 1,
-        total: state.assignments.length,
-        by_status: { in_progress: state.assignments.length },
-        by_task: [
-          {
-            task_id: 11,
-            annotation_type: "evidence_block",
-            display_name: "Evidence blocks",
-            total: state.assignments.length,
-            by_status: { in_progress: state.assignments.length },
-          },
-        ],
-        by_document: [
-          {
-            document_id: 41,
-            total: state.assignments.length,
-            by_status: { in_progress: state.assignments.length },
-          },
-        ],
-        by_annotator: state.assignments.map((item) => ({
-          assignee_user_id: item.assignee_user_id,
-          annotator_id: item.annotator_id,
-          total: 1,
-          by_status: { in_progress: 1 },
+        ...counts(visible),
+        by_task: visible.length ? [{ task_id: 11, annotation_type: "evidence_block", display_name: "Evidence blocks", ...counts(visible) }] : [],
+        by_document: visible.length ? [{ document_id: 41, ...counts(visible) }] : [],
+        by_annotator: [...new Set(visible.map((item) => item.assignee_user_id))].map((userId) => ({
+          assignee_user_id: userId,
+          annotator_id: visible.find((item) => item.assignee_user_id === userId)?.annotator_id,
+          ...counts(visible.filter((item) => item.assignee_user_id === userId)),
         })),
       });
     }
@@ -531,6 +554,9 @@ export async function installEvidenceApiMock(
       return json(route, []);
     }
     if (method === "GET" && url.pathname === "/api/annotation-workbench/documents/41") {
+      if (!assignmentBypass() && state.assignments.length && !state.assignments.some((item) => item.assignee_user_id === access.userId)) {
+        return json(route, { detail: "Document is not assigned to the current user" }, 403);
+      }
       return json(route, {
         project,
         document: documentFixture,
@@ -569,7 +595,7 @@ export async function installEvidenceApiMock(
         ],
         annotation_type_specs: [],
         annotations: state.annotations,
-        assignments: state.assignments,
+        assignments: state.assignments.filter((item) => item.assignee_user_id === access.userId),
         correction_locked_annotation_ids: [],
       });
     }
@@ -642,7 +668,7 @@ export async function installEvidenceApiMock(
             action: "mark_reviewed",
             start_sentence_ordinal: start.ordinal,
             end_sentence_ordinal: end.ordinal,
-            actor_user_id: 2,
+            actor_user_id: access.userId,
             start_sentence_id: start.id,
             end_sentence_id: end.id,
             reason: null,
@@ -676,7 +702,7 @@ export async function installEvidenceApiMock(
         nextAnnotationId++,
         payload.evidence_block.start_sentence_id,
         payload.evidence_block.end_sentence_id,
-        { annotatorId: payload.annotator_id, note: payload.evidence_block.note },
+        { annotatorId: username, annotatorUserId: access.userId, note: payload.evidence_block.note },
       );
       state.annotations.unshift(created);
       return json(route, created, 201);
@@ -711,14 +737,14 @@ export async function installEvidenceApiMock(
             resultingAnnotationId,
             payload.start_sentence_id ?? (selectedPrediction.start_sentence_id as number),
             payload.end_sentence_id ?? (selectedPrediction.end_sentence_id as number),
-            { note: payload.note },
+            { annotatorId: username, annotatorUserId: access.userId, note: payload.note },
           ),
         );
       }
       const review = {
         id: nextReviewId++,
         prediction_id: predictionId,
-        reviewer_user_id: 2,
+        reviewer_user_id: access.userId,
         action: payload.action,
         revision: 1,
         resulting_annotation_id: resultingAnnotationId,
@@ -747,22 +773,42 @@ export async function installEvidenceApiMock(
       method === "POST" &&
       url.pathname === "/api/projects/1/documents/41/submissions"
     ) {
-      state.assignments = state.assignments.map((item) => ({ ...item, status: "submitted" }));
-      return json(
-        route,
-        {
-          id: 1,
-          project_id: 1,
-          document_id: 41,
-          annotator_user_id: 2,
-          annotator_id: "alice",
-          assignment_id: (body as { assignment_id?: number }).assignment_id ?? null,
-          kind: "submit",
-          file_name: "submission.json",
-          created_at: timestamp,
-        },
-        201,
-      );
+      const payload = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+      const kind = "kind" in payload ? payload.kind : "submission";
+      if (kind !== "submission" && kind !== "re_export") return json(route, { detail: "Invalid submission kind" }, 422);
+      const assignmentId = "assignment_id" in payload ? payload.assignment_id : null;
+      const ownAssignments = state.assignments.filter((item) => item.assignee_user_id === access.userId);
+      if (!assignmentBypass() && state.assignments.length && !ownAssignments.length) {
+        return json(route, { detail: "Document is not assigned to the current user" }, 403);
+      }
+      const assigned = assignmentId == null ? undefined : state.assignments.find((item) => item.id === assignmentId);
+      if (assignmentId != null && !assigned) return json(route, { detail: "assignment_id does not belong to this project document" }, 422);
+      if (assigned && assigned.assignee_user_id !== access.userId) return json(route, { detail: "assignment_id belongs to another annotator" }, 422);
+      if (kind === "submission" && !assigned && ownAssignments.length) return json(route, { detail: "assignment_id is required when submitting evidence-block work" }, 422);
+      if (kind === "submission" && !assigned && state.assignments.length && access.workspaces.get(1)?.kind === "team") return json(route, { detail: "assignment_id is required for assignment-managed team work" }, 422);
+      if (assigned && !state.coverage.fully_reviewed) return json(route, { detail: "Evidence assignment requires full reviewed coverage before submission" }, 422);
+      if (kind === "submission" && assigned && !["assigned", "in_progress", "blocked"].includes(String(assigned.status))) return json(route, { detail: "Task assignment has already reached a final status" }, 409);
+      if (kind === "submission") {
+        state.assignments = state.assignments.map((item) => item.assignee_user_id === access.userId && (assignmentId == null || item.id === assignmentId) ? { ...item, status: "submitted" } : item);
+      }
+      return json(route, {
+        id: 1,
+        project_id: 1,
+        document_id: 41,
+        annotator_user_id: access.userId,
+        annotator_id: username,
+        assignment_id: assignmentId,
+        kind,
+        storage_key: `submissions/1/41/${access.userId}/submission.json`,
+        file_name: "submission.json",
+        content_type: "application/json",
+        size_bytes: 2,
+        checksum_sha256: "0".repeat(64),
+        annotation_count: state.annotations.filter((item) => item.annotator_user_id === access.userId).length,
+        metadata_: {},
+        created_at: timestamp,
+        updated_at: timestamp,
+      });
     }
     if (
       method === "GET" &&
@@ -784,15 +830,15 @@ export async function installEvidenceApiMock(
       const payload = body as { note?: string | null };
       const gold = evidenceAnnotation(999, 1001, 1004, {
         status: "gold",
-        annotatorId: "manager",
-        annotatorUserId: 1,
+        annotatorId: username,
+        annotatorUserId: access.userId,
         note: payload.note,
       });
       state.annotations.unshift(gold);
       state.comparisonBlocks.push({
         annotation_id: 999,
-        annotator_user_id: 1,
-        annotator_id: "manager",
+        annotator_user_id: access.userId,
+        annotator_id: username,
         status: "gold",
         start_sentence_id: 1001,
         end_sentence_id: 1004,

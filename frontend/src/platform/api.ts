@@ -97,6 +97,17 @@ type PlatformCollection =
   | "trainingRuns"
   | "environments";
 
+async function requestRoundPages<T>(path: string): Promise<T[]> {
+  const items = await request<T[]>(path);
+  let page = items;
+  while (page.length === 100) {
+    const separator = path.includes("?") ? "&" : "?";
+    page = await request<T[]>(`${path}${separator}offset=${items.length}`);
+    items.push(...page);
+  }
+  return items;
+}
+
 function collectionPlan(
   scope: PlatformLoadScope,
   effectiveModules: ProjectModule[],
@@ -375,7 +386,7 @@ export async function loadPlatformProject(
       request<LearningCycle[]>(`/cycles?${query}`),
     ),
     loadWhen("rounds", () =>
-      request<AnnotationRound[]>(`/rounds?${query}`),
+      requestRoundPages<AnnotationRound>(`/rounds?${query}`),
     ),
     loadWhen("feedbackRuns", () =>
       request<FeedbackRun[]>(`/feedback-runs?${query}`),
@@ -1181,7 +1192,7 @@ export function getRoundWorkContext(
 export function listWorkspaceRoundWorkContexts(
   workspaceId: number,
 ): Promise<RoundWorkContext[]> {
-  return request<RoundWorkContext[]>(
+  return requestRoundPages<RoundWorkContext>(
     `/workspaces/${workspaceId}/my-work/rounds`,
   );
 }
@@ -1367,9 +1378,9 @@ export async function loadRoundWork(
 ): Promise<RoundWorkData> {
   const query = projectQuery(projectId);
   const [workItems, decisions, submissions] = await Promise.all([
-    request<RoundWorkItem[]>(`/rounds/${round.id}/work-items?${query}`),
-    request<AnnotationDecision[]>(`/rounds/${round.id}/decisions?${query}`),
-    request<RoundSubmission[]>(`/rounds/${round.id}/submissions?${query}`),
+    requestRoundPages<RoundWorkItem>(`/rounds/${round.id}/work-items?${query}`),
+    requestRoundPages<AnnotationDecision>(`/rounds/${round.id}/decisions?${query}`),
+    requestRoundPages<RoundSubmission>(`/rounds/${round.id}/submissions?${query}`),
   ]);
   return {
     roundItems: workItems.map((item) => item.round_item),

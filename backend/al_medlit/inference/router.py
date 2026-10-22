@@ -138,6 +138,8 @@ def launch_inference_run(
 )
 def list_inference_runs(
     project_id: int,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -153,7 +155,7 @@ def list_inference_runs(
                 member.role,
             ),
         )
-        for run in service.list_inference_runs(db, project_id)
+        for run in service.list_inference_runs(db, project_id, limit=limit, offset=offset)
     ]
 
 
@@ -211,6 +213,8 @@ def execute_inference_run(
 )
 def list_inference_windows(
     run_id: int,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -224,7 +228,10 @@ def list_inference_windows(
             InferenceWindow.document_id,
             InferenceWindow.target_version_id,
             InferenceWindow.start_sentence_ordinal,
+            InferenceWindow.id,
         )
+        .offset(offset)
+        .limit(limit)
         .all()
     )
 

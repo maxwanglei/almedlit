@@ -1,0 +1,21 @@
+[
+  {"name":"annotator project detail", "role":"annotator", "preset":"annotate_train", "modules":null, "path":"/projects/{project}", "status":403},
+  {"name":"trainer project detail", "role":"trainer", "preset":"annotate_train", "modules":null, "path":"/projects/{project}", "status":200},
+  {"name":"annotator source progress", "role":"annotator", "preset":"annotate", "modules":null, "path":"/projects/{project}/datasets/annotation-progress", "status":403},
+  {"name":"trainer source progress", "role":"trainer", "preset":"annotate", "modules":null, "path":"/projects/{project}/datasets/annotation-progress", "status":200},
+  {"name":"annotation only training aggregate", "role":"trainer", "preset":"annotate", "modules":null, "path":"/workspaces/{workspace}/training-runs", "status":403},
+  {"name":"training aggregate", "role":"trainer", "preset":"train", "modules":null, "path":"/workspaces/{workspace}/training-runs", "status":200},
+  {"name":"disabled data module", "role":"trainer", "preset":"train", "modules":["activity"], "path":"/datasets?project_id={project}", "status":403},
+  {"name":"module dependencies close", "role":"trainer", "preset":"train", "modules":["train"], "path":"/models?project_id={project}", "status":200},
+  {"name":"empty selected modules", "role":"trainer", "preset":"full", "modules":[], "path":"/projects/{project}/modules", "status":200},
+  {"name":"manager cannot administer joins", "role":"manager", "preset":"full", "modules":null, "path":"/workspaces/{workspace}/join-requests", "status":403},
+  {"name":"admin can administer joins", "role":"personal", "preset":"full", "modules":null, "path":"/workspaces/{workspace}/join-requests", "status":200},
+  {"name":"annotation only inference discovery", "role":"annotator", "preset":"annotate", "modules":null, "path":"/projects/{project}/inference/runs", "status":403},
+  {"name":"inference enabled member discovery", "role":"annotator", "preset":"annotate_train", "modules":null, "path":"/projects/{project}/inference/runs", "status":200},
+  {"name":"assigned round work", "role":"annotator", "preset":"annotate", "modules":null, "path":"/rounds/{round}/work-context?workspace_id={workspace}", "status":200},
+  {"name":"unassigned trainer round work", "role":"trainer", "actorUserId":4, "preset":"annotate", "modules":null, "path":"/rounds/{round}/work-context?workspace_id={workspace}", "status":403},
+  {"name":"annotator cannot audit all assignments", "role":"annotator", "preset":"annotate", "modules":null, "path":"/projects/{project}/assignments?scope=all", "status":403},
+  {"name":"trainer cannot audit all progress", "role":"trainer", "preset":"annotate", "modules":null, "path":"/projects/{project}/progress?scope=all", "status":403},
+  {"name":"second workspace role is annotator", "role":"manager", "preset":"full", "modules":null, "path":"/projects?workspace_id={other_workspace}", "status":403},
+  {"name":"unassigned My Work excludes project", "role":"trainer", "actorUserId":4, "preset":"annotate", "modules":null, "path":"/projects/my-work?workspace_id={workspace}", "status":200, "expected_body":[]}
+]

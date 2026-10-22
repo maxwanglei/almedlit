@@ -2,9 +2,9 @@ import json
 import os
 import re
 import secrets
-import signal
 import subprocess
 import sys
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -68,9 +68,14 @@ class LocalComputeBackend:
 
     @staticmethod
     def _atomic_json(path: Path, payload: dict) -> None:
-        temporary = path.with_suffix(path.suffix + ".tmp")
-        temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-        os.replace(temporary, path)
+        with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            try:
+                stream.write(json.dumps(payload, sort_keys=True))
+                stream.close()
+                os.replace(temporary, path)
+            finally:
+                temporary.unlink(missing_ok=True)
 
     @staticmethod
     def _process_start_identity(pid: int) -> str | None:
@@ -83,9 +88,7 @@ class LocalComputeBackend:
             # closing parenthesis rather than tokenizing the whole line.
             suffix = proc_stat.read_text(encoding="utf-8").rsplit(")", 1)[1].split()
             start_ticks = suffix[19]
-            boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(
-                encoding="ascii"
-            ).strip()
+            boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
             return f"linux:{boot_id}:{start_ticks}"
         except (FileNotFoundError, IndexError, OSError, UnicodeDecodeError):
             pass
@@ -119,9 +122,7 @@ class LocalComputeBackend:
 
     def _read_identity(self, job_root: Path) -> dict | None:
         try:
-            payload = json.loads(
-                (job_root / "process-identity.json").read_text(encoding="utf-8")
-            )
+            payload = json.loads((job_root / "process-identity.json").read_text(encoding="utf-8"))
         except (FileNotFoundError, OSError, json.JSONDecodeError, TypeError):
             return None
         return payload if isinstance(payload, dict) else None
@@ -137,6 +138,15 @@ class LocalComputeBackend:
         return (datetime.now(UTC) - updated_at).total_seconds() > self.stale_heartbeat_seconds
 
     def submit(self, bundle: JobBundle) -> ComputeSubmission:
+        import fcntl
+
+        self._validate_job_key(bundle.job_key)
+        self.runtime_root.mkdir(parents=True, exist_ok=True)
+        with (self.runtime_root / f".{bundle.job_key}.submission.lock").open("a") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            return self._submit_locked(bundle)
+
+    def _submit_locked(self, bundle: JobBundle) -> ComputeSubmission:
         if not bundle.command:
             raise ComputeBackendError("Local job command cannot be empty")
         self._validate_job_key(bundle.job_key)
@@ -151,6 +161,13 @@ class LocalComputeBackend:
                 return ComputeSubmission(
                     external_job_id=external_job_id,
                     status=state.status,
+                    metadata={"idempotent": True, "durable": True},
+                )
+            identity = self._read_identity(job_root)
+            if identity is not None and self._identity_matches_live_process(identity):
+                return ComputeSubmission(
+                    external_job_id=external_job_id,
+                    status="submitted",
                     metadata={"idempotent": True, "durable": True},
                 )
             job_root.mkdir(parents=True, exist_ok=True)
@@ -169,11 +186,7 @@ class LocalComputeBackend:
                 "created_at": datetime.now(UTC).isoformat(),
                 "training_job_id": (
                     int(match.group(1))
-                    if (
-                        match := re.fullmatch(
-                            r"training-(\d+)-attempt-\d+", bundle.job_key
-                        )
-                    )
+                    if (match := re.fullmatch(r"training-(\d+)-attempt-\d+", bundle.job_key))
                     else None
                 ),
             }
@@ -193,6 +206,7 @@ class LocalComputeBackend:
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
                 close_fds=True,
+                env=local_job_environment(),
             )
             identity = {
                 "schema_version": "local-process-identity-v1",
@@ -215,11 +229,11 @@ class LocalComputeBackend:
                 status=existing.status,
                 metadata={"idempotent": True},
             )
-        runner = self.runner or SubprocessCommandRunner()
+        runner = self.runner or SubprocessCommandRunner(inherit_environment=False)
         result = runner.run(
             bundle.command,
             cwd=bundle.local_bundle_path,
-            environment=bundle.environment,
+            environment=local_job_environment(bundle.environment),
         )
         state = JobState(
             status="succeeded" if result.returncode == 0 else "failed",
@@ -242,7 +256,8 @@ class LocalComputeBackend:
         if not self.synchronous:
             job_root = self._job_root(self._job_key(external_job_id))
             status_path = job_root / "status.json"
-            if (job_root / "cancel-requested.json").is_file():
+            cancelled = (job_root / "cancel-requested.json").is_file()
+            if cancelled and not status_path.is_file():
                 return JobState(
                     status="cancelled",
                     reason="Cancelled by user",
@@ -272,6 +287,13 @@ class LocalComputeBackend:
             except (OSError, json.JSONDecodeError, TypeError):
                 return JobState(status="unknown", reason="Invalid local status document")
             state = self._state_from_payload(payload)
+            if cancelled:
+                return JobState(
+                    status="cancelled",
+                    exit_code=state.exit_code if state.status == "cancelled" else None,
+                    reason="Cancelled by user",
+                    raw_state="CANCELLED",
+                )
             identity = self._read_identity(job_root)
             if (
                 state.status in {"submitted", "running"}
@@ -284,9 +306,7 @@ class LocalComputeBackend:
                     reason="Local worker identity no longer matches its attempt",
                     raw_state="WORKER_IDENTITY_MISMATCH",
                 )
-            if state.status in {"submitted", "running"} and self._is_stale(
-                payload, status_path
-            ):
+            if state.status in {"submitted", "running"} and self._is_stale(payload, status_path):
                 return JobState(
                     status="failed",
                     reason="Local worker heartbeat became stale",
@@ -306,12 +326,6 @@ class LocalComputeBackend:
                 "requested_at": datetime.now(UTC).isoformat(),
             }
             self._atomic_json(job_root / "cancel-requested.json", cancellation)
-            try:
-                identity = self._read_identity(job_root)
-                if identity is not None and self._identity_matches_live_process(identity):
-                    os.killpg(int(identity["pid"]), signal.SIGTERM)
-            except (FileNotFoundError, OSError, ProcessLookupError, ValueError):
-                pass
             payload = {
                 "status": "cancelled",
                 "exit_code": None,
@@ -319,7 +333,9 @@ class LocalComputeBackend:
                 "raw_state": "CANCELLED",
                 "updated_at": datetime.now(UTC).isoformat(),
             }
-            self._atomic_json(job_root / "status.json", payload)
+            identity = self._read_identity(job_root)
+            if identity is None or not self._identity_matches_live_process(identity):
+                self._atomic_json(job_root / "status.json", payload)
             return self._state_from_payload(payload)
         state = self._states.get(external_job_id)
         if state is None:
@@ -329,3 +345,30 @@ class LocalComputeBackend:
         cancelled = JobState(status="cancelled", raw_state="CANCELLED")
         self._states[external_job_id] = cancelled
         return cancelled
+
+
+def local_job_environment(overrides: dict[str, str] | None = None) -> dict[str, str]:
+    allowed = {
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "LANG",
+        "LC_ALL",
+        "PYTHONPATH",
+        "VIRTUAL_ENV",
+        "LD_LIBRARY_PATH",
+        "DYLD_LIBRARY_PATH",
+        "CUDA_VISIBLE_DEVICES",
+        "ASCEND_RT_VISIBLE_DEVICES",
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "AL_MEDLIT_RUNTIME_PROFILE",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+    }
+    return {
+        **{key: value for key, value in os.environ.items() if key in allowed},
+        **(overrides or {}),
+    }

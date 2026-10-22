@@ -14,6 +14,8 @@ PUBLIC_PATHS = {
     ("POST", "/api/auth/logout"),
     ("POST", "/api/auth/register"),
     ("GET", "/health"),
+    ("POST", "/api/invites/preview"),
+    ("POST", "/api/invites/accept"),
 }
 
 
@@ -89,7 +91,7 @@ def enforce_authentication(
     authorization: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ) -> None:
-    if _is_public_path(request.method, request.url.path):
+    if _is_public_path(request.method, request.scope["path"]):
         return
     token, cookie_authenticated = _authentication_token(request, authorization)
     if token is None:

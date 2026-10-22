@@ -13,6 +13,7 @@ from al_medlit.auth.tenancy import (
 from al_medlit.core.database import get_db
 from al_medlit.core.exceptions import ConflictError, ForbiddenError, NotFoundError
 from al_medlit.core.storage import ObjectNotFoundError, ObjectStorage, get_object_storage
+from al_medlit.project.models import TaskAssignment
 from al_medlit.submission import service
 from al_medlit.submission.schemas import SubmissionCreate, SubmissionKind, SubmissionRead
 
@@ -31,21 +32,46 @@ def create_submission(
     db: Session = Depends(get_db),
     storage: ObjectStorage = Depends(get_object_storage),
 ):
-    lock_document_resource_for_mutation(
+    member = lock_document_resource_for_mutation(
         db,
         current_user,
         project_id=project_id,
         document_id=document_id,
         lock_assignment=(payload.kind == "re_export" and payload.assignment_id is None),
     )
-    payload.annotator_user_id = current_user.id
-    payload.annotator_id = current_user.username
+    if payload.kind == "re_export":
+        target_user_id = payload.annotator_user_id
+        target_username = payload.annotator_id
+        if payload.assignment_id is not None:
+            assignment = db.get(TaskAssignment, payload.assignment_id)
+            if (
+                assignment is None
+                or assignment.project_id != project_id
+                or assignment.document_id != document_id
+            ):
+                raise NotFoundError("Task assignment not found in document")
+            target_user_id = assignment.assignee_user_id
+            target_username = assignment.annotator_id
+        if not has_assignment_bypass(current_user, member) and (
+            target_user_id not in (None, current_user.id)
+            or target_username not in (None, current_user.username)
+        ):
+            raise ForbiddenError("Cannot re-export another annotator's work")
+        payload.annotator_user_id = target_user_id
+        payload.annotator_id = target_username
+        if target_user_id is None and target_username is None:
+            payload.annotator_user_id = current_user.id
+            payload.annotator_id = current_user.username
+    else:
+        payload.annotator_user_id = current_user.id
+        payload.annotator_id = current_user.username
     return service.create_submission(
         db,
         storage,
         project_id=project_id,
         document_id=document_id,
         data=payload,
+        actor=current_user,
     )
 
 

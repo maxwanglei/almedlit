@@ -44,6 +44,9 @@ class CommandRunner(Protocol):
 class SubprocessCommandRunner:
     """Execute an argv vector directly; shell evaluation is never enabled."""
 
+    def __init__(self, *, inherit_environment: bool = True) -> None:
+        self.inherit_environment = inherit_environment
+
     def run(
         self,
         argv: tuple[str, ...],
@@ -53,9 +56,12 @@ class SubprocessCommandRunner:
         input_text: str | None = None,
         timeout_seconds: float | None = None,
     ) -> CommandResult:
-        process_environment = None
+        process_environment = None if self.inherit_environment else {}
         if environment is not None:
-            process_environment = {**os.environ, **environment}
+            process_environment = {
+                **(os.environ if self.inherit_environment else {}),
+                **environment,
+            }
         if timeout_seconds is not None and (
             not math.isfinite(timeout_seconds) or timeout_seconds <= 0
         ):

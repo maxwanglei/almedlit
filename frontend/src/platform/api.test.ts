@@ -469,6 +469,37 @@ describe("platform API orchestration", () => {
     expect(paths).not.toContain("/rounds/71/items?project_id=7");
   });
 
+  it("loads every page of round work, decisions, and submissions", async () => {
+    mocks.request.mockImplementation(async (path: string) => {
+      const url = new URL(path, "https://example.test");
+      const offset = Number(url.searchParams.get("offset") ?? 0);
+      const count = offset === 0 ? 100 : offset === 100 ? 5 : 0;
+      return Array.from({ length: count }, (_, index) => {
+        const id = offset + index + 1;
+        if (url.pathname.endsWith("/work-items")) {
+          return { round_item: { id }, dataset_item: { id } };
+        }
+        return { id };
+      });
+    });
+
+    const work = await loadRoundWork(7, {
+      id: 71, project_id: 7, name: "Large round", sequence: 1,
+      dataset_version_id: 22, task_version_id: 31, assistance_policy: "blind",
+      feedback_available: false, status: "open", opened_at: null, closed_at: null,
+    });
+
+    for (const records of [work.roundItems, work.datasetItems, work.decisions, work.submissions]) {
+      expect(records).toHaveLength(105);
+      expect(records.map((record) => record.id)).toEqual(
+        Array.from({ length: 105 }, (_, index) => index + 1),
+      );
+    }
+    expect(mocks.request).toHaveBeenCalledWith("/rounds/71/work-items?project_id=7&offset=100");
+    expect(mocks.request).toHaveBeenCalledWith("/rounds/71/decisions?project_id=7&offset=100");
+    expect(mocks.request).toHaveBeenCalledWith("/rounds/71/submissions?project_id=7&offset=100");
+  });
+
   it.each([
     { role: "manager", modules: [], preset: "annotate" },
     { role: "manager", modules: [], preset: "annotate_train with Activity disabled" },

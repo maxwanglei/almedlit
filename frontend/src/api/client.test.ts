@@ -20,6 +20,9 @@ import {
   importBaseModel,
   listAdminUsers,
   listBaseModels,
+  listDocumentSummaries,
+  listInferenceRuns,
+  listInferenceWindows,
   login,
   request,
   requestBlob,
@@ -72,6 +75,24 @@ describe("API authentication failures", () => {
     vi.unstubAllGlobals();
     Reflect.deleteProperty(globalThis, "window");
     Reflect.deleteProperty(globalThis, "document");
+  });
+
+  it.each([
+    { name: "document summaries", load: () => listDocumentSummaries(7), path: "/api/documents", marker: "summary=true" },
+    { name: "inference runs", load: () => listInferenceRuns(7), path: "/api/projects/7/inference/runs", marker: "limit=100" },
+    { name: "inference windows", load: () => listInferenceWindows(8), path: "/api/inference/runs/8/windows", marker: "limit=100" },
+  ])("loads all bounded pages for $name", async ({ load, path, marker }) => {
+    const first = Array.from({ length: 100 }, (_, id) => ({ id }));
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(first), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify([{ id: 100 }]), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    expect(await load()).toHaveLength(101);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0]?.[0]).toContain(path);
+    expect(fetchMock.mock.calls[0]?.[0]).toContain(marker);
+    expect(fetchMock.mock.calls[1]?.[0]).toContain("offset=100");
   });
 
   it.each(sessionProbes)("broadcasts one anonymous session after a $name 401 response", async ({ request, path }) => {
@@ -275,7 +296,7 @@ describe("API authentication failures", () => {
     unsubscribe();
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/invites/invite-token/accept",
+      "/api/invites/accept",
       expect.objectContaining({
         method: "POST",
         credentials: "same-origin",

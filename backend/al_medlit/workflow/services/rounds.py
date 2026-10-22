@@ -1,9 +1,10 @@
 """Domain operations for the canonical learning workflow."""
 
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from al_medlit.auth.models import User
@@ -14,6 +15,7 @@ from al_medlit.core.exceptions import (
     ValidationError,
 )
 from al_medlit.corpus.models import Document
+from al_medlit.project.models import Project
 from al_medlit.workflow import models, schemas
 from al_medlit.workspace.models import WorkspaceMember
 
@@ -25,6 +27,7 @@ from .common import (
     _project,
     _require_actor_role,
     _scoped,
+    _scoped_many,
     _validate_task_input,
     _validate_task_output,
 )
@@ -63,6 +66,16 @@ _SENSITIVE_TRAINING_CONFIG_FRAGMENTS = {
     "secret",
     "storage_key",
 }
+
+
+@dataclass(frozen=True)
+class _RoundContextReferences:
+    project: Project
+    task_version: models.TaskVersion
+    task: models.TaskDefinition
+    cycle: models.LearningCycle | None
+    revision: models.GuidelineRevision | None
+    guideline: models.Guideline | None
 
 
 def _lock_and_validate_active_round_annotators(
@@ -370,6 +383,7 @@ def create_annotation_round(
             else "Annotation rounds require at least one source item"
         )
 
+    db.query(Project.id).filter(Project.id == data.project_id).with_for_update().one()
     sequence = _next_sequence(
         db,
         models.AnnotationRound,
@@ -420,21 +434,32 @@ def create_annotation_round(
 
 
 def list_annotation_rounds(
-    db: Session, project_id: int, cycle_id: int | None = None
+    db: Session, project_id: int, cycle_id: int | None = None,
+    *, limit: int | None = None, offset: int = 0,
 ) -> list[models.AnnotationRound]:
     _project(db, project_id)
     query = db.query(models.AnnotationRound).filter(models.AnnotationRound.project_id == project_id)
     if cycle_id is not None:
         _scoped(db, models.LearningCycle, cycle_id, project_id, "Learning cycle")
         query = query.filter(models.AnnotationRound.cycle_id == cycle_id)
-    return query.order_by(models.AnnotationRound.created_at, models.AnnotationRound.id).all()
+    return query.order_by(models.AnnotationRound.created_at, models.AnnotationRound.id).offset(
+        offset
+    ).limit(limit).all()
 
 
 def get_annotation_round(
     db: Session,
     annotation_round_id: int,
+    *, actor: User | None = None,
 ) -> models.AnnotationRound:
-    annotation_round = db.get(models.AnnotationRound, annotation_round_id)
+    query = db.query(models.AnnotationRound).filter(
+        models.AnnotationRound.id == annotation_round_id
+    )
+    if actor is not None and not actor.is_superuser:
+        query = query.join(Project, Project.id == models.AnnotationRound.project_id).join(
+            WorkspaceMember, WorkspaceMember.workspace_id == Project.workspace_id,
+        ).filter(WorkspaceMember.user_id == actor.id)
+    annotation_round = query.first()
     if annotation_round is None:
         raise NotFoundError("Annotation round not found")
     return annotation_round
@@ -467,16 +492,18 @@ def get_round_work_context(
 def _round_work_context_payload(
     db: Session,
     annotation_round: models.AnnotationRound,
+    *,
+    references: _RoundContextReferences | None = None,
 ) -> dict:
-    project = _project(db, annotation_round.project_id)
-    task_version = _scoped(
+    project = references.project if references else _project(db, annotation_round.project_id)
+    task_version = references.task_version if references else _scoped(
         db,
         models.TaskVersion,
         annotation_round.task_version_id,
         annotation_round.project_id,
         "Task version",
     )
-    task = _scoped(
+    task = references.task if references else _scoped(
         db,
         models.TaskDefinition,
         task_version.task_definition_id,
@@ -486,13 +513,15 @@ def _round_work_context_payload(
 
     cycle_payload = None
     if annotation_round.cycle_id is not None:
-        cycle = _scoped(
+        cycle = references.cycle if references else _scoped(
             db,
             models.LearningCycle,
             annotation_round.cycle_id,
             annotation_round.project_id,
             "Learning cycle",
         )
+        if cycle is None or cycle.project_id != project.id:
+            raise NotFoundError("Learning cycle not found")
         if cycle.task_version_id != task_version.id:
             raise ValidationError("Annotation round cycle does not match its pinned task version")
         cycle_payload = {
@@ -503,20 +532,24 @@ def _round_work_context_payload(
 
     guideline_payload = None
     if annotation_round.guideline_revision_id is not None:
-        revision = _scoped(
+        revision = references.revision if references else _scoped(
             db,
             models.GuidelineRevision,
             annotation_round.guideline_revision_id,
             annotation_round.project_id,
             "Guideline revision",
         )
-        guideline = _scoped(
+        if revision is None or revision.project_id != project.id:
+            raise NotFoundError("Guideline revision not found")
+        guideline = references.guideline if references else _scoped(
             db,
             models.Guideline,
             revision.guideline_id,
             annotation_round.project_id,
             "Guideline",
         )
+        if guideline is None or guideline.project_id != project.id:
+            raise NotFoundError("Guideline not found")
         if revision.task_version_id != task_version.id or guideline.task_definition_id != task.id:
             raise ValidationError(
                 "Annotation round guideline does not match its pinned task version"
@@ -568,6 +601,8 @@ def list_workspace_round_work_contexts(
     *,
     workspace_id: int,
     actor: User,
+    limit: int = 100,
+    offset: int = 0,
 ) -> list[dict]:
     eligible_projects = _workspace_projects_with_modules(
         db,
@@ -579,7 +614,19 @@ def list_workspace_round_work_contexts(
         return []
 
     rounds = (
-        db.query(models.AnnotationRound)
+        db.query(
+            models.AnnotationRound, Project, models.TaskVersion, models.TaskDefinition,
+            models.LearningCycle, models.GuidelineRevision, models.Guideline,
+        )
+        .join(Project, Project.id == models.AnnotationRound.project_id)
+        .join(models.TaskVersion, models.TaskVersion.id == models.AnnotationRound.task_version_id)
+        .join(models.TaskDefinition,
+              models.TaskDefinition.id == models.TaskVersion.task_definition_id)
+        .outerjoin(models.LearningCycle,
+                   models.LearningCycle.id == models.AnnotationRound.cycle_id)
+        .outerjoin(models.GuidelineRevision,
+                   models.GuidelineRevision.id == models.AnnotationRound.guideline_revision_id)
+        .outerjoin(models.Guideline, models.Guideline.id == models.GuidelineRevision.guideline_id)
         .filter(
             models.AnnotationRound.project_id.in_(project_ids),
             models.AnnotationRound.status == "open",
@@ -588,21 +635,33 @@ def list_workspace_round_work_contexts(
             models.AnnotationRound.opened_at.desc(),
             models.AnnotationRound.id.desc(),
         )
-        .all()
+        .yield_per(100)
     )
-    visible_rounds = [
-        annotation_round
-        for annotation_round in rounds
-        if annotation_round.open_to_all_annotators
-        or actor.id in annotation_round.annotator_user_ids
-    ]
-    return [
-        _round_work_context_payload(db, annotation_round) for annotation_round in visible_rounds
-    ]
+    contexts = []
+    visible_count = 0
+    for annotation_round, project, task_version, task, cycle, revision, guideline in rounds:
+        if not annotation_round.open_to_all_annotators and actor.id not in (
+            annotation_round.annotator_user_ids
+        ):
+            continue
+        visible_count += 1
+        if visible_count <= offset:
+            continue
+        if task_version.project_id != project.id or task.project_id != project.id:
+            raise ValidationError("Annotation round task does not belong to its project")
+        contexts.append(_round_work_context_payload(
+            db, annotation_round, references=_RoundContextReferences(
+                project, task_version, task, cycle, revision, guideline,
+            ),
+        ))
+        if len(contexts) == limit:
+            break
+    return contexts
 
 
 def list_round_items(
-    db: Session, project_id: int, annotation_round_id: int
+    db: Session, project_id: int, annotation_round_id: int,
+    *, limit: int | None = None, offset: int = 0,
 ) -> list[models.RoundItem]:
     _scoped(
         db,
@@ -615,6 +674,8 @@ def list_round_items(
         db.query(models.RoundItem)
         .filter(models.RoundItem.annotation_round_id == annotation_round_id)
         .order_by(models.RoundItem.selection_rank, models.RoundItem.id)
+        .offset(offset)
+        .limit(limit)
         .all()
     )
 
@@ -623,6 +684,7 @@ def list_round_work_items(
     db: Session,
     project_id: int,
     annotation_round_id: int,
+    *, limit: int | None = None, offset: int = 0,
 ) -> list[tuple[models.RoundItem, models.DatasetItem]]:
     annotation_round = _scoped(
         db,
@@ -631,14 +693,21 @@ def list_round_work_items(
         project_id,
         "Annotation round",
     )
-    round_item_count = (
+    invalid_item = (
         db.query(models.RoundItem.id)
+        .outerjoin(models.DatasetItem, models.DatasetItem.id == models.RoundItem.dataset_item_id)
         .filter(
             models.RoundItem.project_id == project_id,
             models.RoundItem.annotation_round_id == annotation_round.id,
+            or_(models.DatasetItem.id.is_(None), models.DatasetItem.project_id != project_id,
+                models.DatasetItem.dataset_version_id != annotation_round.dataset_version_id),
         )
-        .count()
+        .first()
     )
+    if invalid_item is not None:
+        raise ValidationError(
+            "Annotation round item lineage does not match its pinned dataset version"
+        )
     work_items = (
         db.query(models.RoundItem, models.DatasetItem)
         .join(
@@ -652,12 +721,10 @@ def list_round_work_items(
             models.DatasetItem.dataset_version_id == annotation_round.dataset_version_id,
         )
         .order_by(models.RoundItem.selection_rank, models.RoundItem.id)
+        .offset(offset)
+        .limit(limit)
         .all()
     )
-    if len(work_items) != round_item_count:
-        raise ValidationError(
-            "Annotation round item lineage does not match its pinned dataset version"
-        )
     validate_annotation_assistance(
         db,
         [item for _round_item, item in work_items],
@@ -698,6 +765,7 @@ def list_round_annotation_decisions(
     annotation_round_id: int,
     actor: User,
     annotator_user_id: int | None = None,
+    *, limit: int | None = None, offset: int = 0,
 ) -> list[models.RoundAnnotationDecision]:
     annotation_round = _scoped(
         db,
@@ -731,7 +799,7 @@ def list_round_annotation_decisions(
     return query.order_by(
         models.RoundAnnotationDecision.created_at,
         models.RoundAnnotationDecision.id,
-    ).all()
+    ).offset(offset).limit(limit).all()
 
 
 def list_round_submissions(
@@ -740,6 +808,7 @@ def list_round_submissions(
     annotation_round_id: int,
     actor: User,
     annotator_user_id: int | None = None,
+    *, limit: int | None = None, offset: int = 0,
 ) -> list[models.RoundSubmission]:
     annotation_round = _scoped(
         db,
@@ -764,7 +833,7 @@ def list_round_submissions(
     return query.order_by(
         models.RoundSubmission.submitted_at,
         models.RoundSubmission.id,
-    ).all()
+    ).offset(offset).limit(limit).all()
 
 
 def transition_annotation_round(
@@ -838,15 +907,12 @@ def transition_annotation_round(
             .filter(models.RoundSubmission.annotation_round_id == annotation_round.id)
             .all()
         )
-        submitted_item_ids = {
-            decision.round_item_id
-            for submission in submissions
-            for decision in (
-                db.query(models.RoundAnnotationDecision)
-                .filter(models.RoundAnnotationDecision.id.in_(submission.decision_ids))
-                .all()
-            )
-        }
+        submitted_decisions = _scoped_many(
+            db, models.RoundAnnotationDecision,
+            (decision_id for submission in submissions for decision_id in submission.decision_ids),
+            project_id, "Submitted annotation decision",
+        )
+        submitted_item_ids = {decision.round_item_id for decision in submitted_decisions.values()}
         if not submissions or submitted_item_ids != round_item_ids:
             raise ValidationError(
                 "A round can close only after finalized submissions cover every item"
@@ -975,16 +1041,10 @@ def create_round_submission(
     annotation_round = _share_lock_round(db, annotation_round.id)
     if len(data.decision_ids) != len(set(data.decision_ids)):
         raise ValidationError("decision_ids must be unique")
-    decisions = [
-        _scoped(
-            db,
-            models.RoundAnnotationDecision,
-            decision_id,
-            data.project_id,
-            "Annotation decision",
-        )
-        for decision_id in data.decision_ids
-    ]
+    decisions = list(_scoped_many(
+        db, models.RoundAnnotationDecision, data.decision_ids,
+        data.project_id, "Annotation decision",
+    ).values())
     adjudication_only = bool(decisions) and all(
         decision.decision_kind == "adjudication" for decision in decisions
     )
@@ -1010,9 +1070,26 @@ def create_round_submission(
         raise ConflictError("Current user is not assigned to this annotation round")
     if len({decision.round_item_id for decision in decisions}) != len(decisions):
         raise ValidationError("A submission must contain only one current decision per item")
+    items_by_id = _scoped_many(
+        db, models.RoundItem, (decision.round_item_id for decision in decisions),
+        data.project_id, "Round item",
+    )
+    superseded_ids: set[int] = set()
+    for start in range(0, len(data.decision_ids), 500):
+        superseded_ids.update(decision_id for (decision_id,) in db.query(
+            models.RoundAnnotationDecision.supersedes_decision_id,
+        ).filter(models.RoundAnnotationDecision.supersedes_decision_id.in_(
+            data.decision_ids[start : start + 500],
+        )).all())
+    source_items = _scoped_many(
+        db, models.DatasetItem,
+        (item.dataset_item_id for item in items_by_id.values())
+        if annotation_round.assistance_policy != "blind" else (),
+        data.project_id, "Source item",
+    )
     assisted_items = []
     for decision in decisions:
-        item = _scoped(db, models.RoundItem, decision.round_item_id, data.project_id, "Round item")
+        item = items_by_id[decision.round_item_id]
         if (
             item.annotation_round_id != annotation_round.id
             or decision.annotator_user_id != actor.id
@@ -1020,19 +1097,10 @@ def create_round_submission(
             raise ValidationError(
                 "Submissions may contain only the actor's decisions from this round"
             )
-        superseded = (
-            db.query(models.RoundAnnotationDecision.id)
-            .filter(models.RoundAnnotationDecision.supersedes_decision_id == decision.id)
-            .first()
-        )
-        if superseded is not None:
+        if decision.id in superseded_ids:
             raise ValidationError("Submissions cannot include a superseded annotation decision")
         if annotation_round.assistance_policy != "blind":
-            assisted_items.append(
-                _scoped(
-                    db, models.DatasetItem, item.dataset_item_id, data.project_id, "Source item"
-                )
-            )
+            assisted_items.append(source_items[item.dataset_item_id])
     validate_annotation_assistance(
         db, assisted_items, annotation_round.task_version_id, annotation_round.assistance_policy
     )

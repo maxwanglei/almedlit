@@ -40,8 +40,9 @@ def test_manual_review_retains_taskless_source_holdout_across_versions(
     assert protected == {item.id for item in items if item.stable_key == "test-1"}
 
 
-def test_manual_review_ignores_source_holdout_owned_only_by_another_task(
-    db, workflow_scope, workflow_data
+@pytest.mark.parametrize("different_task", [False, True])
+def test_manual_review_keeps_source_holdout_after_training_uses_split_map(
+    db, workflow_scope, workflow_data, different_task,
 ):
     scope, data = workflow_scope, workflow_data
     labels = service.create_label_set_version(
@@ -68,11 +69,21 @@ def test_manual_review_ignores_source_holdout_owned_only_by_another_task(
         ),
         scope.manager,
     )
+    definition = (
+        service.create_task_definition(
+            db,
+            schemas.TaskDefinitionCreate(
+                project_id=scope.project.id, key="different", name="Different task",
+            ),
+            scope.manager,
+        )
+        if different_task else data.task
+    )
     other_task = service.create_task_version(
         db,
         schemas.TaskVersionCreate(
             project_id=scope.project.id,
-            task_definition_id=data.task.id,
+            task_definition_id=definition.id,
             task_kind="classification",
             input_schema={"text": "string"},
             output_schema={"label": ["negative", "positive"]},
@@ -83,4 +94,4 @@ def test_manual_review_ignores_source_holdout_owned_only_by_another_task(
     )
     items = list(data.items.values())
     assert _protected_items(db, items, data.task_version.id) == {data.items["test-1"].id}
-    assert _protected_items(db, items, other_task.id) == set()
+    assert _protected_items(db, items, other_task.id) == {data.items["test-1"].id}

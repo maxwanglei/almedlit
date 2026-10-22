@@ -5,12 +5,13 @@ from uuid import uuid4
 from sqlalchemy.orm import Session
 
 from al_medlit.core.exceptions import ConflictError, NotFoundError, ValidationError
-from al_medlit.core.storage import ObjectStorage
+from al_medlit.core.storage import ObjectNotFoundError, ObjectStorage
 from al_medlit.export.formats import EvidenceBlocksJSONLFormat, TrainingWindowsJSONLFormat
 from al_medlit.export.registry import ExportContext, export_formats
 from al_medlit.export.schemas import ExportCreate
 from al_medlit.lineage.models import AnnotationSet, CorpusSnapshot, ExportArtifact
 from al_medlit.lineage.service import IterableBytesReader, register_export_artifact
+from al_medlit.training.windowing import WindowBuildError
 
 
 def register_builtin_export_formats() -> None:
@@ -40,6 +41,8 @@ def create_export(
         if data.corpus_snapshot_id
         else None
     )
+    if data.annotation_set_id is not None and annotation_set is None:
+        raise NotFoundError("Annotation set not found in project")
     if annotation_set is not None:
         if annotation_set.project_id != project_id:
             raise ValidationError("Annotation set is not in project")
@@ -57,12 +60,15 @@ def create_export(
     counter = [0]
 
     def chunks():
-        for row in plugin.iter_rows(context):
-            counter[0] += 1
-            yield (
-                json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-                + "\n"
-            ).encode("utf-8")
+        try:
+            for row in plugin.iter_rows(context):
+                counter[0] += 1
+                yield (
+                    json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                    + "\n"
+                ).encode("utf-8")
+        except WindowBuildError as exc:
+            raise ValidationError(str(exc)) from exc
 
     token = uuid4().hex
     file_name = data.file_name or f"{plugin.key}-{token[:8]}.{plugin.extension}"
@@ -90,9 +96,12 @@ def create_export(
 def verify_export(storage: ObjectStorage, export: ExportArtifact) -> None:
     digest = hashlib.sha256()
     size = 0
-    for chunk in storage.iter_bytes(export.artifact.storage_key):
-        digest.update(chunk)
-        size += len(chunk)
+    try:
+        for chunk in storage.iter_bytes(export.artifact.storage_key):
+            digest.update(chunk)
+            size += len(chunk)
+    except ObjectNotFoundError as exc:
+        raise NotFoundError("Export object not found") from exc
     if size != export.artifact.size_bytes or digest.hexdigest() != export.artifact.content_hash:
         raise ConflictError("Export object checksum does not match immutable metadata")
 

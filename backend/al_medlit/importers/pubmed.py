@@ -20,6 +20,7 @@ from itertools import batched
 from xml.etree import ElementTree as ET
 
 import httpx
+from defusedxml.common import DefusedXmlException
 from defusedxml.ElementTree import fromstring as _safe_fromstring
 
 from al_medlit.core.config import settings
@@ -298,7 +299,14 @@ def parse_idconv_json(data: object) -> dict[str, str]:
         pmid = record.get("pmid")
         pmcid = record.get("pmcid")
         if pmid and pmcid:
-            out[str(pmid)] = str(pmcid)
+            if not isinstance(pmid, str) or not pmid.isascii() or not pmid.isdigit():
+                raise ValueError("PMC ID Converter PMID must contain ASCII digits")
+            if (
+                not isinstance(pmcid, str) or not pmcid.startswith("PMC")
+                or not pmcid[3:].isascii() or not pmcid[3:].isdigit()
+            ):
+                raise ValueError("PMC ID Converter PMCID must be a PMC accession")
+            out[pmid] = pmcid
     return out
 
 
@@ -419,7 +427,10 @@ def fetch_pubmed_metadata(
             "id": ",".join(batch), "retmax": str(len(batch)),
         }
         response = _get(client, f"{settings.ncbi_eutils_base}/efetch.fcgi", params)
-        metadata.update(parse_pubmed_xml(response.text))
+        try:
+            metadata.update(parse_pubmed_xml(response.text))
+        except (ET.ParseError, DefusedXmlException) as exc:
+            raise ImporterFetchError("NCBI PubMed returned malformed XML") from exc
     return metadata
 
 
@@ -462,5 +473,8 @@ def fetch_pmc_documents(
             "id": ids, "retmax": str(len(batch)),
         }
         response = _get(client, f"{settings.ncbi_eutils_base}/efetch.fcgi", params)
-        documents.update(parse_pmc_xml_documents(response.text))
+        try:
+            documents.update(parse_pmc_xml_documents(response.text))
+        except (ET.ParseError, DefusedXmlException) as exc:
+            raise ImporterFetchError("NCBI PMC returned malformed XML") from exc
     return documents

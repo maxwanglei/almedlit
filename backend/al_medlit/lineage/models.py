@@ -147,6 +147,9 @@ class AnnotationSet(Base, IntPrimaryKeyMixin, TimestampMixin):
         order_by=lambda: (
             AnnotationSetItem.document_id,
             AnnotationSetItem.start_sentence_ordinal,
+            AnnotationSetItem.target_version_id,
+            AnnotationSetItem.end_sentence_ordinal,
+            AnnotationSetItem.id,
         ),
     )
     reviewed_regions = relationship(

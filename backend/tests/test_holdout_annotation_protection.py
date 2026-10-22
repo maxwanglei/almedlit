@@ -270,7 +270,7 @@ def test_prepared_holdout_ancestry_protects_selection_without_protected_map_flag
     } - held_out_ids
 
 
-def test_prepared_holdouts_do_not_exclude_another_tasks_selection_items(client, db):
+def test_prepared_holdouts_remain_protected_in_new_task_versions(client, db):
     context, held_out_ids = _prepared_context(client, db)
     task = context["task_version"]
     other = client.post("/api/tasks/versions", json={
@@ -286,8 +286,7 @@ def test_prepared_holdouts_do_not_exclude_another_tasks_selection_items(client, 
     )
     assert response.status_code == 201, response.text
     selected_ids = {item["dataset_item_id"] for item in response.json()["items"]}
-    assert selected_ids == {item["id"] for item in context["item_by_key"].values()}
-    assert held_out_ids <= selected_ids
+    assert selected_ids == {item["id"] for item in context["item_by_key"].values()} - held_out_ids
 
 
 def test_assisted_round_rejects_raw_items_protected_through_prepared_ancestry(client, db):

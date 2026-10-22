@@ -10,6 +10,7 @@ import os
 import tempfile
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO, Protocol
 
@@ -32,6 +33,12 @@ class StoredObject:
     size_bytes: int
     checksum_sha256: str
     content_type: str
+
+
+@dataclass(frozen=True, slots=True)
+class StorageInventoryObject:
+    key: str
+    last_modified: datetime
 
 
 class ObjectStorage(Protocol):
@@ -72,6 +79,8 @@ class ObjectStorage(Protocol):
 
     def delete(self, key: str) -> None: ...
 
+    def list_objects(self, prefix: str) -> Iterator[StorageInventoryObject]: ...
+
 
 class LocalObjectStorage:
     backend_name = "local"
@@ -87,6 +96,17 @@ class LocalObjectStorage:
         if not path.is_relative_to(self.root.resolve()):
             raise ObjectStorageError(f"Invalid object key: {key!r}")
         return path
+
+    def list_objects(self, prefix: str) -> Iterator[StorageInventoryObject]:
+        directory = self._path(prefix)
+        if not directory.is_dir():
+            return
+        for path in directory.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                yield StorageInventoryObject(
+                    key=path.relative_to(self.root.resolve()).as_posix(),
+                    last_modified=datetime.fromtimestamp(path.stat().st_mtime, UTC),
+                )
 
     def put_bytes(
         self,
@@ -422,6 +442,11 @@ class MinioObjectStorage:
 
     def delete(self, key: str) -> None:
         self.client.remove_object(self.bucket, key)
+
+    def list_objects(self, prefix: str) -> Iterator[StorageInventoryObject]:
+        for item in self.client.list_objects(self.bucket, prefix=prefix, recursive=True):
+            if item.last_modified is not None:
+                yield StorageInventoryObject(item.object_name, item.last_modified)
 
 
 class _HashingReader:

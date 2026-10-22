@@ -141,6 +141,21 @@ def protected_dataset_item_ids(
             or identities[item.id][1] & protected_tokens
         )
     }
+    task = db.get(models.TaskVersion, task_version_id)
+    schema = task.input_schema if task is not None else {}
+    fields = schema.get("properties") if "type" in schema else schema
+    input_mapping = (
+        {field: field for field in fields}
+        if isinstance(fields, dict) and fields else {"text": "text"}
+    )
+    for version_id, version in versions.items():
+        current = [item for item in candidates.values() if item.dataset_version_id == version_id]
+        constraints = source_split_constraints(
+            db, version, current, task_version_id, input_mapping=input_mapping,
+        )
+        protected.update(
+            item.id for item in current if constraints.get(item.stable_key) == {"test"}
+        )
     while True:
         protected_groups = {
             (item.dataset_version_id, item.group_key)

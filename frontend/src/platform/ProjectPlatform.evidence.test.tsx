@@ -12,7 +12,7 @@ import { EMPTY_PLATFORM_PROJECT_DATA, type PlatformProjectData } from "./types";
 const mocks = vi.hoisted(() => ({
   listProjectTasks: vi.fn(),
   listEvidenceTargets: vi.fn(),
-  listDocuments: vi.fn(),
+  listDocumentSummaries: vi.fn(),
   listTaskAssignments: vi.fn(),
   listGuidelineVersions: vi.fn(),
   listWorkspaceMembers: vi.fn(),
@@ -50,7 +50,7 @@ afterEach(cleanup);
 describe("live evidence setup", () => {
   it.each(["/projects/7/tasks", "/projects/7/overview"])("opens the selected legacy document task from %s", async (pathname) => {
     const task = { id: 41, project_id: 7, annotation_type: "entity", display_name: "Drug entities", description: null, enabled: true, sort_order: 0, labels: [], settings: {} } satisfies ProjectTask;
-    render(<ProjectPlatform {...props} pathname={pathname} project={{ ...project, tasks: [task] }} documents={[{ id: 11, project_id: 7, external_id: null, title: "Paper", text: "Source", source: null, metadata_: {}, sentences: [], active_structure_version_id: null }]} />);
+    render(<ProjectPlatform {...props} pathname={pathname} project={{ ...project, tasks: [task] }} documents={[{ id: 11, project_id: 7, external_id: null, title: "Paper", source: null, metadata_: {}, active_structure_version_id: null }]} />);
     const open = await screen.findAllByText("Open Drug entities");
     fireEvent.click(open[0]);
     expect(props.onNavigate).toHaveBeenCalledWith("/my-work?project=7&view=annotate&task=41&tool=legacy");

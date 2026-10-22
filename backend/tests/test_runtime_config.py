@@ -142,6 +142,7 @@ def test_compose_passes_configured_login_backoff_to_backend(threshold):
         env=os.environ | {
             "POSTGRES_PASSWORD": "compose-test-database-password",
             "MINIO_ROOT_PASSWORD": "compose-test-storage-password",
+            "AL_MEDLIT_STORAGE_SECRET_KEY": "compose-test-application-storage-password",
             "AL_MEDLIT_JWT_SECRET": "compose-test-jwt-secret-at-least-32-bytes",
             "AL_MEDLIT_LOGIN_FAILURE_THRESHOLD": threshold,
             "AL_MEDLIT_LOGIN_FAILURE_WINDOW_MINUTES": "2",

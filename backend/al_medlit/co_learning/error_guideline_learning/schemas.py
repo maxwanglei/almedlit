@@ -77,10 +77,10 @@ class MicroQuestionTemplateRead(MicroQuestionTemplateCreate):
 
 
 class PatternToGuidelineRequest(BaseModel):
-    manager_id: str | None = None
+    manager_id: str | None = Field(default=None, max_length=120)
     use_llm: bool = False
     rule_text_override: str | None = None
 
 
 class ApproveGuidelineAtomRequest(BaseModel):
-    approved_by: str
+    approved_by: str = Field(max_length=120)

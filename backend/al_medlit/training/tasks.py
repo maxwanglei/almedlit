@@ -22,6 +22,17 @@ logger = logging.getLogger(__name__)
 FEEDBACK_SCORING_HEARTBEAT_INTERVAL_SECONDS = 30.0
 
 
+@app.task(name="al_medlit.inference.cleanup_remote_jobs")
+def cleanup_remote_inference_jobs_task() -> int:
+    from al_medlit.training.remote_cleanup import cleanup_remote_inference_jobs
+
+    db = SessionLocal()
+    try:
+        return cleanup_remote_inference_jobs(db, get_object_storage())
+    finally:
+        db.close()
+
+
 def _feedback_scoring_heartbeat_loop(feedback_run_id: int, stop: Event) -> None:
     from al_medlit.workflow.services.feedback_scoring import (
         heartbeat_feedback_scoring_run,
@@ -134,6 +145,10 @@ def garbage_collect_artifact_blobs_task(
 
     db = SessionLocal()
     try:
+        unregistered = artifact_service.sweep_unregistered_artifact_objects(
+            db, get_object_storage(), workspace_id=workspace_id, limit=limit,
+        )
+        db.commit()
         processed_packages = 0
         after_retention_id = 0
         bounded_limit = min(max(limit, 1), 10_000)
@@ -173,6 +188,7 @@ def garbage_collect_artifact_blobs_task(
                 break
             after_blob_id = result.last_scanned_blob_id
         return {
+            "unregistered_object_count": unregistered,
             "processed_package_count": processed_packages,
             "scanned_blob_count": scanned,
             "deleted_blob_count": deleted,

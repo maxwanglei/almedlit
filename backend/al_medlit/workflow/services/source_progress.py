@@ -5,9 +5,14 @@ from collections import defaultdict
 from sqlalchemy.orm import Session
 
 from al_medlit.workflow import models
+from al_medlit.workflow.services.common import _scoped
 
 
-def annotation_progress(db: Session, project_id: int) -> list[dict]:
+def annotation_progress(
+    db: Session, project_id: int, task_version_id: int | None = None,
+) -> list[dict]:
+    if task_version_id is not None:
+        _scoped(db, models.TaskVersion, task_version_id, project_id, "Task version")
     versions = (
         db.query(models.DatasetVersion)
         .filter(models.DatasetVersion.project_id == project_id)
@@ -15,7 +20,7 @@ def annotation_progress(db: Session, project_id: int) -> list[dict]:
         .all()
     )
     submitted_decisions: dict[tuple[int, int], set[int]] = defaultdict(set)
-    for submission in (
+    submissions = (
         db.query(models.RoundSubmission)
         .join(
             models.AnnotationRound,
@@ -24,9 +29,12 @@ def annotation_progress(db: Session, project_id: int) -> list[dict]:
         .filter(
             models.RoundSubmission.project_id == project_id,
             models.AnnotationRound.project_id == project_id,
+            models.AnnotationRound.status.in_(("open", "closed")),
         )
-        .all()
-    ):
+    )
+    if task_version_id is not None:
+        submissions = submissions.filter(models.AnnotationRound.task_version_id == task_version_id)
+    for submission in submissions:
         submitted_decisions[(submission.annotation_round_id, submission.annotator_user_id)].update(
             submission.decision_ids
         )
@@ -50,6 +58,7 @@ def annotation_progress(db: Session, project_id: int) -> list[dict]:
                 models.RoundAnnotationDecision.project_id == project_id,
                 models.RoundItem.project_id == project_id,
                 models.DatasetItem.project_id == project_id,
+                models.RoundAnnotationDecision.decision_kind.in_(("annotation", "correction")),
             )
             .all()
         )

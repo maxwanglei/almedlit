@@ -1359,6 +1359,7 @@ def get_project_progress(
         project_id,
         assignee_user_id=assignee_user_id,
     )
+    assignments = [assignment for assignment in assignments if assignment.status != "withdrawn"]
     tasks_by_id = {
         task.id: task
         for task in db.query(ProjectTask).filter(ProjectTask.project_id == project_id).all()

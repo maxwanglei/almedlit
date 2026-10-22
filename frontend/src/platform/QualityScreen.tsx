@@ -1,5 +1,5 @@
 import type {
-  Document,
+  DocumentSummary,
   ProjectProgress,
   TaskAssignment,
 } from "@/types/api";
@@ -26,7 +26,7 @@ export default function QualityScreen({
   data: PlatformProjectData;
   progress: ProjectProgress | null;
   projectId: number;
-  documents: Document[];
+  documents: DocumentSummary[];
   assignments: TaskAssignment[];
   allowSoloGold: boolean;
   onSetupEvidence?: () => void;

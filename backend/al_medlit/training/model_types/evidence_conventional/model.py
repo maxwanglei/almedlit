@@ -447,12 +447,7 @@ def load_conventional_model(checkpoint_directory: str | Path) -> LoadedConventio
     if not model_path.is_file():
         raise ValueError("skops model file is missing")
     untrusted_types = dependencies["skops_io"].get_untrusted_types(file=model_path)
-    allowed_prefixes = ("numpy.", "scipy.", "sklearn.")
-    disallowed = sorted(
-        type_name
-        for type_name in untrusted_types
-        if not str(type_name).startswith(allowed_prefixes)
-    )
+    disallowed = sorted(untrusted_types)
     if disallowed:
         raise ValueError(
             "The skops package contains types outside the plugin allowlist: "

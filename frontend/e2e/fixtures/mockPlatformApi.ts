@@ -1,4 +1,6 @@
 import type { Page, Route } from "@playwright/test";
+import type { PredictionRun, PredictionResult } from "../../src/platform/predictionApi";
+import { createMockAccess, hasMockAccessRule, capabilitiesFor, modulesFor, selectedModules, enforceMockAccess, pageByDescendingId, type MockAccessOptions, type MockWorkspaceRole } from "./mockAccess";
 
 import {
   installEvidenceApiMock,
@@ -12,13 +14,17 @@ export interface PlatformApiRequest {
   body?: unknown;
 }
 
-export interface PlatformApiMockOptions {
-  role?: "personal" | "trainer" | "manager";
+export interface PlatformApiMockOptions extends MockAccessOptions {
+  role?: MockWorkspaceRole;
+  pagination?: boolean;
   includeSecondWorkspace?: boolean;
   trainingReleaseGate?: boolean;
 }
 
 async function json(route: Route, body: unknown, status = 200): Promise<void> {
+  if (status < 400 && !hasMockAccessRule(route)) {
+    return route.fulfill({ status: 501, contentType: "application/json", body: JSON.stringify({ detail: `Missing fixture access rule: ${route.request().method()} ${new URL(route.request().url()).pathname}` }) });
+  }
   await route.fulfill({
     status,
     contentType: "application/json",
@@ -37,6 +43,8 @@ const platformProject = {
   description: "Deterministic Playwright fixture",
   annotation_schema: { labels: { evidence_block: [] } },
   annotation_validation_mode: "strict",
+  workflow_task_count: 1,
+  workflow_round_count: 1,
   tasks: [
     {
       id: 11,
@@ -359,6 +367,7 @@ const modelVersions = [
     parameters: {},
     metrics: { f1: 0.84 },
     runtime_digest: hash,
+    code_digest: hash,
     content_hash: hash,
     checkpoint_package_id: 274,
     created_at: timestamp,
@@ -695,16 +704,13 @@ const storagePolicies = [
     id: 141,
     project_id: 1,
     name: "Project artifacts",
-    backend: "minio",
-    artifact_prefix: "projects/1",
-    retention_class: "standard",
-    encryption: {
-      enabled: true,
-      algorithm: "AES-256-GCM",
-      key_management: "platform_managed",
-    },
-    cache_policy: { enabled: true },
+    backend: "local",
+    artifact_prefix: "workspaces/1/artifact-blobs",
+    retention_class: "indefinite",
+    encryption: { mode: "none" },
+    cache_policy: {},
     is_default: true,
+    created_by_user_id: 2,
     created_at: timestamp,
   },
 ];
@@ -724,6 +730,12 @@ const trainingRuns = [
     seed: 42,
     config: {},
     evaluation_plan: { splits: ["test"] },
+    artifact_reservation_id: null,
+    launch_hash: hash,
+    runtime_snapshot: {},
+    storage_snapshot: {},
+    started_at: timestamp,
+    completed_at: timestamp,
     output_model_version_id: 82,
     failure_code: null,
     failure_reason: null,
@@ -815,12 +827,16 @@ export async function installPlatformApiMock(
 ): Promise<{
   requests: PlatformApiRequest[];
   evidence: EvidenceApiMockState;
+  registerRound: (round: Record<string, unknown>) => void;
+  registerSubmittedItems: (itemIds: number[]) => void;
 }> {
   const role = options.role ?? "personal";
-  const evidence = await installEvidenceApiMock(
-    page,
-    role === "manager" ? "manager" : "personal",
-  );
+  const access = createMockAccess(role, options);
+  if (options.includeSecondWorkspace) {
+    access.workspaces.set(2, { role: "annotator", kind: "team", preset: "annotate", overrides: [] });
+  }
+  const project = { ...platformProject, settings: { modules: modulesFor(access, 1).selected } };
+  const evidence = await installEvidenceApiMock(page, role, { access });
   const requests: PlatformApiRequest[] = [];
   const releaseGateEnabled = options.trainingReleaseGate === true;
   let releaseProject: Record<string, unknown> | null = null;
@@ -846,7 +862,31 @@ export async function installPlatformApiMock(
   let activeRounds: Array<Record<string, unknown>> = rounds.map((round) => ({
     ...round,
   }));
+  const projectResponse = (item: typeof project | Record<string, unknown>) => ({
+    ...item,
+    workflow_task_count: [...taskDefinitions, ...(releaseTask ? [releaseTask] : [])].filter((task) => task.project_id === item.id).length,
+    workflow_round_count: activeRounds.filter((round) => round.project_id === item.id).length,
+  });
   let createdRoundId: number | null = null;
+  const registerRound = (round: Record<string, unknown>): void => {
+    activeRounds = [...activeRounds.filter((item) => item.id !== round.id), round];
+    if (typeof round.id === "number") createdRoundId = round.id;
+  };
+  const runRows = options.pagination ? Array.from({ length: 51 }, (_, index) => ({ ...workspaceTrainingRuns.items[0], id: 151 + index })) : workspaceTrainingRuns.items;
+  const modelRows = options.pagination ? Array.from({ length: 51 }, (_, index) => ({ ...workspaceModels.items[0], id: 81 + index, name: index === 0 ? registeredModels[0].name : `Screening model ${index + 1}` })) : workspaceModels.items;
+
+
+  const submittedItemIds = new Set<number>();
+  const registerSubmittedItems = (itemIds: number[]): void => {
+    for (const id of itemIds) submittedItemIds.add(id);
+  };
+  const predictionRuns: PredictionRun[] = [];
+  const predictionRequestIds = new Map<string, number>();
+  const predictionReviews = new Map<string, { round_id: number; item_count: number; excluded_submitted: number; excluded_protected: number }>();
+  const predictionRows: PredictionResult[] = [
+    { dataset_item_id: 221, stable_key: "PMID-E2E-uncertain", title: "Clinical trial", text: "The treatment effect was uncertain in the primary analysis.", prediction: "include", confidence: 0.86, uncertainty: 0.14, already_submitted: false, protected: false },
+    { dataset_item_id: 222, stable_key: "PMID-E2E-protected", title: "Protected trial", text: "A held out evaluation example.", prediction: "exclude", confidence: 0.9, uncertainty: 0.1, already_submitted: false, protected: true },
+  ];
 
   const releaseEnvironment = {
     id: 331,
@@ -871,15 +911,11 @@ export async function installPlatformApiMock(
     id: 341,
     project_id: 2,
     name: "Immutable MinIO artifacts",
-    backend: "minio",
-    artifact_prefix: "projects/2/training",
-    retention_class: "standard",
-    encryption: {
-      enabled: true,
-      algorithm: "AES-256-GCM",
-      key_management: "platform_managed",
-    },
-    cache_policy: { enabled: true },
+    backend: "local",
+    artifact_prefix: "workspaces/1/artifact-blobs",
+    retention_class: "indefinite",
+    encryption: { mode: "none" },
+    cache_policy: {},
     is_default: true,
     created_by_user_id: 2,
     created_at: timestamp,
@@ -892,7 +928,7 @@ export async function installPlatformApiMock(
           project_name: releaseProject.name,
           project_description: releaseProject.description,
           training_only: true,
-          effective_modules: ["data", "train", "models", "activity"],
+          effective_modules: modulesFor(access, 2).effective,
           task_version_count: releaseTaskVersion ? 1 : 0,
           training_dataset_version_count: releaseTrainingDataset ? 1 : 0,
           environment_count: 1,
@@ -972,6 +1008,7 @@ export async function installPlatformApiMock(
   await page.route(/^https?:\/\/[^/]+\/api\//, async (route) => {
     const request = route.request();
     const url = new URL(request.url());
+    if (await enforceMockAccess(route, access)) return;
     if (request.method() === "GET" && url.pathname === "/api/auth/me") {
       const personal = role === "personal";
       const manager = role === "manager";
@@ -980,7 +1017,7 @@ export async function installPlatformApiMock(
           workspace_id: 1,
           workspace_name: personal ? "Alice's Workspace" : "Evidence Team",
           workspace_kind: personal ? "individual" : "team",
-          role: personal ? "admin" : role,
+          role: access.workspaces.get(1)?.role,
         },
         ...(options.includeSecondWorkspace
           ? [
@@ -988,7 +1025,7 @@ export async function installPlatformApiMock(
                 workspace_id: 2,
                 workspace_name: "Screening Team",
                 workspace_kind: "team",
-                role: "annotator",
+                role: access.workspaces.get(2)?.role,
               },
             ]
           : []),
@@ -1000,8 +1037,8 @@ export async function installPlatformApiMock(
       });
       await json(route, {
         user: {
-          id: manager ? 1 : 2,
-          username: manager ? "manager" : "alice",
+          id: access.userId,
+          username: access.username,
           display_name: manager
             ? "Project Manager"
             : role === "trainer"
@@ -1024,22 +1061,7 @@ export async function installPlatformApiMock(
         pathname: url.pathname,
         search: url.search,
       });
-      await json(route, {
-        preset: workspaceId === 1 ? "full_loop" : "annotation",
-        overrides: [],
-        effective:
-          workspaceId === 1
-            ? [
-                "annotation",
-                "lineage",
-                "export",
-                "training",
-                "inference",
-                "active_learning",
-              ]
-            : ["annotation", "lineage", "export"],
-        blocked: {},
-      });
+      await json(route, capabilitiesFor(access, workspaceId));
       return;
     }
     if (
@@ -1052,26 +1074,122 @@ export async function installPlatformApiMock(
         pathname: url.pathname,
         search: url.search,
       });
-      await json(route, workspaceId === 1 ? [roundWorkContext] : []);
+      await json(route, workspaceId === 1 && modulesFor(access, 1).effective.includes("annotate") && rounds[0].annotator_user_ids.includes(access.userId) ? [roundWorkContext] : []);
       return;
     }
-    if (
-      request.method() === "GET" &&
-      url.pathname === "/api/rounds/71/work-context"
-    ) {
-      requests.push({
-        method: request.method(),
-        pathname: url.pathname,
-        search: url.search,
+    const progressMatch = url.pathname.match(/^\/api\/projects\/(\d+)\/datasets\/annotation-progress$/);
+    if (request.method() === "GET" && progressMatch) {
+      const projectId = Number(progressMatch[1]);
+      const versions = [...datasetVersions, ...(releaseDatasetVersion ? [releaseDatasetVersion] : [])]
+        .filter((version) => version.project_id === projectId);
+      requests.push({ method: "GET", pathname: url.pathname, search: url.search });
+      return json(route, versions.map((version) => ({
+        dataset_id: version.dataset_id,
+        dataset_version_id: version.id,
+        total: version.item_count,
+        submitted: projectId === 1 ? submittedItemIds.size : 0,
+      })));
+    }
+    const predictionMatch = url.pathname.match(/^\/api\/projects\/1\/prediction-runs(?:\/(\d+)(?:\/(retry|results|download|review-round))?)?$/);
+    if (predictionMatch && ["GET", "POST"].includes(request.method())) {
+      const runId = predictionMatch[1] ? Number(predictionMatch[1]) : null;
+      const operation = predictionMatch[2];
+      const method = request.method();
+      const supported = method === "GET" ? !operation || operation === "results" || operation === "download" : runId === null || operation === "retry" || operation === "review-round";
+      if (!supported) return route.fallback();
+      const body: unknown = request.postData() ? request.postDataJSON() : null;
+      requests.push({ method, pathname: url.pathname, search: url.search, body });
+      if (method === "GET" && runId === null) return json(route, predictionRuns);
+      if (method === "POST" && runId === null) {
+        if (body === null || typeof body !== "object" || !("name" in body) || typeof body.name !== "string" || !("dataset_version_id" in body) || typeof body.dataset_version_id !== "number" || !("model_version_id" in body) || typeof body.model_version_id !== "number" || !("request_key" in body) || typeof body.request_key !== "string") return json(route, { detail: "Invalid prediction request" }, 422);
+        const existingId = predictionRequestIds.get(body.request_key);
+        const existing = predictionRuns.find((item) => item.id === existingId);
+        if (existing) return json(route, existing, 202);
+        const run: PredictionRun = {
+          id: 401 + predictionRuns.length, project_id: 1, name: body.name,
+          dataset_version_id: body.dataset_version_id, task_version_id: 12,
+          model_version_id: body.model_version_id, status: "queued", result_count: 0,
+          failure_reason: null, completed_at: null, created_at: timestamp,
+        };
+        predictionRuns.push(run);
+        predictionRequestIds.set(body.request_key, run.id);
+        return json(route, run, 202);
+      }
+      const run = predictionRuns.find((item) => item.id === runId);
+      if (!run) return json(route, { detail: "Prediction run not found" }, 404);
+      if (method === "POST" && operation === "retry") {
+        if (!["failed", "planned", "queued"].includes(run.status)) return json(route, { detail: "Only failed or queued prediction runs can be retried" }, 409);
+        run.status = "queued";
+        run.failure_reason = null;
+        return json(route, run, 202);
+      }
+      if (method === "GET" && !operation) {
+        run.status = "completed";
+        run.result_count = predictionRows.length;
+        run.completed_at = timestamp;
+        return json(route, run);
+      }
+      if (method === "GET" && operation === "results") {
+        const offset = Number(url.searchParams.get("offset") ?? 0);
+        const limit = Number(url.searchParams.get("limit") ?? 50);
+        if (!Number.isInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 200) return json(route, { detail: "Invalid results page" }, 422);
+        return json(route, { items: predictionRows.slice(offset, offset + limit), total: predictionRows.length, offset, limit });
+      }
+      if (method === "GET" && operation === "download") {
+        const format = url.searchParams.get("format") ?? "csv";
+        if (format !== "csv" && format !== "jsonl") return json(route, { detail: "Invalid prediction format" }, 422);
+        const fields = ["dataset_item_id", "stable_key", "title", "text", "prediction", "confidence", "uncertainty", "already_submitted", "protected"] satisfies (keyof PredictionResult)[];
+        const cell = (value: unknown): string => {
+          const text = typeof value === "object" && value !== null ? JSON.stringify(value) : String(value ?? "");
+          const safe = /^[=+\-@\t\r]/.test(text.trimStart()) ? `'${text}` : text;
+          return `"${safe.replaceAll('"', '""')}"`;
+        };
+        const content = format === "jsonl" ? predictionRows.map((item) => JSON.stringify(item)).join("\n") + "\n" : fields.join(",") + "\r\n" + predictionRows.map((item) => fields.map((field) => cell(item[field])).join(",")).join("\r\n") + "\r\n";
+        return route.fulfill({ status: 200, contentType: format === "jsonl" ? "application/x-ndjson" : "text/csv", headers: { "Content-Disposition": `attachment; filename="predictions-${run.id}.${format}"`, "Cache-Control": "no-store" }, body: content });
+      }
+      if (method === "POST" && operation === "review-round") {
+        if (body === null || typeof body !== "object" || !("name" in body) || typeof body.name !== "string" || !("dataset_item_ids" in body) || !Array.isArray(body.dataset_item_ids) || !("request_key" in body) || typeof body.request_key !== "string") return json(route, { detail: "Invalid review request" }, 422);
+        const previous = predictionReviews.get(body.request_key);
+        if (previous) return json(route, previous, 201);
+        const includeSubmitted = "include_submitted" in body && body.include_submitted === true;
+        const selectedIds = body.dataset_item_ids;
+        const selected = predictionRows.filter((item) => selectedIds.includes(item.dataset_item_id));
+        const accepted = selected.filter((item) => !item.protected && (includeSubmitted || !item.already_submitted));
+        if (!accepted.length) return json(route, { detail: "No eligible prediction results selected" }, 422);
+        const roundId = 78 + predictionReviews.size;
+        registerRound({ ...rounds[0], id: roundId, name: body.name, cycle_id: null, guideline_revision_id: null, dataset_version_id: run.dataset_version_id, feedback_set_version_id: 73, assistance_policy: "immediate_suggestions", status: "open", annotator_user_ids: [access.userId], open_to_all_annotators: false });
+        const review = { round_id: roundId, item_count: accepted.length, excluded_submitted: selected.filter((item) => !item.protected && item.already_submitted && !includeSubmitted).length, excluded_protected: selected.filter((item) => item.protected).length };
+        predictionReviews.set(body.request_key, review);
+        return json(route, review, 201);
+      }
+    }
+    const contextMatch = url.pathname.match(/^\/api\/rounds\/(\d+)\/work-context$/);
+    if (request.method() === "GET" && contextMatch) {
+      const round = activeRounds.find((item) => item.id === Number(contextMatch[1]));
+      const workspace = url.searchParams.get("workspace_id");
+      requests.push({ method: request.method(), pathname: url.pathname, search: url.search });
+      if (!round || (workspace !== null && Number(workspace) !== access.projects.get(Number(round.project_id))?.workspaceId)) return json(route, { detail: "Annotation round not found" }, 404);
+      if (!modulesFor(access, Number(round.project_id)).effective.includes("annotate")) return json(route, { detail: "None of the required project modules are enabled or available: annotate" }, 403);
+      if (!["manager", "admin"].includes(access.workspaces.get(access.projects.get(Number(round.project_id))?.workspaceId ?? 1)?.role ?? "") && !round.open_to_all_annotators && !(Array.isArray(round.annotator_user_ids) && round.annotator_user_ids.includes(access.userId))) return json(route, { detail: "Current user is not assigned to this annotation round" }, 403);
+      return json(route, {
+        ...roundWorkContext,
+        round: {
+          id: round.id, project_id: round.project_id, name: round.name, sequence: round.sequence,
+          dataset_version_id: round.dataset_version_id, task_version_id: round.task_version_id,
+          assistance_policy: round.assistance_policy,
+          feedback_available: round.feedback_set_version_id != null && round.assistance_policy !== "blind",
+          status: round.status, opened_at: round.opened_at ?? null, closed_at: round.closed_at ?? null,
+          created_at: round.created_at, updated_at: round.updated_at,
+        },
+        cycle: round.cycle_id == null ? null : roundWorkContext.cycle,
+        guideline: round.guideline_revision_id == null ? null : roundWorkContext.guideline,
       });
-      await json(route, roundWorkContext);
-      return;
     }
     if (
       request.method() === "GET" &&
       url.pathname === "/api/projects/1/feedback-runs/74"
     ) {
-      const current = activeFeedbackRuns.find((run) => run.id === 74);
+      const current = activeFeedbackRuns.find((run) => run.id === 74 && run.project_id === 1);
       if (!current) {
         await json(route, { detail: "Feedback run not found" }, 404);
         return;
@@ -1113,38 +1231,6 @@ export async function installPlatformApiMock(
         search: url.search,
       });
       await json(route, completed);
-      return;
-    }
-    if (
-      request.method() === "GET" &&
-      createdRoundId !== null &&
-      url.pathname === `/api/rounds/${createdRoundId}/work-context`
-    ) {
-      const createdRound = activeRounds.find((round) => round.id === createdRoundId);
-      requests.push({
-        method: request.method(),
-        pathname: url.pathname,
-        search: url.search,
-      });
-      await json(route, {
-        project: { id: 1, name: platformProject.name },
-        round: {
-          ...createdRound,
-          feedback_available: true,
-        },
-        task: {
-          id: taskDefinitions[0].id,
-          key: taskDefinitions[0].key,
-          name: taskDefinitions[0].name,
-        },
-        task_version: taskVersions[0],
-        cycle: {
-          id: cycles[0].id,
-          name: cycles[0].name,
-          sequence: cycles[0].sequence,
-        },
-        guideline: null,
-      });
       return;
     }
     if (
@@ -1213,9 +1299,8 @@ export async function installPlatformApiMock(
       });
       await json(
         route,
-        workspaceId === 1
-          ? [platformProject, ...(releaseProject ? [releaseProject] : [])]
-          : [],
+        [project, ...(releaseProject ? [releaseProject] : [])]
+          .filter((item) => item.workspace_id === workspaceId).map(projectResponse),
       );
       return;
     }
@@ -1245,8 +1330,8 @@ export async function installPlatformApiMock(
         const run = {
           id: 74,
           ...payload,
-          project_id: 1,
-          producer_type: "registered_model",
+          project_id: Number(payload.project_id ?? 1),
+          producer_type: payload.producer_type ?? "registered_model",
           provider: null,
           external_model_id: null,
           exact_revision: null,
@@ -1258,7 +1343,7 @@ export async function installPlatformApiMock(
           started_at: null,
           heartbeat_at: null,
           completed_at: null,
-          created_by_user_id: 1,
+          created_by_user_id: access.userId,
           created_at: timestamp,
           updated_at: timestamp,
         };
@@ -1273,7 +1358,9 @@ export async function installPlatformApiMock(
       if (
         url.pathname === "/api/projects/1/feedback-runs/74/materialize"
       ) {
-        const run = activeFeedbackRuns.find((item) => item.id === 74);
+        const run = activeFeedbackRuns.find((item) => item.id === 74 && item.project_id === 1);
+        if (!run) return json(route, { detail: "Feedback run not found" }, 404);
+        if (run.producer_type !== "registered_model") return json(route, { detail: "Only registered_model feedback runs can be materialized" }, 422);
         const queued = {
           ...run,
           status: "queued",
@@ -1325,7 +1412,7 @@ export async function installPlatformApiMock(
         const round = {
           id: 78,
           ...payload,
-          project_id: 1,
+          project_id: Number(payload.project_id ?? 1),
           sequence: 5,
           status: "draft",
           opened_at: null,
@@ -1355,7 +1442,9 @@ export async function installPlatformApiMock(
         return;
       }
 
-      if (releaseGateEnabled && url.pathname === "/api/projects") {
+      if (url.pathname === "/api/projects") {
+        const settings = payload.settings && typeof payload.settings === "object" && !Array.isArray(payload.settings) ? payload.settings : {};
+        access.projects.set(2, { workspaceId: Number(payload.workspace_id ?? 1), modules: selectedModules("modules" in settings ? settings.modules : undefined) });
         releaseProject = {
           id: 2,
           name: String(payload.name ?? "Public benchmark training"),
@@ -1367,14 +1456,13 @@ export async function installPlatformApiMock(
           annotation_validation_mode:
             payload.annotation_validation_mode ?? "strict",
           tasks: [],
-          settings: payload.settings ?? {
-            modules: ["data", "train", "models", "activity"],
-            project_purpose: "training_only",
-          },
+          workflow_task_count: 0,
+          workflow_round_count: 0,
+          settings,
           workspace_id: Number(payload.workspace_id ?? 1),
         };
         capture();
-        await json(route, releaseProject, 201);
+        await json(route, projectResponse(releaseProject), 200);
         return;
       }
       if (
@@ -1627,6 +1715,8 @@ export async function installPlatformApiMock(
           response = {
             ...registeredModels[0],
             id: 84,
+            project_id: Number(payload.project_id ?? 1),
+            created_by_user_id: access.userId,
             name: String(payload.name ?? "New model"),
           };
         }
@@ -1741,7 +1831,7 @@ export async function installPlatformApiMock(
       }
       if (response !== undefined) {
         capture();
-        await json(route, response);
+        await json(route, response, ["/api/models", "/api/training-runs"].includes(url.pathname) ? 201 : 200);
         return;
       }
     }
@@ -1750,57 +1840,33 @@ export async function installPlatformApiMock(
       return;
     }
 
+    if (/^\/api\/workspaces\/1\/(?:training-contexts|training-runs|models)$/.test(url.pathname)) {
+      const effective = modulesFor(access, 1).effective;
+      const eligible = effective.includes("train");
+      const releaseModules = modulesFor(access, 2).effective;
+      const releaseInWorkspace = access.projects.get(2)?.workspaceId === 1;
+      const gateContext = releaseInWorkspace && releaseModules.includes("train") ? releaseContext() : null;
+      const gateRun = releaseInWorkspace && releaseModules.some((module) => ["train", "activity"].includes(module)) ? releaseWorkspaceRun() : null;
+      const gateModel = releaseInWorkspace && releaseModules.some((module) => ["models", "train", "learning"].includes(module)) ? releaseWorkspaceModel() : null;
+      let response: unknown;
+      if (url.pathname.endsWith("training-contexts")) {
+        const rows = [...(eligible ? workspaceTrainingContexts.items.map((item) => ({ ...item, effective_modules: effective })) : []), ...(gateContext ? [gateContext] : [])];
+        response = pageByDescendingId(rows, url, (item) => Number(item.project_id), (item) => Number(item.project_id));
+      } else if (url.pathname.endsWith("training-runs")) {
+        const rows = [...(effective.some((module) => ["train", "activity"].includes(module)) ? runRows : []), ...(gateRun ? [gateRun] : [])];
+        response = pageByDescendingId(rows, url, (item) => Number(item.id), (item) => Number(item.project_id));
+      } else {
+        const rows = [...(effective.some((module) => ["models", "train", "learning"].includes(module)) ? modelRows : []), ...(gateModel ? [gateModel] : [])];
+        response = pageByDescendingId(rows, url, (item) => Number(item.id), (item) => Number(item.project_id));
+      }
+      requests.push({ method: "GET", pathname: url.pathname, search: url.search });
+      return json(route, response);
+    }
+    if (releaseProject && url.pathname === "/api/projects/2") return json(route, projectResponse(releaseProject));
+    if (releaseProject && url.pathname === "/api/projects/2/modules") return json(route, modulesFor(access, 2));
     if (releaseGateEnabled) {
       let releaseResponse: unknown;
-      if (
-        url.pathname === "/api/workspaces/1/training-contexts" &&
-        releaseProject
-      ) {
-        releaseResponse = {
-          items: [
-            ...workspaceTrainingContexts.items,
-            ...(releaseContext() ? [releaseContext()] : []),
-          ],
-          next_cursor: null,
-        };
-      } else if (url.pathname === "/api/workspaces/1/training-runs") {
-        const projectFilter = Number(url.searchParams.get("project_id") ?? 0);
-        const gateRun = releaseWorkspaceRun();
-        releaseResponse = {
-          items: [
-            ...(projectFilter === 2 ? [] : workspaceTrainingRuns.items),
-            ...(gateRun && projectFilter !== 1 ? [gateRun] : []),
-          ],
-          next_cursor: null,
-        };
-      } else if (url.pathname === "/api/workspaces/1/models") {
-        const projectFilter = Number(url.searchParams.get("project_id") ?? 0);
-        const gateModel = releaseWorkspaceModel();
-        releaseResponse = {
-          items: [
-            ...(projectFilter === 2 ? [] : workspaceModels.items),
-            ...(gateModel && projectFilter !== 1 ? [gateModel] : []),
-          ],
-          next_cursor: null,
-        };
-      } else if (url.pathname === "/api/projects/2" && releaseProject) {
-        releaseResponse = releaseProject;
-      } else if (
-        url.pathname === "/api/projects/2/modules" &&
-        releaseProject
-      ) {
-        releaseResponse = {
-          project_id: 2,
-          selected: ["data", "train", "models", "activity"],
-          effective: ["data", "train", "models", "activity"],
-          workspace_capabilities: [
-            "training",
-            "lineage",
-            "export",
-            "inference",
-          ],
-        };
-      } else if (url.pathname === "/api/projects/2/base-models") {
+      if (url.pathname === "/api/projects/2/base-models") {
         releaseResponse = [];
       } else if (
         url.pathname === "/api/models/281/versions/282/evaluations"
@@ -1865,40 +1931,16 @@ export async function installPlatformApiMock(
     }
 
     const responses = new Map<string, unknown>([
-      ["/api/workspaces/1/training-contexts", workspaceTrainingContexts],
-      ["/api/workspaces/1/training-runs", workspaceTrainingRuns],
-      ["/api/workspaces/1/models", workspaceModels],
-      [
-        "/api/projects/1/modules",
-        {
-          project_id: 1,
-          selected: [
-            "data",
-            "annotate",
-            "learning",
-            "train",
-            "models",
-            "guidelines",
-            "activity",
-          ],
-          effective: [
-            "data",
-            "annotate",
-            "learning",
-            "train",
-            "models",
-            "guidelines",
-            "activity",
-          ],
-          workspace_capabilities: [
-            "annotation",
-            "training",
-            "lineage",
-            "active_learning",
-            "co_learning",
-          ],
-        },
-      ],
+      ["/api/projects/1", projectResponse(project)],
+      ["/api/projects/my-work", [project, ...(releaseProject ? [releaseProject] : [])]
+        .filter((item) => item.workspace_id === Number(url.searchParams.get("workspace_id") ?? 1))
+        .filter((item) => evidence.assignments.some((assignment) => assignment.project_id === item.id
+          && assignment.assignee_user_id === access.userId && assignment.status !== "withdrawn")
+          || activeRounds.some((round) => round.project_id === item.id && round.status === "open"
+            && (round.open_to_all_annotators || (Array.isArray(round.annotator_user_ids)
+              && round.annotator_user_ids.includes(access.userId)))))
+        .map((item) => ({ ...projectResponse(item), settings: {} }))],
+      ["/api/projects/1/modules", modulesFor(access, 1)],
       ["/api/tasks", taskDefinitions],
       ["/api/projects/1/tasks", platformProject.tasks],
       ["/api/tasks/versions", taskVersions],
@@ -1940,5 +1982,5 @@ export async function installPlatformApiMock(
     });
     await json(route, responses.get(url.pathname));
   });
-  return { requests, evidence };
+  return { requests, evidence, registerRound, registerSubmittedItems };
 }

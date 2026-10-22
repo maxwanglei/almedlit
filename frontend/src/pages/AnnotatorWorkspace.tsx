@@ -48,6 +48,7 @@ import type {
   AnnotationWorkbench,
   AnnotationWorkbenchTask,
   Document,
+  DocumentSummary,
   LabelDef,
   Project,
   ProjectProgress,
@@ -172,7 +173,7 @@ interface AnnotatorWorkspaceProps {
   selectedProject: Project | null;
   selectedProjectId: number | null;
   setSelectedProjectId: (projectId: number) => void;
-  documents: Document[];
+  documents: DocumentSummary[];
   assignments: TaskAssignment[];
   annotatorId: string;
   roundContexts?: RoundWorkContext[];
@@ -414,11 +415,11 @@ function displayStatus(status: string): string {
   return status.replace(/_/g, " ");
 }
 
-function documentTitle(documentItem: Document): string {
+function documentTitle(documentItem: DocumentSummary): string {
   return documentItem.title ?? documentItem.external_id ?? `Document ${documentItem.id}`;
 }
 
-function externalId(documentItem: Document): string {
+function externalId(documentItem: DocumentSummary): string {
   return documentItem.external_id ?? `DOC-${documentItem.id}`;
 }
 
@@ -448,6 +449,13 @@ function statusForAssignments(assignments: TaskAssignment[]): QueueStatus {
     return "partial";
   }
   return "todo";
+}
+
+function hasDocumentContent(document: DocumentSummary): document is Document {
+  return "text" in document && typeof document.text === "string" &&
+    "sentences" in document && Array.isArray(document.sentences) &&
+    document.sentences.every((span: unknown) => Array.isArray(span) &&
+      span.every((offset: unknown) => typeof offset === "number"));
 }
 
 function sentenceRangesFor(
@@ -839,10 +847,10 @@ export default function AnnotatorWorkspace({
     return statuses;
   }, [assignmentsByDocument, visibleDocuments]);
 
-  const selectedDocument =
-    documents.find((documentItem) => documentItem.id === selectedDocumentId) ??
-    activeWorkbench?.document ??
-    null;
+  const listedDocument = documents.find((documentItem) => documentItem.id === selectedDocumentId);
+  const selectedDocument = activeWorkbench?.document ?? (
+    listedDocument && hasDocumentContent(listedDocument) ? listedDocument : null
+  );
   const currentDocumentAssignments = useMemo(
     () => (selectedDocument ? assignmentsByDocument.get(selectedDocument.id) ?? [] : []),
     [assignmentsByDocument, selectedDocument],

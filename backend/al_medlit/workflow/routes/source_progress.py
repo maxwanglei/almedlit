@@ -1,6 +1,6 @@
 """Read-only annotation progress for the dataset registry."""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -27,8 +27,9 @@ class SourceAnnotationProgress(BaseModel):
 )
 def get_annotation_progress(
     project_id: int,
+    task_version_id: int | None = Query(default=None, ge=1),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     _read(db, current_user, project_id, min_role="trainer", module="data")
-    return annotation_progress(db, project_id)
+    return annotation_progress(db, project_id, task_version_id)

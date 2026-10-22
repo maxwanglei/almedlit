@@ -189,6 +189,7 @@ def transition_guideline_revision(
                 models.GuidelineImpactEvaluation.guideline_revision_id == revision.id,
                 models.GuidelineImpactEvaluation.status == "completed",
                 models.GuidelineImpactEvaluation.passed.is_(True),
+                models.GuidelineImpactEvaluation.protected_split_map_id.is_(None),
             )
             .first()
         )
@@ -323,12 +324,8 @@ def create_guideline_impact(
     if pilot_round.guideline_revision_id != revision.id:
         raise ValidationError("Pilot round must pin the evaluated guideline revision")
     if data.protected_split_map_id is not None:
-        _scoped(
-            db,
-            models.SplitMap,
-            data.protected_split_map_id,
-            data.project_id,
-            "Protected split map",
+        raise ValidationError(
+            "Protected split evaluation is not supported by pilot agreement evaluations"
         )
     evaluation = models.GuidelineImpactEvaluation(**data.model_dump(), created_by_user_id=actor.id)
     db.add(evaluation)
@@ -380,6 +377,10 @@ def complete_guideline_impact(
     )
     if evaluation.status == "completed":
         raise ConflictError("Guideline impact evaluation is already completed")
+    if evaluation.protected_split_map_id is not None:
+        raise ValidationError(
+            "Protected split evaluation is not supported by pilot agreement evaluations"
+        )
     pilot_round = _scoped(
         db,
         models.AnnotationRound,

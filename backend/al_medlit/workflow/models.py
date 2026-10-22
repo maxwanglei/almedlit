@@ -9,12 +9,14 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
     event,
     inspect,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -483,6 +485,12 @@ class AnnotationRound(Base, IntPrimaryKeyMixin, TimestampMixin):
             name="uq_annotation_rounds_cycle_sequence",
         ),
         CheckConstraint("sequence > 0", name="ck_annotation_rounds_positive_sequence"),
+        Index(
+            "uq_annotation_rounds_project_sequence_without_cycle",
+            "project_id", "sequence", unique=True,
+            postgresql_where=text("cycle_id IS NULL"),
+            sqlite_where=text("cycle_id IS NULL"),
+        ),
     )
 
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), index=True)

@@ -81,6 +81,7 @@ def create_submission(
     project_id: int,
     document_id: int,
     data: SubmissionCreate,
+    actor: User | None = None,
 ) -> AnnotationSubmission:
     project = db.get(Project, project_id)
     if project is None:
@@ -138,14 +139,10 @@ def create_submission(
             .first()
         )
         if evidence_assignment is not None:
-            raise ValidationError(
-                "assignment_id is required when submitting evidence-block work"
-            )
+            raise ValidationError("assignment_id is required when submitting evidence-block work")
         if project.workspace.kind == "team":
             project_has_assignments = (
-                db.query(TaskAssignment.id)
-                .filter(TaskAssignment.project_id == project_id)
-                .first()
+                db.query(TaskAssignment.id).filter(TaskAssignment.project_id == project_id).first()
                 is not None
             )
             actor_has_assignment = (
@@ -159,9 +156,7 @@ def create_submission(
                 is not None
             )
             if project_has_assignments and not actor_has_assignment:
-                raise ValidationError(
-                    "assignment_id is required for assignment-managed team work"
-                )
+                raise ValidationError("assignment_id is required for assignment-managed team work")
     if assignment is not None and assignment.task.annotation_type == "evidence_block":
         from al_medlit.evidence.service import (
             _lock_evidence_scope,
@@ -207,8 +202,7 @@ def create_submission(
             .all()
         )
         if actor_assignments and not any(
-            candidate.status in OPEN_ASSIGNMENT_STATUSES
-            for candidate in actor_assignments
+            candidate.status in OPEN_ASSIGNMENT_STATUSES for candidate in actor_assignments
         ):
             raise ConflictError("All task assignments for this document are finalized")
 
@@ -218,7 +212,7 @@ def create_submission(
         document=document,
         annotator_user_id=annotator_user_id,
         annotator_id=annotator_id,
-        user=annotator_user,
+        user=actor if actor is not None else annotator_user,
         assignment=assignment,
     )
     payload = json.dumps(snapshot, indent=2, ensure_ascii=False).encode("utf-8")
@@ -231,9 +225,7 @@ def create_submission(
         annotator_user_id=annotator_user_id,
         annotator_id=annotator_id,
         kind=data.kind,
-        storage_key=(
-            f"projects/{project_id}/documents/{document_id}/submission-{token}.json"
-        ),
+        storage_key=(f"projects/{project_id}/documents/{document_id}/submission-{token}.json"),
         file_name=f"project-{project_id}-document-{document_id}-{token[:8]}.json",
         content_type="application/json",
         size_bytes=len(payload),
@@ -268,15 +260,21 @@ def create_submission(
             )
 
     storage_key = submission.storage_key
+    commit_attempted = False
     try:
-        # Treat the key as potentially published before calling storage: an
-        # implementation may persist the object and then raise (for example,
-        # after a failed acknowledgement). In every pre-commit failure case,
-        # roll back the database unit of work and best-effort remove the key.
         storage.put_bytes(storage_key, payload, content_type="application/json")
+        commit_attempted = True
         db.commit()
-    except Exception:
+    except Exception as failure:
         db.rollback()
+        if commit_attempted:
+            storage_reclaim_service.record_orphaned_object(
+                db,
+                storage_key,
+                origin="submission.create_rollback",
+                error=failure,
+            )
+            raise
         try:
             storage.delete(storage_key)
         except Exception as storage_error:
@@ -307,9 +305,7 @@ def list_submissions(
 ) -> list[AnnotationSubmission]:
     if db.get(Project, project_id) is None:
         raise NotFoundError("Project not found")
-    query = db.query(AnnotationSubmission).filter(
-        AnnotationSubmission.project_id == project_id
-    )
+    query = db.query(AnnotationSubmission).filter(AnnotationSubmission.project_id == project_id)
     if document_id is not None:
         query = query.filter(AnnotationSubmission.document_id == document_id)
     if annotator_user_id is not None:
@@ -319,20 +315,24 @@ def list_submissions(
     if kind is not None:
         query = query.filter(AnnotationSubmission.kind == kind)
     if user is not None:
-        query = query.join(
-            Project,
-            Project.id == AnnotationSubmission.project_id,
-        ).join(
-            Document,
-            Document.id == AnnotationSubmission.document_id,
-        ).filter(
-            Document.project_id == AnnotationSubmission.project_id,
-            resource_access_clause(
-                user,
-                workspace_id=Project.workspace_id,
-                project_id=AnnotationSubmission.project_id,
-                document_id=AnnotationSubmission.document_id,
-                owner_user_id=AnnotationSubmission.annotator_user_id,
+        query = (
+            query.join(
+                Project,
+                Project.id == AnnotationSubmission.project_id,
+            )
+            .join(
+                Document,
+                Document.id == AnnotationSubmission.document_id,
+            )
+            .filter(
+                Document.project_id == AnnotationSubmission.project_id,
+                resource_access_clause(
+                    user,
+                    workspace_id=Project.workspace_id,
+                    project_id=AnnotationSubmission.project_id,
+                    document_id=AnnotationSubmission.document_id,
+                    owner_user_id=AnnotationSubmission.annotator_user_id,
+                ),
             )
         )
     return query.order_by(AnnotationSubmission.created_at.desc()).all()

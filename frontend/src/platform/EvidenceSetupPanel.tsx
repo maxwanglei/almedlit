@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
-  listDocuments,
+  listDocumentSummaries,
   listEvidenceTargets,
   listGuidelineVersions,
   listProjectTasks,
@@ -10,7 +10,7 @@ import {
   rebuildDocumentStructure,
 } from "@/api/client";
 import type {
-  Document,
+  DocumentSummary,
   EvidenceTarget,
   GuidelineVersion,
   ProjectTask,
@@ -26,7 +26,7 @@ import { PlatformSection } from "./components";
 interface SetupData {
   tasks: ProjectTask[];
   targets: EvidenceTarget[];
-  documents: Document[];
+  documents: DocumentSummary[];
   members: WorkspaceMember[];
   assignments: TaskAssignment[];
   guidelines: GuidelineVersion[];
@@ -64,7 +64,7 @@ function ProjectEvidenceSetup({ projectId, workspaceId, busy = false, onChanged,
       const [tasks, targets, documents, members, assignments, guidelines] = await Promise.all([
         listProjectTasks(projectId),
         listEvidenceTargets(projectId),
-        listDocuments(projectId, { scope: "all" }),
+        listDocumentSummaries(projectId, { scope: "all" }),
         listWorkspaceMembers(workspaceId),
         listTaskAssignments(projectId, { scope: "all" }),
         listGuidelineVersions(projectId),
@@ -93,7 +93,7 @@ function ProjectEvidenceSetup({ projectId, workspaceId, busy = false, onChanged,
     if (mounted.current) await onChanged();
   }
 
-  async function prepareDocument(document: Document): Promise<void> {
+  async function prepareDocument(document: DocumentSummary): Promise<void> {
     if (busy || loading || preparing) return;
     setPreparing(true);
     setError(null);

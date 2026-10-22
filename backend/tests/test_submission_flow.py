@@ -107,9 +107,7 @@ def test_submitted_ordinary_assignment_is_immutable_and_not_resubmittable(client
     document_id = ctx["document"]["id"]
     assignment_id = ctx["assignment"]["id"]
     alice_headers = {"Authorization": f"Bearer {client._token_for('alice')}"}
-    submission_url = (
-        f"/api/projects/{project_id}/documents/{document_id}/submissions"
-    )
+    submission_url = f"/api/projects/{project_id}/documents/{document_id}/submissions"
 
     submitted = client.post(
         submission_url,
@@ -235,13 +233,9 @@ def test_new_versions_allow_a_fresh_assignment_round_and_scoped_snapshot(
     )
     assert second_assignment_response.status_code == 200, second_assignment_response.text
     second_assignment = second_assignment_response.json()
-    assert second_assignment["assignment_scope_key"] != first_assignment[
-        "assignment_scope_key"
-    ]
+    assert second_assignment["assignment_scope_key"] != first_assignment["assignment_scope_key"]
     assert second_assignment["guideline_version_id"] == second_guideline["id"]
-    assert second_assignment["structure_version_id"] == rebuilt.json()[
-        "structure_version"
-    ]["id"]
+    assert second_assignment["structure_version_id"] == rebuilt.json()["structure_version"]["id"]
 
     second_annotation = client.post(
         "/api/annotations",
@@ -266,9 +260,7 @@ def test_new_versions_allow_a_fresh_assignment_round_and_scoped_snapshot(
     )
     assert submitted.status_code == 200, submitted.text
     snapshot = json.loads(object_storage.get_bytes(submitted.json()["storage_key"]))
-    assert [item["id"] for item in snapshot["annotations"]] == [
-        second_annotation.json()["id"]
-    ]
+    assert [item["id"] for item in snapshot["annotations"]] == [second_annotation.json()["id"]]
 
 
 def test_open_assignment_keeps_its_version_pin_until_the_round_is_finalized(
@@ -328,9 +320,7 @@ def test_open_assignment_keeps_its_version_pin_until_the_round_is_finalized(
         },
     )
     assert next_round.status_code == 200, next_round.text
-    assert next_round.json()["structure_version_id"] == rebuilt.json()[
-        "structure_version"
-    ]["id"]
+    assert next_round.json()["structure_version_id"] == rebuilt.json()["structure_version"]["id"]
     next_annotation = client.post(
         "/api/annotations",
         json={
@@ -346,18 +336,13 @@ def test_open_assignment_keeps_its_version_pin_until_the_round_is_finalized(
     )
     assert next_annotation.status_code == 200, next_annotation.text
     submitted = client.post(
-        (
-            f"/api/projects/{ctx['project']['id']}"
-            f"/documents/{ctx['document']['id']}/submissions"
-        ),
+        (f"/api/projects/{ctx['project']['id']}/documents/{ctx['document']['id']}/submissions"),
         json={"assignment_id": next_round.json()["id"]},
         headers=alice_headers,
     )
     assert submitted.status_code == 200, submitted.text
     snapshot = json.loads(object_storage.get_bytes(submitted.json()["storage_key"]))
-    assert [item["id"] for item in snapshot["annotations"]] == [
-        next_annotation.json()["id"]
-    ]
+    assert [item["id"] for item in snapshot["annotations"]] == [next_annotation.json()["id"]]
 
 
 def test_submit_uses_token_identity_and_leaves_other_assignments_open(client):
@@ -407,10 +392,7 @@ def test_submit_uses_token_identity_and_leaves_other_assignments_open(client):
 def test_assignment_managed_team_rejects_assignmentless_manager_submission(client):
     ctx = _setup_project_with_annotation(client)
     response = client.post(
-        (
-            f"/api/projects/{ctx['project']['id']}"
-            f"/documents/{ctx['document']['id']}/submissions"
-        ),
+        (f"/api/projects/{ctx['project']['id']}/documents/{ctx['document']['id']}/submissions"),
         json={},
     )
     assert response.status_code == 422
@@ -490,7 +472,7 @@ def test_submit_unknown_document_returns_404(client):
     assert response.status_code == 404
 
 
-def test_submission_commit_failure_removes_written_object_and_rolls_back(
+def test_submission_commit_failure_defers_object_cleanup_and_rolls_back(
     client,
     db,
     object_storage,
@@ -499,26 +481,31 @@ def test_submission_commit_failure_removes_written_object_and_rolls_back(
     from sqlalchemy.orm import Session
 
     from al_medlit.project.models import TaskAssignment
+    from al_medlit.storage_reclaim.models import OrphanedStorageObject
     from al_medlit.submission.models import AnnotationSubmission
 
     ctx = _setup_project_with_annotation(client)
     original_commit = Session.commit
 
+    failed = False
+
     def fail_commit(_session):
-        raise RuntimeError("forced submission commit failure")
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError("forced submission commit failure")
+        return original_commit(_session)
 
     monkeypatch.setattr(Session, "commit", fail_commit)
     with pytest.raises(RuntimeError, match="forced submission commit failure"):
         client.post(
-            (
-                f"/api/projects/{ctx['project']['id']}"
-                f"/documents/{ctx['document']['id']}/submissions"
-            ),
+            (f"/api/projects/{ctx['project']['id']}/documents/{ctx['document']['id']}/submissions"),
             json={"annotator_id": "alice"},
         )
     monkeypatch.setattr(Session, "commit", original_commit)
 
-    assert not [path for path in object_storage.root.rglob("*") if path.is_file()]
+    queued = db.query(OrphanedStorageObject).one()
+    assert object_storage.get_bytes(queued.storage_key)
     assert db.query(AnnotationSubmission).count() == 0
     assignment = db.get(TaskAssignment, ctx["assignment"]["id"])
     db.refresh(assignment)
@@ -544,10 +531,7 @@ def test_submission_storage_failure_after_publish_cleans_object_and_rolls_back(
     monkeypatch.setattr(object_storage, "put_bytes", store_then_fail)
     with pytest.raises(RuntimeError, match="post-publish storage failure"):
         client.post(
-            (
-                f"/api/projects/{ctx['project']['id']}"
-                f"/documents/{ctx['document']['id']}/submissions"
-            ),
+            (f"/api/projects/{ctx['project']['id']}/documents/{ctx['document']['id']}/submissions"),
             json={"annotator_id": "alice"},
         )
 
@@ -581,10 +565,7 @@ def test_submission_create_queues_object_when_rollback_cleanup_fails(
     monkeypatch.setattr(object_storage, "delete", fail_delete)
     with pytest.raises(RuntimeError, match="post-publish storage failure"):
         client.post(
-            (
-                f"/api/projects/{ctx['project']['id']}"
-                f"/documents/{ctx['document']['id']}/submissions"
-            ),
+            (f"/api/projects/{ctx['project']['id']}/documents/{ctx['document']['id']}/submissions"),
             json={"annotator_id": "alice"},
         )
 
@@ -734,10 +715,7 @@ def test_submission_delete_remains_committed_when_storage_cleanup_fails(
 
     ctx = _setup_project_with_annotation(client)
     submission = client.post(
-        (
-            f"/api/projects/{ctx['project']['id']}"
-            f"/documents/{ctx['document']['id']}/submissions"
-        ),
+        (f"/api/projects/{ctx['project']['id']}/documents/{ctx['document']['id']}/submissions"),
         json={"kind": "re_export"},
     ).json()
 
@@ -802,7 +780,5 @@ def test_submission_reference_blocks_assignment_delete_and_reassignment(client):
         json={"annotator_id": "bob"},
     )
     assert reassigned.status_code == 409
-    deleted = client.delete(
-        f"/api/projects/{project['id']}/assignments/{assignment['id']}"
-    )
+    deleted = client.delete(f"/api/projects/{project['id']}/assignments/{assignment['id']}")
     assert deleted.status_code == 409

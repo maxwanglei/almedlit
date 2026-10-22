@@ -15,6 +15,7 @@ import type {
   CorpusSnapshot,
   CorpusSnapshotCreate,
   Document,
+  DocumentSummary,
   DocumentStructureRead,
   EvidenceAdjudicationCreate,
   EvidenceAdjudicationRead,
@@ -280,15 +281,38 @@ export function updateProject(projectId: number, payload: ProjectUpdate): Promis
   });
 }
 
-export function listDocuments(
+async function listDocumentPages<T extends DocumentSummary>(
   projectId: number,
-  options: { scope?: AssignmentScope } = {},
-): Promise<Document[]> {
+  options: { scope?: AssignmentScope; summary?: boolean },
+): Promise<T[]> {
   const params = new URLSearchParams({ project_id: String(projectId) });
   if (options.scope !== undefined) {
     params.set("scope", options.scope);
   }
-  return request<Document[]>(`/documents?${params.toString()}`);
+  params.set("limit", "100");
+  if (options.summary) params.set("summary", "true");
+  const documents: T[] = [];
+  let page: T[];
+  do {
+    params.set("offset", String(documents.length));
+    page = await request<T[]>(`/documents?${params.toString()}`);
+    documents.push(...page);
+  } while (page.length === 100);
+  return documents;
+}
+
+export function listDocuments(
+  projectId: number,
+  options: { scope?: AssignmentScope } = {},
+): Promise<Document[]> {
+  return listDocumentPages<Document>(projectId, options);
+}
+
+export function listDocumentSummaries(
+  projectId: number,
+  options: { scope?: AssignmentScope } = {},
+): Promise<DocumentSummary[]> {
+  return listDocumentPages<DocumentSummary>(projectId, { ...options, summary: true });
 }
 
 export interface DocumentStructureQuery {
@@ -954,8 +978,18 @@ export function launchInferenceRun(
   });
 }
 
+async function listInferencePages<T>(path: string): Promise<T[]> {
+  const items: T[] = [];
+  let page: T[];
+  do {
+    page = await request<T[]>(`${path}?limit=100&offset=${items.length}`);
+    items.push(...page);
+  } while (page.length === 100);
+  return items;
+}
+
 export function listInferenceRuns(projectId: number): Promise<InferenceRun[]> {
-  return request<InferenceRun[]>(`/projects/${projectId}/inference/runs`);
+  return listInferencePages<InferenceRun>(`/projects/${projectId}/inference/runs`);
 }
 
 export function getInferenceRun(runId: number): Promise<InferenceRun> {
@@ -969,7 +1003,7 @@ export function cancelInferenceRun(runId: number): Promise<InferenceRun> {
 }
 
 export function listInferenceWindows(runId: number): Promise<InferenceWindow[]> {
-  return request<InferenceWindow[]>(`/inference/runs/${runId}/windows`);
+  return listInferencePages<InferenceWindow>(`/inference/runs/${runId}/windows`);
 }
 
 export interface InferencePredictionFilters {
@@ -1152,7 +1186,10 @@ export function rotateWorkspaceJoinCode(
 }
 
 export function getInvitePreview(token: string): Promise<InvitePreview> {
-  return request<InvitePreview>(`/invites/${encodeURIComponent(token)}`);
+  return request<InvitePreview>("/invites/preview", {
+    method: "POST",
+    body: JSON.stringify({ token }),
+  });
 }
 
 /**
@@ -1166,10 +1203,10 @@ export async function acceptInvite(
   payload: InviteAcceptPayload = {},
 ): Promise<void> {
   await request<{ authenticated: boolean }>(
-    `/invites/${encodeURIComponent(token)}/accept`,
+    "/invites/accept",
     {
       method: "POST",
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ ...payload, token }),
     },
     payload.username && payload.password
       ? "reject-credentials"
@@ -1314,7 +1351,8 @@ export function getAccountActionPreview(
   token: string,
 ): Promise<AccountActionPreview> {
   return request<AccountActionPreview>(
-    `/account-actions/${encodeURIComponent(token)}`,
+    "/account-actions/preview",
+    { method: "POST", body: JSON.stringify({ token }) },
   );
 }
 
@@ -1323,10 +1361,10 @@ export async function completeAccountAction(
   password: string,
 ): Promise<void> {
   await request<{ authenticated: boolean }>(
-    `/account-actions/${encodeURIComponent(token)}`,
+    "/account-actions/complete",
     {
       method: "POST",
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({ token, password }),
     },
   );
   publishSessionChange(true);

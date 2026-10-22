@@ -18,6 +18,7 @@ from .common import (
     _commit,
     _FeedbackEventLineage,
     _project,
+    _require_actor_role,
     _scoped,
 )
 from .holdouts import lock_holdout_policy, validate_annotation_assistance
@@ -480,6 +481,7 @@ def create_feedback_event(
     db: Session, data: schemas.FeedbackEventCreate, actor: User
 ) -> models.FeedbackEvent:
     _project(db, data.project_id)
+    _require_actor_role(db, project_id=data.project_id, actor=actor, minimum_role="manager")
     lineage = _resolve_feedback_event_lineage(
         db,
         project_id=data.project_id,

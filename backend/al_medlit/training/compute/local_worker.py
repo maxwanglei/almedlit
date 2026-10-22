@@ -4,20 +4,19 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-from al_medlit.training.compute.local import LocalComputeBackend
+from al_medlit.training.compute.local import LocalComputeBackend, local_job_environment
 
 
 def _write_status(path: Path, payload: dict) -> None:
     payload = {**payload, "updated_at": datetime.now(UTC).isoformat()}
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-    os.replace(temporary, path)
+    LocalComputeBackend._atomic_json(path, payload)
 
 
 def run(specification_path: str | Path) -> int:
@@ -25,8 +24,10 @@ def run(specification_path: str | Path) -> int:
     if specification.get("schema_version") != "local-process-v1":
         raise ValueError("Unsupported local process specification")
     command = specification.get("command")
-    if not isinstance(command, list) or not command or not all(
-        isinstance(value, str) and value for value in command
+    if (
+        not isinstance(command, list)
+        or not command
+        or not all(isinstance(value, str) and value for value in command)
     ):
         raise ValueError("Local process command is invalid")
     status_path = Path(specification["status_path"])
@@ -46,9 +47,19 @@ def run(specification_path: str | Path) -> int:
         "launch_token": launch_token,
         "created_at": specification.get("created_at") or datetime.now(UTC).isoformat(),
     }
-    temporary_identity = identity_path.with_suffix(identity_path.suffix + ".tmp")
-    temporary_identity.write_text(json.dumps(identity, sort_keys=True), encoding="utf-8")
-    os.replace(temporary_identity, identity_path)
+    LocalComputeBackend._atomic_json(identity_path, identity)
+    if cancel_path.is_file():
+        _write_status(
+            status_path,
+            {
+                "status": "cancelled",
+                "exit_code": -signal.SIGTERM,
+                "reason": "Cancelled by user",
+                "raw_state": "CANCELLED",
+                "launch_token": launch_token,
+            },
+        )
+        return -signal.SIGTERM
     _write_status(
         status_path,
         {
@@ -61,10 +72,11 @@ def run(specification_path: str | Path) -> int:
             "launch_token": launch_token,
         },
     )
-    environment = {**os.environ, **(specification.get("environment") or {})}
-    with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
-        "w", encoding="utf-8"
-    ) as stderr:
+    environment = local_job_environment(specification.get("environment"))
+    with (
+        stdout_path.open("w", encoding="utf-8") as stdout,
+        stderr_path.open("w", encoding="utf-8") as stderr,
+    ):
         process = subprocess.Popen(
             tuple(command),
             cwd=specification["cwd"],
@@ -73,6 +85,7 @@ def run(specification_path: str | Path) -> int:
             stdout=stdout,
             stderr=stderr,
             text=True,
+            start_new_session=True,
         )
         heartbeat_interval = max(
             1,
@@ -81,17 +94,27 @@ def run(specification_path: str | Path) -> int:
         cancelled = False
         while True:
             try:
-                returncode = process.wait(timeout=heartbeat_interval)
+                returncode = process.wait(timeout=min(heartbeat_interval, 1))
                 break
             except subprocess.TimeoutExpired:
                 if cancel_path.is_file():
                     cancelled = True
-                    process.terminate()
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
                     try:
                         returncode = process.wait(timeout=10)
                     except subprocess.TimeoutExpired:
-                        process.kill()
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
                         returncode = process.wait()
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
                     break
                 _write_status(
                     status_path,

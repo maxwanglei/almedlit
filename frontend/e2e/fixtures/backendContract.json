@@ -1,0 +1,2367 @@
+{
+  "enums": {
+    "capability_preset": [
+      "annotate",
+      "annotate_train",
+      "annotate_train_al",
+      "custom",
+      "full",
+      "train"
+    ],
+    "storage_retention_class": [
+      "indefinite",
+      "resume_14d"
+    ]
+  },
+  "operations": {
+    "/api/projects": {
+      "get": {
+        "response": {
+          "items": {
+            "$ref": "#/components/schemas/ProjectRead"
+          },
+          "title": "Response List Projects Api Projects Get",
+          "type": "array"
+        },
+        "status": 200
+      },
+      "post": {
+        "response": {
+          "$ref": "#/components/schemas/ProjectRead"
+        },
+        "status": 200
+      }
+    },
+    "/api/projects/my-work": {
+      "get": {
+        "response": {
+          "items": {
+            "$ref": "#/components/schemas/ProjectRead"
+          },
+          "title": "Response List My Work Projects Api Projects My Work Get",
+          "type": "array"
+        },
+        "status": 200
+      }
+    },
+    "/api/projects/{project_id}": {
+      "get": {
+        "response": {
+          "$ref": "#/components/schemas/ProjectRead"
+        },
+        "status": 200
+      },
+      "patch": {
+        "response": {
+          "$ref": "#/components/schemas/ProjectRead"
+        },
+        "status": 200
+      }
+    },
+    "/api/projects/{project_id}/datasets/annotation-progress": {
+      "get": {
+        "response": {
+          "items": {
+            "$ref": "#/components/schemas/SourceAnnotationProgress"
+          },
+          "title": "Response Get Annotation Progress Api Projects  Project Id  Datasets Annotation Progress Get",
+          "type": "array"
+        },
+        "status": 200
+      }
+    },
+    "/api/projects/{project_id}/prediction-runs": {
+      "get": {
+        "response": {
+          "items": {
+            "$ref": "#/components/schemas/PredictionRunRead"
+          },
+          "title": "Response List Prediction Runs Api Projects  Project Id  Prediction Runs Get",
+          "type": "array"
+        },
+        "status": 200
+      },
+      "post": {
+        "response": {
+          "$ref": "#/components/schemas/PredictionRunRead"
+        },
+        "status": 202
+      }
+    },
+    "/api/projects/{project_id}/prediction-runs/{run_id}": {
+      "get": {
+        "response": {
+          "$ref": "#/components/schemas/PredictionRunRead"
+        },
+        "status": 200
+      }
+    },
+    "/api/projects/{project_id}/prediction-runs/{run_id}/results": {
+      "get": {
+        "response": {
+          "$ref": "#/components/schemas/PredictionResultPage"
+        },
+        "status": 200
+      }
+    },
+    "/api/projects/{project_id}/prediction-runs/{run_id}/retry": {
+      "post": {
+        "response": {
+          "$ref": "#/components/schemas/PredictionRunRead"
+        },
+        "status": 202
+      }
+    },
+    "/api/projects/{project_id}/prediction-runs/{run_id}/review-round": {
+      "post": {
+        "response": {
+          "$ref": "#/components/schemas/al_medlit__workflow__prediction_schemas__PredictionReviewRead"
+        },
+        "status": 201
+      }
+    },
+    "/api/rounds/{round_id}/work-context": {
+      "get": {
+        "response": {
+          "$ref": "#/components/schemas/RoundWorkContextRead"
+        },
+        "status": 200
+      }
+    },
+    "/api/storage/policies": {
+      "get": {
+        "response": {
+          "items": {
+            "$ref": "#/components/schemas/StoragePolicyRead"
+          },
+          "title": "Response List Storage Policies Api Storage Policies Get",
+          "type": "array"
+        },
+        "status": 200
+      },
+      "post": {
+        "response": {
+          "$ref": "#/components/schemas/StoragePolicyRead"
+        },
+        "status": 201
+      }
+    },
+    "/api/workspaces/{workspace_id}/capabilities": {
+      "get": {
+        "response": {
+          "$ref": "#/components/schemas/CapabilitiesRead"
+        },
+        "status": 200
+      }
+    },
+    "/api/workspaces/{workspace_id}/models": {
+      "get": {
+        "response": {
+          "$ref": "#/components/schemas/WorkspaceRegisteredModelPageRead"
+        },
+        "status": 200
+      }
+    },
+    "/api/workspaces/{workspace_id}/training-contexts": {
+      "get": {
+        "response": {
+          "$ref": "#/components/schemas/WorkspaceTrainingContextPageRead"
+        },
+        "status": 200
+      }
+    },
+    "/api/workspaces/{workspace_id}/training-runs": {
+      "get": {
+        "response": {
+          "$ref": "#/components/schemas/WorkspaceTrainingRunPageRead"
+        },
+        "status": 200
+      }
+    }
+  },
+  "policy": {
+    "capabilities": {
+      "active_learning": {
+        "depends_on": [
+          "annotation",
+          "lineage"
+        ],
+        "key": "active_learning",
+        "label": "Active learning",
+        "requires_profile": "any",
+        "requires_team": false
+      },
+      "annotation": {
+        "depends_on": [],
+        "key": "annotation",
+        "label": "Annotation",
+        "requires_profile": "any",
+        "requires_team": false
+      },
+      "co_learning": {
+        "depends_on": [
+          "annotation",
+          "lineage"
+        ],
+        "key": "co_learning",
+        "label": "Co-learning",
+        "requires_profile": "any",
+        "requires_team": false
+      },
+      "export": {
+        "depends_on": [
+          "annotation"
+        ],
+        "key": "export",
+        "label": "Export",
+        "requires_profile": "any",
+        "requires_team": false
+      },
+      "hpc_training": {
+        "depends_on": [
+          "training"
+        ],
+        "key": "hpc_training",
+        "label": "HPC training",
+        "requires_profile": "lab",
+        "requires_team": false
+      },
+      "inference": {
+        "depends_on": [
+          "training",
+          "lineage"
+        ],
+        "key": "inference",
+        "label": "Inference",
+        "requires_profile": "any",
+        "requires_team": false
+      },
+      "lineage": {
+        "depends_on": [],
+        "key": "lineage",
+        "label": "Lineage",
+        "requires_profile": "any",
+        "requires_team": false
+      },
+      "llm_serving": {
+        "depends_on": [
+          "inference"
+        ],
+        "key": "llm_serving",
+        "label": "LLM serving",
+        "requires_profile": "lab",
+        "requires_team": false
+      },
+      "multi_annotator_iaa": {
+        "depends_on": [
+          "annotation"
+        ],
+        "key": "multi_annotator_iaa",
+        "label": "Multi-annotator IAA",
+        "requires_profile": "any",
+        "requires_team": true
+      },
+      "training": {
+        "depends_on": [
+          "lineage"
+        ],
+        "key": "training",
+        "label": "Model training",
+        "requires_profile": "any",
+        "requires_team": false
+      }
+    },
+    "module_dependencies": {
+      "activity": [],
+      "annotate": [
+        "data"
+      ],
+      "data": [],
+      "guidelines": [
+        "data",
+        "annotate"
+      ],
+      "learning": [
+        "data",
+        "annotate"
+      ],
+      "models": [],
+      "train": [
+        "data",
+        "models"
+      ]
+    },
+    "module_order": [
+      "data",
+      "annotate",
+      "learning",
+      "train",
+      "models",
+      "guidelines",
+      "activity"
+    ],
+    "module_requirements": {
+      "activity": [
+        "lineage"
+      ],
+      "annotate": [
+        "annotation"
+      ],
+      "data": [
+        "annotation",
+        "training",
+        "inference",
+        "active_learning",
+        "co_learning",
+        "lineage"
+      ],
+      "guidelines": [
+        "co_learning"
+      ],
+      "learning": [
+        "active_learning",
+        "co_learning"
+      ],
+      "models": [
+        "training",
+        "inference",
+        "lineage"
+      ],
+      "train": [
+        "training"
+      ]
+    },
+    "presets": {
+      "annotate": [
+        "annotation"
+      ],
+      "annotate_train": [
+        "annotation",
+        "export",
+        "inference",
+        "training"
+      ],
+      "annotate_train_al": [
+        "active_learning",
+        "annotation",
+        "export",
+        "inference",
+        "training"
+      ],
+      "full": [
+        "active_learning",
+        "annotation",
+        "co_learning",
+        "export",
+        "hpc_training",
+        "inference",
+        "lineage",
+        "llm_serving",
+        "multi_annotator_iaa",
+        "training"
+      ],
+      "train": [
+        "training"
+      ]
+    },
+    "role_rank": {
+      "admin": 3,
+      "annotator": 0,
+      "manager": 2,
+      "trainer": 1
+    }
+  },
+  "schemas": {
+    "CapabilitiesRead": {
+      "properties": {
+        "blocked": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Blocked",
+          "type": "object"
+        },
+        "effective": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Effective",
+          "type": "array"
+        },
+        "overrides": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Overrides",
+          "type": "array"
+        },
+        "preset": {
+          "title": "Preset",
+          "type": "string"
+        }
+      },
+      "required": [
+        "preset",
+        "overrides",
+        "effective",
+        "blocked"
+      ],
+      "title": "CapabilitiesRead",
+      "type": "object"
+    },
+    "LabelDef": {
+      "properties": {
+        "color": {
+          "default": "#888888",
+          "title": "Color",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Description"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "LabelDef",
+      "type": "object"
+    },
+    "LabelSet": {
+      "additionalProperties": false,
+      "properties": {
+        "labels": {
+          "additionalProperties": {
+            "items": {
+              "$ref": "#/components/schemas/LabelDef"
+            },
+            "type": "array"
+          },
+          "title": "Labels",
+          "type": "object"
+        }
+      },
+      "title": "LabelSet",
+      "type": "object"
+    },
+    "PredictionResult": {
+      "additionalProperties": false,
+      "properties": {
+        "already_submitted": {
+          "title": "Already Submitted",
+          "type": "boolean"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Confidence"
+        },
+        "dataset_item_id": {
+          "title": "Dataset Item Id",
+          "type": "integer"
+        },
+        "prediction": {
+          "title": "Prediction"
+        },
+        "protected": {
+          "title": "Protected",
+          "type": "boolean"
+        },
+        "stable_key": {
+          "title": "Stable Key",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "uncertainty": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Uncertainty"
+        }
+      },
+      "required": [
+        "dataset_item_id",
+        "stable_key",
+        "title",
+        "text",
+        "prediction",
+        "confidence",
+        "uncertainty",
+        "already_submitted",
+        "protected"
+      ],
+      "title": "PredictionResult",
+      "type": "object"
+    },
+    "PredictionResultPage": {
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/components/schemas/PredictionResult"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "limit": {
+          "title": "Limit",
+          "type": "integer"
+        },
+        "offset": {
+          "title": "Offset",
+          "type": "integer"
+        },
+        "total": {
+          "title": "Total",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "items",
+        "total",
+        "offset",
+        "limit"
+      ],
+      "title": "PredictionResultPage",
+      "type": "object"
+    },
+    "PredictionRunRead": {
+      "properties": {
+        "completed_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Completed At"
+        },
+        "created_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Created At"
+        },
+        "dataset_version_id": {
+          "title": "Dataset Version Id",
+          "type": "integer"
+        },
+        "failure_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Failure Reason"
+        },
+        "id": {
+          "title": "Id",
+          "type": "integer"
+        },
+        "model_version_id": {
+          "title": "Model Version Id",
+          "type": "integer"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "project_id": {
+          "title": "Project Id",
+          "type": "integer"
+        },
+        "result_count": {
+          "title": "Result Count",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "planned",
+            "queued",
+            "running",
+            "completed",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "task_version_id": {
+          "title": "Task Version Id",
+          "type": "integer"
+        },
+        "updated_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Updated At"
+        }
+      },
+      "required": [
+        "id",
+        "project_id",
+        "name",
+        "dataset_version_id",
+        "task_version_id",
+        "model_version_id",
+        "status",
+        "result_count",
+        "failure_reason",
+        "completed_at"
+      ],
+      "title": "PredictionRunRead",
+      "type": "object"
+    },
+    "ProjectRead": {
+      "properties": {
+        "annotation_schema": {
+          "$ref": "#/components/schemas/LabelSet"
+        },
+        "annotation_validation_mode": {
+          "default": "relaxed",
+          "enum": [
+            "strict",
+            "relaxed"
+          ],
+          "title": "Annotation Validation Mode",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Description"
+        },
+        "id": {
+          "title": "Id",
+          "type": "integer"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "settings": {
+          "additionalProperties": true,
+          "title": "Settings",
+          "type": "object"
+        },
+        "tasks": {
+          "items": {
+            "$ref": "#/components/schemas/ProjectTaskRead"
+          },
+          "title": "Tasks",
+          "type": "array"
+        },
+        "workflow_round_count": {
+          "default": 0,
+          "title": "Workflow Round Count",
+          "type": "integer"
+        },
+        "workflow_task_count": {
+          "default": 0,
+          "title": "Workflow Task Count",
+          "type": "integer"
+        },
+        "workspace_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Workspace Id"
+        }
+      },
+      "required": [
+        "name",
+        "id"
+      ],
+      "title": "ProjectRead",
+      "type": "object"
+    },
+    "ProjectTaskRead": {
+      "properties": {
+        "annotation_type": {
+          "enum": [
+            "entity",
+            "relation",
+            "doc_label",
+            "sentence_label",
+            "passage_label",
+            "evidence_block"
+          ],
+          "title": "Annotation Type",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Description"
+        },
+        "display_name": {
+          "title": "Display Name",
+          "type": "string"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "id": {
+          "title": "Id",
+          "type": "integer"
+        },
+        "labels": {
+          "items": {
+            "$ref": "#/components/schemas/LabelDef"
+          },
+          "title": "Labels",
+          "type": "array"
+        },
+        "project_id": {
+          "title": "Project Id",
+          "type": "integer"
+        },
+        "settings": {
+          "additionalProperties": true,
+          "title": "Settings",
+          "type": "object"
+        },
+        "sort_order": {
+          "default": 0,
+          "title": "Sort Order",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "annotation_type",
+        "display_name",
+        "id",
+        "project_id"
+      ],
+      "title": "ProjectTaskRead",
+      "type": "object"
+    },
+    "RoundWorkContextRead": {
+      "additionalProperties": false,
+      "properties": {
+        "cycle": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/RoundWorkCycleLabel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "guideline": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/RoundWorkGuidelineLabel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "project": {
+          "$ref": "#/components/schemas/RoundWorkProjectLabel"
+        },
+        "round": {
+          "$ref": "#/components/schemas/RoundWorkRoundRead"
+        },
+        "task": {
+          "$ref": "#/components/schemas/RoundWorkTaskLabel"
+        },
+        "task_version": {
+          "$ref": "#/components/schemas/TaskVersionRead"
+        }
+      },
+      "required": [
+        "project",
+        "round",
+        "task",
+        "task_version"
+      ],
+      "title": "RoundWorkContextRead",
+      "type": "object"
+    },
+    "RoundWorkCycleLabel": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "integer"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "sequence": {
+          "title": "Sequence",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "sequence"
+      ],
+      "title": "RoundWorkCycleLabel",
+      "type": "object"
+    },
+    "RoundWorkGuidelineLabel": {
+      "additionalProperties": false,
+      "properties": {
+        "guideline_id": {
+          "title": "Guideline Id",
+          "type": "integer"
+        },
+        "guideline_revision_id": {
+          "title": "Guideline Revision Id",
+          "type": "integer"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "version_number": {
+          "title": "Version Number",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "guideline_id",
+        "guideline_revision_id",
+        "name",
+        "version_number",
+        "status"
+      ],
+      "title": "RoundWorkGuidelineLabel",
+      "type": "object"
+    },
+    "RoundWorkProjectLabel": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "integer"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name"
+      ],
+      "title": "RoundWorkProjectLabel",
+      "type": "object"
+    },
+    "RoundWorkRoundRead": {
+      "properties": {
+        "assistance_policy": {
+          "enum": [
+            "blind",
+            "reveal_after_first_pass",
+            "immediate_suggestions",
+            "critique",
+            "micro_question"
+          ],
+          "title": "Assistance Policy",
+          "type": "string"
+        },
+        "closed_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Closed At"
+        },
+        "created_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Created At"
+        },
+        "dataset_version_id": {
+          "title": "Dataset Version Id",
+          "type": "integer"
+        },
+        "feedback_available": {
+          "title": "Feedback Available",
+          "type": "boolean"
+        },
+        "id": {
+          "title": "Id",
+          "type": "integer"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "opened_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Opened At"
+        },
+        "project_id": {
+          "title": "Project Id",
+          "type": "integer"
+        },
+        "sequence": {
+          "title": "Sequence",
+          "type": "integer"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "task_version_id": {
+          "title": "Task Version Id",
+          "type": "integer"
+        },
+        "updated_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Updated At"
+        }
+      },
+      "required": [
+        "id",
+        "project_id",
+        "name",
+        "sequence",
+        "dataset_version_id",
+        "task_version_id",
+        "assistance_policy",
+        "feedback_available",
+        "status",
+        "opened_at",
+        "closed_at"
+      ],
+      "title": "RoundWorkRoundRead",
+      "type": "object"
+    },
+    "RoundWorkTaskLabel": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "integer"
+        },
+        "key": {
+          "title": "Key",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "key",
+        "name"
+      ],
+      "title": "RoundWorkTaskLabel",
+      "type": "object"
+    },
+    "SourceAnnotationProgress": {
+      "properties": {
+        "dataset_id": {
+          "title": "Dataset Id",
+          "type": "integer"
+        },
+        "dataset_version_id": {
+          "title": "Dataset Version Id",
+          "type": "integer"
+        },
+        "submitted": {
+          "title": "Submitted",
+          "type": "integer"
+        },
+        "total": {
+          "title": "Total",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "dataset_id",
+        "dataset_version_id",
+        "total",
+        "submitted"
+      ],
+      "title": "SourceAnnotationProgress",
+      "type": "object"
+    },
+    "StoragePolicyRead": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_prefix": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Artifact Prefix",
+          "type": "string"
+        },
+        "backend": {
+          "default": "minio",
+          "enum": [
+            "minio",
+            "local"
+          ],
+          "title": "Backend",
+          "type": "string"
+        },
+        "cache_policy": {
+          "additionalProperties": true,
+          "title": "Cache Policy",
+          "type": "object"
+        },
+        "created_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Created At"
+        },
+        "created_by_user_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Created By User Id"
+        },
+        "encryption": {
+          "additionalProperties": true,
+          "title": "Encryption",
+          "type": "object"
+        },
+        "id": {
+          "title": "Id",
+          "type": "integer"
+        },
+        "is_default": {
+          "default": false,
+          "title": "Is Default",
+          "type": "boolean"
+        },
+        "name": {
+          "maxLength": 255,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "project_id": {
+          "title": "Project Id",
+          "type": "integer"
+        },
+        "retention_class": {
+          "default": "indefinite",
+          "enum": [
+            "indefinite",
+            "resume_14d"
+          ],
+          "title": "Retention Class",
+          "type": "string"
+        },
+        "updated_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Updated At"
+        }
+      },
+      "required": [
+        "id",
+        "project_id",
+        "name",
+        "artifact_prefix",
+        "created_by_user_id"
+      ],
+      "title": "StoragePolicyRead",
+      "type": "object"
+    },
+    "TaskVersionRead": {
+      "additionalProperties": false,
+      "properties": {
+        "annotation_ui": {
+          "additionalProperties": true,
+          "title": "Annotation Ui",
+          "type": "object"
+        },
+        "content_hash": {
+          "title": "Content Hash",
+          "type": "string"
+        },
+        "created_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Created At"
+        },
+        "created_by_user_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Created By User Id"
+        },
+        "id": {
+          "title": "Id",
+          "type": "integer"
+        },
+        "input_schema": {
+          "additionalProperties": true,
+          "title": "Input Schema",
+          "type": "object"
+        },
+        "label_rules": {
+          "additionalProperties": true,
+          "title": "Label Rules",
+          "type": "object"
+        },
+        "metrics": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Metrics",
+          "type": "array"
+        },
+        "output_schema": {
+          "additionalProperties": true,
+          "title": "Output Schema",
+          "type": "object"
+        },
+        "project_id": {
+          "title": "Project Id",
+          "type": "integer"
+        },
+        "task_definition_id": {
+          "title": "Task Definition Id",
+          "type": "integer"
+        },
+        "task_kind": {
+          "enum": [
+            "regression",
+            "classification",
+            "multilabel_classification",
+            "token_labeling",
+            "span_extraction",
+            "relation_extraction",
+            "ranking",
+            "generation",
+            "instruction_tuning"
+          ],
+          "title": "Task Kind",
+          "type": "string"
+        },
+        "trainer_compatibility": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Trainer Compatibility",
+          "type": "array"
+        },
+        "updated_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Updated At"
+        },
+        "version_number": {
+          "title": "Version Number",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "project_id",
+        "task_definition_id",
+        "task_kind",
+        "version_number",
+        "content_hash"
+      ],
+      "title": "TaskVersionRead",
+      "type": "object"
+    },
+    "WorkspaceModelVersionRead": {
+      "additionalProperties": false,
+      "properties": {
+        "base_model": {
+          "additionalProperties": true,
+          "title": "Base Model",
+          "type": "object"
+        },
+        "checkpoint_package_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Checkpoint Package Id"
+        },
+        "code_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Code Digest",
+          "type": "string"
+        },
+        "content_hash": {
+          "title": "Content Hash",
+          "type": "string"
+        },
+        "created_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Created At"
+        },
+        "created_by_user_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Created By User Id"
+        },
+        "creator_display_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Creator Display Name"
+        },
+        "creator_username": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Creator Username"
+        },
+        "family": {
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Family",
+          "type": "string"
+        },
+        "framework": {
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Framework",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "integer"
+        },
+        "legacy_training_experiment_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Legacy Training Experiment Id"
+        },
+        "metrics": {
+          "additionalProperties": true,
+          "title": "Metrics",
+          "type": "object"
+        },
+        "parameters": {
+          "additionalProperties": true,
+          "title": "Parameters",
+          "type": "object"
+        },
+        "parent_version_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Parent Version Id"
+        },
+        "project_id": {
+          "title": "Project Id",
+          "type": "integer"
+        },
+        "recipe_key": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Recipe Key",
+          "type": "string"
+        },
+        "recipe_version": {
+          "maxLength": 60,
+          "minLength": 1,
+          "title": "Recipe Version",
+          "type": "string"
+        },
+        "registered_model_id": {
+          "title": "Registered Model Id",
+          "type": "integer"
+        },
+        "runtime_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Runtime Digest",
+          "type": "string"
+        },
+        "runtime_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Runtime Id"
+        },
+        "runtime_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Runtime Name"
+        },
+        "seed": {
+          "default": 42,
+          "title": "Seed",
+          "type": "integer"
+        },
+        "source_dataset_version_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Dataset Version Id"
+        },
+        "source_dataset_version_number": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Dataset Version Number"
+        },
+        "storage_policy_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Storage Policy Id"
+        },
+        "storage_policy_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Storage Policy Name"
+        },
+        "task_version_id": {
+          "title": "Task Version Id",
+          "type": "integer"
+        },
+        "training_dataset_version_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Training Dataset Version Id"
+        },
+        "training_method": {
+          "maxLength": 60,
+          "minLength": 1,
+          "title": "Training Method",
+          "type": "string"
+        },
+        "training_run_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Training Run Id"
+        },
+        "updated_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Updated At"
+        },
+        "version_number": {
+          "title": "Version Number",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "project_id",
+        "registered_model_id",
+        "task_version_id",
+        "family",
+        "framework",
+        "training_method",
+        "recipe_key",
+        "recipe_version",
+        "runtime_digest",
+        "code_digest",
+        "version_number",
+        "content_hash",
+        "created_by_user_id"
+      ],
+      "title": "WorkspaceModelVersionRead",
+      "type": "object"
+    },
+    "WorkspaceRegisteredModelPageRead": {
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/components/schemas/WorkspaceRegisteredModelRead"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Next Cursor"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "title": "WorkspaceRegisteredModelPageRead",
+      "type": "object"
+    },
+    "WorkspaceRegisteredModelRead": {
+      "additionalProperties": false,
+      "properties": {
+        "created_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Created At"
+        },
+        "created_by_user_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Created By User Id"
+        },
+        "creator_display_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Creator Display Name"
+        },
+        "creator_username": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Creator Username"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Description"
+        },
+        "evaluation_metrics": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": "Evaluation Metrics",
+          "type": "object"
+        },
+        "evaluation_split": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Evaluation Split"
+        },
+        "evaluation_status": {
+          "anyOf": [
+            {
+              "enum": [
+                "succeeded",
+                "unsupported",
+                "failed"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Evaluation Status"
+        },
+        "id": {
+          "title": "Id",
+          "type": "integer"
+        },
+        "latest_version": {
+          "anyOf": [
+            {
+              "$ref": "#/components/schemas/WorkspaceModelVersionRead"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lifecycle_status": {
+          "title": "Lifecycle Status",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 255,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "project_description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Project Description"
+        },
+        "project_id": {
+          "title": "Project Id",
+          "type": "integer"
+        },
+        "project_name": {
+          "title": "Project Name",
+          "type": "string"
+        },
+        "task_kind": {
+          "anyOf": [
+            {
+              "enum": [
+                "regression",
+                "classification",
+                "multilabel_classification",
+                "token_labeling",
+                "span_extraction",
+                "relation_extraction",
+                "ranking",
+                "generation",
+                "instruction_tuning"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Task Kind"
+        },
+        "task_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Task Name"
+        },
+        "training_dataset_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Training Dataset Name"
+        },
+        "updated_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Updated At"
+        }
+      },
+      "required": [
+        "id",
+        "project_id",
+        "name",
+        "lifecycle_status",
+        "created_by_user_id",
+        "project_name",
+        "project_description"
+      ],
+      "title": "WorkspaceRegisteredModelRead",
+      "type": "object"
+    },
+    "WorkspaceTrainingContextPageRead": {
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/components/schemas/WorkspaceTrainingContextRead"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Next Cursor"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "title": "WorkspaceTrainingContextPageRead",
+      "type": "object"
+    },
+    "WorkspaceTrainingContextRead": {
+      "additionalProperties": false,
+      "properties": {
+        "available_environment_count": {
+          "title": "Available Environment Count",
+          "type": "integer"
+        },
+        "effective_modules": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Effective Modules",
+          "type": "array"
+        },
+        "environment_count": {
+          "title": "Environment Count",
+          "type": "integer"
+        },
+        "project_description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Project Description"
+        },
+        "project_id": {
+          "title": "Project Id",
+          "type": "integer"
+        },
+        "project_name": {
+          "title": "Project Name",
+          "type": "string"
+        },
+        "storage_policy_count": {
+          "title": "Storage Policy Count",
+          "type": "integer"
+        },
+        "task_version_count": {
+          "title": "Task Version Count",
+          "type": "integer"
+        },
+        "training_dataset_version_count": {
+          "title": "Training Dataset Version Count",
+          "type": "integer"
+        },
+        "training_only": {
+          "title": "Training Only",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "project_id",
+        "project_name",
+        "project_description",
+        "training_only",
+        "effective_modules",
+        "task_version_count",
+        "training_dataset_version_count",
+        "environment_count",
+        "available_environment_count",
+        "storage_policy_count"
+      ],
+      "title": "WorkspaceTrainingContextRead",
+      "type": "object"
+    },
+    "WorkspaceTrainingRunPageRead": {
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/components/schemas/WorkspaceTrainingRunRead"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Next Cursor"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "title": "WorkspaceTrainingRunPageRead",
+      "type": "object"
+    },
+    "WorkspaceTrainingRunRead": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_reservation_bytes": {
+          "anyOf": [
+            {
+              "minimum": 1.0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Artifact Reservation Bytes"
+        },
+        "artifact_reservation_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Artifact Reservation Id"
+        },
+        "base_model": {
+          "additionalProperties": true,
+          "title": "Base Model",
+          "type": "object"
+        },
+        "completed_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Completed At"
+        },
+        "config": {
+          "additionalProperties": true,
+          "title": "Config",
+          "type": "object"
+        },
+        "created_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Created At"
+        },
+        "created_by_user_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Created By User Id"
+        },
+        "creator_display_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Creator Display Name"
+        },
+        "creator_username": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Creator Username"
+        },
+        "dataset_version_number": {
+          "title": "Dataset Version Number",
+          "type": "integer"
+        },
+        "environment_id": {
+          "title": "Environment Id",
+          "type": "integer"
+        },
+        "evaluation_metrics": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": "Evaluation Metrics",
+          "type": "object"
+        },
+        "evaluation_plan": {
+          "additionalProperties": true,
+          "title": "Evaluation Plan",
+          "type": "object"
+        },
+        "evaluation_split": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Evaluation Split"
+        },
+        "evaluation_status": {
+          "anyOf": [
+            {
+              "enum": [
+                "succeeded",
+                "unsupported",
+                "failed"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Evaluation Status"
+        },
+        "failure_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Failure Code"
+        },
+        "failure_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Failure Reason"
+        },
+        "family": {
+          "title": "Family",
+          "type": "string"
+        },
+        "framework": {
+          "title": "Framework",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "integer"
+        },
+        "idempotency_key": {
+          "maxLength": 160,
+          "minLength": 1,
+          "title": "Idempotency Key",
+          "type": "string"
+        },
+        "launch_hash": {
+          "title": "Launch Hash",
+          "type": "string"
+        },
+        "model_name": {
+          "title": "Model Name",
+          "type": "string"
+        },
+        "output_model_version_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Output Model Version Id"
+        },
+        "parent_model_version_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Parent Model Version Id"
+        },
+        "project_description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Project Description"
+        },
+        "project_id": {
+          "title": "Project Id",
+          "type": "integer"
+        },
+        "project_name": {
+          "title": "Project Name",
+          "type": "string"
+        },
+        "recipe_name": {
+          "title": "Recipe Name",
+          "type": "string"
+        },
+        "recipe_version_id": {
+          "title": "Recipe Version Id",
+          "type": "integer"
+        },
+        "registered_model_id": {
+          "title": "Registered Model Id",
+          "type": "integer"
+        },
+        "runtime_name": {
+          "title": "Runtime Name",
+          "type": "string"
+        },
+        "runtime_snapshot": {
+          "additionalProperties": true,
+          "title": "Runtime Snapshot",
+          "type": "object"
+        },
+        "seed": {
+          "default": 42,
+          "title": "Seed",
+          "type": "integer"
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Started At"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        },
+        "storage_policy_id": {
+          "title": "Storage Policy Id",
+          "type": "integer"
+        },
+        "storage_policy_name": {
+          "title": "Storage Policy Name",
+          "type": "string"
+        },
+        "storage_snapshot": {
+          "additionalProperties": true,
+          "title": "Storage Snapshot",
+          "type": "object"
+        },
+        "task_kind": {
+          "enum": [
+            "regression",
+            "classification",
+            "multilabel_classification",
+            "token_labeling",
+            "span_extraction",
+            "relation_extraction",
+            "ranking",
+            "generation",
+            "instruction_tuning"
+          ],
+          "title": "Task Kind",
+          "type": "string"
+        },
+        "task_name": {
+          "title": "Task Name",
+          "type": "string"
+        },
+        "task_version_id": {
+          "title": "Task Version Id",
+          "type": "integer"
+        },
+        "training_dataset_name": {
+          "title": "Training Dataset Name",
+          "type": "string"
+        },
+        "training_dataset_version_id": {
+          "title": "Training Dataset Version Id",
+          "type": "integer"
+        },
+        "training_method": {
+          "title": "Training Method",
+          "type": "string"
+        },
+        "updated_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Updated At"
+        }
+      },
+      "required": [
+        "id",
+        "project_id",
+        "registered_model_id",
+        "task_version_id",
+        "training_dataset_version_id",
+        "recipe_version_id",
+        "environment_id",
+        "storage_policy_id",
+        "idempotency_key",
+        "artifact_reservation_id",
+        "status",
+        "launch_hash",
+        "output_model_version_id",
+        "runtime_snapshot",
+        "storage_snapshot",
+        "failure_code",
+        "failure_reason",
+        "started_at",
+        "completed_at",
+        "created_by_user_id",
+        "project_name",
+        "project_description",
+        "model_name",
+        "family",
+        "framework",
+        "base_model",
+        "training_method",
+        "task_name",
+        "task_kind",
+        "training_dataset_name",
+        "dataset_version_number",
+        "recipe_name",
+        "runtime_name",
+        "storage_policy_name"
+      ],
+      "title": "WorkspaceTrainingRunRead",
+      "type": "object"
+    },
+    "al_medlit__workflow__prediction_schemas__PredictionReviewRead": {
+      "additionalProperties": false,
+      "properties": {
+        "excluded_protected": {
+          "title": "Excluded Protected",
+          "type": "integer"
+        },
+        "excluded_submitted": {
+          "title": "Excluded Submitted",
+          "type": "integer"
+        },
+        "item_count": {
+          "title": "Item Count",
+          "type": "integer"
+        },
+        "round_id": {
+          "title": "Round Id",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "round_id",
+        "item_count",
+        "excluded_submitted",
+        "excluded_protected"
+      ],
+      "title": "PredictionReviewRead",
+      "type": "object"
+    }
+  }
+}

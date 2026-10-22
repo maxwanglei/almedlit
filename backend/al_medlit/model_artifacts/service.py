@@ -1304,6 +1304,42 @@ def garbage_collect_artifact_blobs(
     )
 
 
+def sweep_unregistered_artifact_objects(
+    db: Session,
+    storage: ObjectStorage,
+    *,
+    workspace_id: int | None = None,
+    limit: int = 200,
+    now: datetime | None = None,
+    should_stop: Callable[[], bool] | None = None,
+) -> int:
+    from al_medlit.storage_reclaim.service import storage_key_is_referenced
+    from al_medlit.workspace.models import Workspace
+
+    cutoff = (now or datetime.now(UTC)) - timedelta(days=1)
+    workspaces = db.query(Workspace.id).order_by(Workspace.id)
+    if workspace_id is not None:
+        workspaces = workspaces.filter(Workspace.id == workspace_id)
+    reclaimed = 0
+    for (candidate_workspace_id,) in workspaces.yield_per(100):
+        prefix = workspace_blob_prefix(candidate_workspace_id) + "/"
+        for item in storage.list_objects(prefix):
+            if should_stop is not None and should_stop():
+                return reclaimed
+            if not item.key.startswith(prefix) or _as_utc(item.last_modified) > cutoff:
+                continue
+            artifact_quota.lock_workspace_artifact_quota(
+                db, workspace_id=candidate_workspace_id,
+            )
+            if storage_key_is_referenced(db, item.key, include_purged_blobs=False):
+                continue
+            storage.delete(item.key)
+            reclaimed += 1
+            if reclaimed >= min(max(limit, 1), 10_000):
+                return reclaimed
+    return reclaimed
+
+
 def garbage_collect_purged_package_payloads(
     db: Session,
     storage: ObjectStorage,

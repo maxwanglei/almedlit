@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 
 from sqlalchemy import func
 from sqlalchemy.exc import InterfaceError, OperationalError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer, selectinload
 
 from al_medlit.auth.models import User
 from al_medlit.auth.tenancy import assignment_access_clause, resource_access_clause
@@ -71,8 +71,20 @@ def list_documents(
     project_id: int | None = None,
     user: User | None = None,
     assignee_user_id: int | None = None,
+    *,
+    summary: bool = False,
+    limit: int = 100,
+    offset: int = 0,
 ) -> list[Document]:
     query = db.query(Document)
+    if summary:
+        query = query.options(defer(Document.text))
+    else:
+        query = query.options(
+            selectinload(Document.active_structure_version).selectinload(
+                DocumentStructureVersion.sentences
+            )
+        )
     if project_id is not None:
         query = query.filter(Document.project_id == project_id)
     if user is not None:
@@ -97,7 +109,12 @@ def list_documents(
                     document_id=Document.id,
                 )
             )
-    return query.order_by(Document.created_at.desc()).all()
+    return (
+        query.order_by(Document.created_at.desc(), Document.id.desc())
+        .offset(max(offset, 0))
+        .limit(min(max(limit, 1), 500))
+        .all()
+    )
 
 
 def get_document(db: Session, document_id: int) -> Document | None:

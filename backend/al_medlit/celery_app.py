@@ -28,6 +28,11 @@ app.conf.update(
     timezone="UTC",
     imports=("al_medlit.training.tasks",),
     beat_schedule={
+        "cleanup-completed-remote-inference-jobs": {
+            "task": "al_medlit.inference.cleanup_remote_jobs",
+            "schedule": 24 * 60 * 60.0,
+            "options": {"queue": "control"},
+        },
         "reconcile-training-runs": {
             "task": "al_medlit.training.reconcile_training_runs",
             "schedule": 60.0,

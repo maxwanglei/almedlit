@@ -1,4 +1,5 @@
-import { expect, test, type Page } from "@playwright/test";
+import { type Page } from "@playwright/test";
+import { expect, test } from "./fixtures/test";
 
 import { installEvidenceApiMock } from "./fixtures/mockEvidenceApi";
 import { installPlatformApiMock } from "./fixtures/mockPlatformApi";
@@ -26,6 +27,15 @@ async function openAssignedEvidenceWorkbench(page: Page): Promise<void> {
     });
 }
 
+test("annotation-only work avoids disabled inference and trainer resources", async ({ page }) => {
+  const fixture = await installEvidenceApiMock(page, "annotator", { capabilityPreset: "annotate" });
+  await openAssignedEvidenceWorkbench(page);
+  await expect(page.getByRole("region", { name: "Structure-aware evidence annotation canvas" })
+    .locator("[data-sentence-id]")).toHaveCount(5);
+  expect(fixture.requests.filter((request) => request.pathname.includes("inference/runs"))).toEqual([]);
+  expect(fixture.unhandledRequests).toEqual([]);
+});
+
 test("individual user moves between My Work, task annotation, and project sections", async ({
   page,
 }) => {
@@ -47,7 +57,7 @@ test("individual user moves between My Work, task annotation, and project sectio
   await page
     .getByRole("button", { name: /Three-paragraph clinical trial.*Continue/ })
     .click();
-  await expect(page.getByLabel("Task")).toHaveValue("51");
+  await expect(page.getByLabel("Task", { exact: true })).toHaveValue("51");
   await expect(
     page.getByRole("button", { name: "Submit task for this paper" }),
   ).toBeVisible();
@@ -87,6 +97,7 @@ test("individual user moves between My Work, task annotation, and project sectio
   await expect(
     page.getByRole("region", { name: "Dataset registry table" }),
   ).toContainText("PubMed screening corpus");
+  await page.getByText("Label and split version details", { exact: true }).click();
   await expect(
     page.getByRole("region", { name: "Label layers table" }),
   ).toContainText("Imported screening decisions");

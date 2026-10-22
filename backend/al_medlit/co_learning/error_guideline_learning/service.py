@@ -11,7 +11,10 @@ from al_medlit.co_learning.error_guideline_learning.models import (
     MicroQuestionTemplate,
     TrainingAction,
 )
-from al_medlit.co_learning.error_guideline_learning.phenotyper import describe_error_type
+from al_medlit.co_learning.error_guideline_learning.phenotyper import (
+    describe_error_type,
+    infer_error_type_from_correction,
+)
 from al_medlit.co_learning.error_guideline_learning.schemas import (
     ErrorPatternCreate,
     MicroQuestionTemplateCreate,
@@ -75,16 +78,25 @@ def upsert_pattern_from_correction(db: Session, correction: AnnotationCorrection
     error-guideline learning loop.
     """
 
-    error_type = correction.error_type or "guideline_ambiguity"
-
+    original = (
+        db.get(Annotation, correction.original_annotation_id)
+        if correction.original_annotation_id else None
+    )
     corrected = (
         db.get(Annotation, correction.corrected_annotation_id)
         if correction.corrected_annotation_id
         else None
     )
 
-    task_type = corrected.annotation_type if corrected else "entity"
-    label_type = corrected.label if corrected else None
+    source_annotation = corrected or original
+    task_type = source_annotation.annotation_type if source_annotation else "unknown"
+    label_type = source_annotation.label if source_annotation else None
+    error_type = correction.error_type or infer_error_type_from_correction(
+        original_span=original.text_span if original else None,
+        corrected_span=corrected.text_span if corrected else None,
+        original_label=original.label if original else None,
+        corrected_label=corrected.label if corrected else None,
+    )
 
     pattern = _find_active_error_pattern(
         db,

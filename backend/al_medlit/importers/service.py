@@ -34,8 +34,7 @@ def normalize_pmids(pmids: list[str]) -> list[str]:
     out: list[str] = []
     for raw in pmids:
         token = raw.strip().removeprefix("PMID:").removeprefix("pmid:").strip()
-        token = "".join(ch for ch in token if ch.isdigit())
-        if token and token not in seen:
+        if token and token.isascii() and token.isdigit() and token not in seen:
             seen.add(token)
             out.append(token)
     return out
@@ -273,7 +272,8 @@ def run_import(
         )
         response.skipped.append(
             ImportOutcome(
-                pmid=pmid, status="abstract_only", title=meta.title, reason=reason
+                pmid=pmid, status="abstract_only" if meta.abstract else "error",
+                title=meta.title, reason=reason
             )
         )
 

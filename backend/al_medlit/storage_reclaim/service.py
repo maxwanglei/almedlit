@@ -127,6 +127,9 @@ def reclaim_orphaned_objects(
     for entry in candidates:
         if should_stop is not None and should_stop():
             break
+        if storage_key_is_referenced(db, entry.storage_key):
+            db.delete(entry)
+            continue
         try:
             storage.delete(entry.storage_key)
         except Exception as exc:
@@ -135,11 +138,7 @@ def reclaim_orphaned_objects(
             entry.last_error = _describe(exc)
             entry.last_attempted_at = moment
             entry.next_attempt_at = moment + _retry_delay(entry.attempts)
-            log = (
-                logger.error
-                if entry.attempts >= PERSISTENT_FAILURE_ATTEMPTS
-                else logger.warning
-            )
+            log = logger.error if entry.attempts >= PERSISTENT_FAILURE_ATTEMPTS else logger.warning
             log(
                 "Could not reclaim unreferenced object %s after %s attempts: %s",
                 entry.storage_key,
@@ -154,4 +153,30 @@ def reclaim_orphaned_objects(
         scanned_count=len(candidates),
         reclaimed_count=reclaimed,
         failed_count=failed,
+    )
+
+
+def storage_key_is_referenced(
+    db: Session,
+    storage_key: str,
+    *,
+    include_purged_blobs: bool = True,
+) -> bool:
+    from al_medlit.lineage.models import LineageArtifact
+    from al_medlit.model_artifacts.models import ArtifactBlob
+    from al_medlit.submission.models import AnnotationSubmission
+
+    if any(
+        db.query(model.id).filter(model.storage_key == storage_key).first() is not None
+        for model in (AnnotationSubmission, LineageArtifact)
+    ):
+        return True
+    blobs = db.query(ArtifactBlob).filter(ArtifactBlob.storage_key == storage_key)
+    if include_purged_blobs:
+        return blobs.first() is not None
+    from al_medlit.model_artifacts.service import _blob_has_live_package_reference
+
+    return any(
+        blob.status != "purged" or _blob_has_live_package_reference(db, blob.id)
+        for blob in blobs.populate_existing().with_for_update()
     )

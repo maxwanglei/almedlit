@@ -1538,7 +1538,7 @@ def test_direct_round_resolver_derives_project_and_enforces_assignment(
         f"/api/rounds/{assigned.id}/work-context",
         headers=_headers(workflow_scope.outsider),
     )
-    assert cross_workspace.status_code == 403
+    assert cross_workspace.status_code == 404
 
     mismatched_workspace = client.get(
         f"/api/rounds/{assigned.id}/work-context",

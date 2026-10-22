@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -12,6 +13,7 @@ from al_medlit.administration.router import (
 from al_medlit.annotation.router import router as annotation_router
 from al_medlit.annotation_workbench.router import router as annotation_workbench_router
 from al_medlit.auth.dependencies import enforce_authentication
+from al_medlit.auth.logging import ActionTokenAccessFilter
 from al_medlit.auth.router import router as auth_router
 from al_medlit.co_learning.error_guideline_learning.events import register_event_handlers
 from al_medlit.co_learning.error_guideline_learning.router import (
@@ -60,6 +62,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 def create_app() -> FastAPI:
+    access_logger = logging.getLogger("uvicorn.access")
+    if not any(isinstance(item, ActionTokenAccessFilter) for item in access_logger.filters):
+        access_logger.addFilter(ActionTokenAccessFilter())
     application = FastAPI(
         title="AL-MedLit Backend",
         description=(

@@ -145,11 +145,15 @@ def _sentence_tagger_class(torch):
                         dtype=logits.dtype,
                         device=logits.device,
                     )
-                loss = torch.nn.functional.cross_entropy(
-                    logits.reshape(-1, 3),
-                    labels.reshape(-1),
-                    weight=weights,
-                    ignore_index=-100,
+                loss = (
+                    torch.nn.functional.cross_entropy(
+                        logits.reshape(-1, 3),
+                        labels.reshape(-1),
+                        weight=weights,
+                        ignore_index=-100,
+                    )
+                    if (labels != -100).any()
+                    else logits.sum() * 0
                 )
             return {"loss": loss, "logits": logits}
 

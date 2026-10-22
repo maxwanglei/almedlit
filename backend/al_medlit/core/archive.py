@@ -62,20 +62,16 @@ def _validate_zip_inventory(source: BinaryIO, limits: ArchiveExtractionLimits) -
     )
     source.seek(archive_size - tail_size)
     tail = source.read(tail_size)
-    search_end = len(tail)
     end_record = None
     end_record_offset = None
-    while search_end:
-        offset = tail.rfind(_END_OF_CENTRAL_DIRECTORY_SIGNATURE, 0, search_end)
-        if offset < 0:
-            break
-        if offset + _END_OF_CENTRAL_DIRECTORY.size <= len(tail):
-            candidate = _END_OF_CENTRAL_DIRECTORY.unpack_from(tail, offset)
-            if offset + _END_OF_CENTRAL_DIRECTORY.size + candidate[7] == len(tail):
-                end_record = candidate
-                end_record_offset = archive_size - tail_size + offset
-                break
-        search_end = offset
+    # zipfile selects the last signature, including signatures inside comments.
+    # Reject ambiguous comments before it can load a different directory.
+    offset = tail.rfind(_END_OF_CENTRAL_DIRECTORY_SIGNATURE)
+    if offset >= 0 and offset + _END_OF_CENTRAL_DIRECTORY.size <= len(tail):
+        candidate = _END_OF_CENTRAL_DIRECTORY.unpack_from(tail, offset)
+        if offset + _END_OF_CENTRAL_DIRECTORY.size + candidate[7] == len(tail):
+            end_record = candidate
+            end_record_offset = archive_size - tail_size + offset
     if end_record is None or end_record_offset is None:
         raise ArchiveExtractionError("Archive is not a valid ZIP file")
 

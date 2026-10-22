@@ -637,7 +637,7 @@ export default function WorkspaceSettings({
                     >
                       <span>Invitation link</span>
                       <div className="workspace-share-value">
-                        <code>{`${window.location.origin}/invites/${encodeURIComponent(createdInvite.token)}`}</code>
+                        <code>{`${window.location.origin}/invites#token=${encodeURIComponent(createdInvite.token)}`}</code>
                         <Button
                           label="Copy invitation link"
                           icon={<Copy size={16} aria-hidden="true" />}
@@ -645,7 +645,7 @@ export default function WorkspaceSettings({
                           variant="ghost"
                           onClick={() =>
                             void copyText(
-                              `${window.location.origin}/invites/${encodeURIComponent(createdInvite.token)}`,
+                              `${window.location.origin}/invites#token=${encodeURIComponent(createdInvite.token)}`,
                               "Invitation link copied.",
                             )
                           }

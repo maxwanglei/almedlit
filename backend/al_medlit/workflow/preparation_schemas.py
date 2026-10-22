@@ -44,7 +44,7 @@ class TrainingPreparationRequest(InputModel):
     parent_version_id: int | None = Field(default=None, ge=1)
     train_percent: float = Field(default=80, gt=0, lt=100)
     validation_percent: float = Field(default=10, gt=0, lt=100)
-    seed: int = 42
+    seed: int = Field(default=42, ge=-(2**31), le=2**31 - 1)
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=160)
     preview_manifest_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 

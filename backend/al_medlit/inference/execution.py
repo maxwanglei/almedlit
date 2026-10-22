@@ -925,6 +925,7 @@ def _retrieve_remote_result(
                 max_total_bytes=4 * 1024 * 1024 * 1024,
             ),
         )
+        backend.collect_scheduler_logs(job_key=job_key, output_root=output_root)
     except ComputeBackendError as exc:
         raise ConflictError(str(exc)) from exc
     manifest_path = output_root / "artifact-manifest.json"
@@ -936,6 +937,14 @@ def _retrieve_remote_result(
         or artifact_manifest.get("status") != "succeeded"
     ):
         raise ConflictError("Remote inference result does not match this run")
+    scheduler_logs = [
+        path.read_text(encoding="utf-8", errors="replace")
+        for path in (output_root / "scheduler.stdout", output_root / "scheduler.stderr")
+        if path.is_file()
+    ]
+    if scheduler_logs:
+        with (output_root / "infer.log").open("a", encoding="utf-8") as stream:
+            stream.write("\n" + "\n".join(scheduler_logs))
     return artifact_manifest
 
 

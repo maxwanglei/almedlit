@@ -5,16 +5,16 @@ import {
   type AssignmentScope,
   getProject,
   getProjectProgress,
-  listDocuments,
+  listDocumentSummaries,
   listMyWorkProjects,
   listProjects,
   listTaskAssignments,
 } from "@/api/client";
-import type { Document, Project, ProjectProgress, TaskAssignment } from "@/types/api";
+import type { DocumentSummary, Project, ProjectProgress, TaskAssignment } from "@/types/api";
 
 interface ProjectWorkspaceState {
   projects: Project[];
-  documents: Document[];
+  documents: DocumentSummary[];
   assignments: TaskAssignment[];
   projectProgress: ProjectProgress | null;
   selectedProjectId: number | null;
@@ -71,7 +71,7 @@ function chooseProjectId(
 function initialProjectWorkspaceState() {
   return {
     projects: [] as Project[],
-    documents: [] as Document[],
+    documents: [] as DocumentSummary[],
     assignments: [] as TaskAssignment[],
     projectProgress: null as ProjectProgress | null,
     selectedProjectId: null as number | null,
@@ -251,7 +251,7 @@ export const useProjectWorkspaceStore = create<ProjectWorkspaceState>()(
       });
       try {
         const [documents, assignments, progress] = await Promise.all([
-          listDocuments(projectId, { scope }),
+          listDocumentSummaries(projectId, { scope }),
           listTaskAssignments(projectId, { scope }),
           getProjectProgress(projectId, scope),
         ]);

@@ -525,6 +525,7 @@ def update_annotation(
         "guideline_version_id": annotation.guideline_version_id,
         "start_offset": annotation.start_offset,
         "end_offset": annotation.end_offset,
+        "text_span": annotation.text_span,
         "head_annotation_id": annotation.head_annotation_id,
         "tail_annotation_id": annotation.tail_annotation_id,
         **updates,
@@ -533,6 +534,12 @@ def update_annotation(
     _validate_project_annotation_config(db, merged_values)
     document = db.get(Document, annotation.document_id)
     if document is not None:
+        if {"start_offset", "end_offset"} & updates.keys() and "text_span" not in updates:
+            start, end = merged_values["start_offset"], merged_values["end_offset"]
+            updates["text_span"] = (
+                document.text[start:end] if start is not None and end is not None else None
+            )
+            merged_values["text_span"] = updates["text_span"]
         _validate_span(merged_values, document)
 
     for field, value in updates.items():

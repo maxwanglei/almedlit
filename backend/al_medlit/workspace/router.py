@@ -5,7 +5,7 @@ from al_medlit.auth import service as auth_service
 from al_medlit.auth.cookies import set_session_cookies
 from al_medlit.auth.dependencies import get_current_user
 from al_medlit.auth.models import User
-from al_medlit.auth.schemas import SessionResponse, UserCreate
+from al_medlit.auth.schemas import ActionTokenRequest, SessionResponse, UserCreate
 from al_medlit.core import capabilities as cap
 from al_medlit.core.config import settings
 from al_medlit.core.database import get_db
@@ -21,6 +21,7 @@ from al_medlit.workspace.schemas import (
     InvitePreview,
     InviteRead,
     InviteSummaryRead,
+    InviteTokenAccept,
     JoinRequestCreate,
     JoinRequestRead,
     RoleUpdate,
@@ -50,7 +51,22 @@ def list_my_workspaces(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    return service.list_workspaces_for_user(db, current_user)
+    workspaces = service.list_workspaces_for_user(db, current_user)
+    admin_workspace_ids = {
+        workspace_id
+        for (workspace_id,) in db.query(WorkspaceMember.workspace_id).filter(
+            WorkspaceMember.user_id == current_user.id,
+            WorkspaceMember.role == "admin",
+        )
+    }
+    return [
+        WorkspaceRead.model_validate(workspace).model_copy(
+            update={"join_code": workspace.join_code if (
+                current_user.is_superuser or workspace.id in admin_workspace_ids
+            ) else None}
+        )
+        for workspace in workspaces
+    ]
 
 
 @router.get("/{workspace_id}/members", response_model=list[WorkspaceMemberRead])
@@ -247,7 +263,23 @@ def update_capability(
 invite_router = APIRouter(prefix="/invites", tags=["invites"])
 
 
-@invite_router.get("/{token}", response_model=InvitePreview)
+@invite_router.post("/preview", response_model=InvitePreview)
+def preview_invite_token(payload: ActionTokenRequest, db: Session = Depends(get_db)):
+    return preview_invite(payload.token, db)
+
+
+@invite_router.post("/accept", response_model=SessionResponse)
+def accept_invite_token(
+    payload: InviteTokenAccept,
+    request: Request,
+    response: Response,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    return accept_invite(payload.token, payload, request, response, authorization, db)
+
+
+@invite_router.get("/{token}", response_model=InvitePreview, deprecated=True)
 def preview_invite(token: str, db: Session = Depends(get_db)):
     """Describe an open invite so the acceptance page can name the workspace.
 
@@ -266,7 +298,7 @@ def preview_invite(token: str, db: Session = Depends(get_db)):
     )
 
 
-@invite_router.post("/{token}/accept", response_model=SessionResponse)
+@invite_router.post("/{token}/accept", response_model=SessionResponse, deprecated=True)
 def accept_invite(
     token: str,
     payload: InviteAccept,

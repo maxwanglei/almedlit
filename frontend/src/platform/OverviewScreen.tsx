@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 
 import type { CapabilityKey } from "@/auth/capabilities";
-import type { Document, ProjectProgress, ProjectTask, TaskAssignment } from "@/types/api";
+import type { DocumentSummary, ProjectProgress, ProjectTask, TaskAssignment } from "@/types/api";
 
 import {
   PlatformPageHeader,
@@ -23,7 +23,7 @@ import type { PlatformProjectData, TaskKind } from "./types";
 
 interface OverviewScreenProps {
   data: PlatformProjectData;
-  documents: Document[];
+  documents: DocumentSummary[];
   assignments: TaskAssignment[];
   progress: ProjectProgress | null;
   onOpenData: () => void;

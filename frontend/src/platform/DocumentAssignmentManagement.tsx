@@ -1,14 +1,14 @@
 import { useRef, useState } from "react";
 
 import { createProjectTask, createTaskAssignment, updateProjectTask, updateTaskAssignment } from "@/api/client";
-import type { Document, EvidenceTarget, GuidelineVersion, ProjectTask, TaskAssignment, TaskAssignmentStatus, WorkspaceMember } from "@/types/api";
+import type { DocumentSummary, EvidenceTarget, GuidelineVersion, ProjectTask, TaskAssignment, TaskAssignmentStatus, WorkspaceMember } from "@/types/api";
 
 import { formatStatus, PlatformStatus } from "./components";
 
 export interface DocumentAssignmentManagementProps {
   projectId: number;
   tasks: ProjectTask[];
-  documents: Document[];
+  documents: DocumentSummary[];
   members: WorkspaceMember[];
   targets: EvidenceTarget[];
   guidelines: GuidelineVersion[];
@@ -25,7 +25,7 @@ const TASK_KINDS = [
 ] as const;
 type NewTaskKind = typeof TASK_KINDS[number]["value"];
 
-function documentName(document: Document): string {
+function documentName(document: DocumentSummary): string {
   return document.title?.trim() || document.external_id || `Document ${document.id}`;
 }
 

@@ -84,9 +84,15 @@ class NeuralTrainingSummary(BaseModel):
     device: str
 
 
-def documents_from_window_rows(rows: Iterable[dict]) -> tuple[EvidenceTextDocument, ...]:
+def documents_from_window_rows(
+    rows: Iterable[dict],
+    *,
+    max_sentences: int | None = None,
+) -> tuple[EvidenceTextDocument, ...]:
     """Collapse overlapping prepared windows into document/target sequences."""
 
+    if max_sentences is not None and max_sentences < 1:
+        raise ValueError("max_sentences must be positive")
     groups: dict[tuple[str, str], dict] = {}
     for row_number, row in enumerate(rows, 1):
         document_id = row.get("document_id")
@@ -131,14 +137,17 @@ def documents_from_window_rows(rows: Iterable[dict]) -> tuple[EvidenceTextDocume
         ordered = [group["sentences"][key] for key in ordinals]
         if not ordered:
             continue
-        documents.append(
-            EvidenceTextDocument(
-                document_id=group["document_id"],
-                target_id=group["target_id"],
-                target_text=group["target_text"],
-                sentences=tuple(item[0] for item in ordered),
-                sentence_ordinals=ordinals,
-                labels=tuple(item[1] for item in ordered),
+        size = max_sentences or len(ordered)
+        for start in range(0, len(ordered), size):
+            selected = ordered[start : start + size]
+            documents.append(
+                EvidenceTextDocument(
+                    document_id=group["document_id"],
+                    target_id=group["target_id"],
+                    target_text=group["target_text"],
+                    sentences=tuple(item[0] for item in selected),
+                    sentence_ordinals=ordinals[start : start + size],
+                    labels=tuple(item[1] for item in selected),
+                )
             )
-        )
     return tuple(sorted(documents, key=lambda item: (item.document_id, str(item.target_id))))

@@ -17,6 +17,7 @@ from al_medlit.corpus.schemas import (
     DocumentCreate,
     DocumentRead,
     DocumentStructureRead,
+    DocumentSummaryRead,
     StructureRebuildRequest,
 )
 from al_medlit.project import service as project_service
@@ -43,10 +44,13 @@ def create_document(
     return document
 
 
-@router.get("", response_model=list[DocumentRead])
+@router.get("", response_model=list[DocumentRead | DocumentSummaryRead])
 def list_documents(
     project_id: int | None = Query(None),
     scope: str | None = Query(None, pattern="^(mine|all)$"),
+    summary: bool = Query(False),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -63,12 +67,17 @@ def list_documents(
         assignee_user_id = current_user.id
     elif scope == "all":
         assert_global_manager_scope(db, current_user)
-    return service.list_documents(
+    documents = service.list_documents(
         db,
         project_id,
         user=current_user,
         assignee_user_id=assignee_user_id,
+        summary=summary,
+        limit=limit,
+        offset=offset,
     )
+    schema = DocumentSummaryRead if summary else DocumentRead
+    return [schema.model_validate(document) for document in documents]
 
 
 @router.get("/{document_id}", response_model=DocumentRead)

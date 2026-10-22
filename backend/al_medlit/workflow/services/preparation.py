@@ -129,23 +129,6 @@ def _protected_source_context(
     return protected_ids, protected_tokens
 
 
-def is_source_item_in_prepared_holdout(
-    db: Session, item: models.DatasetItem, task_version_id: int | None = None
-) -> bool:
-    """Used by manual review as well as preparation; old held-out data stays held out."""
-    from .holdouts import _item_identity
-
-    version = _scoped(
-        db, models.DatasetVersion, item.dataset_version_id, item.project_id, "Dataset version"
-    )
-    ids, tokens = _item_identity(version, item, _prepared_provenance_items(db, version))
-    protected_ids, protected_tokens = _protected_source_context(
-        db, item.project_id, task_version_id,
-        identity_ids=ids, identity_tokens=tokens,
-    )
-    return bool(ids & protected_ids or tokens & protected_tokens)
-
-
 def _unique_dataset_name(db: Session, project_id: int, base: str) -> str:
     names = {
         value

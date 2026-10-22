@@ -10,11 +10,11 @@ import type { Document, TaskAssignment } from "@/types/api";
  * entirely. In that case we fall back to showing every document so the annotator
  * can work without waiting for a manager to create assignments.
  */
-export function visibleDocumentsFor(
-  documents: Document[],
+export function visibleDocumentsFor<T extends Pick<Document, "id">>(
+  documents: T[],
   assignments: TaskAssignment[],
   selectedAnnotatorId: string,
-): Document[] {
+): T[] {
   if (!selectedAnnotatorId || assignments.length === 0) {
     return documents;
   }

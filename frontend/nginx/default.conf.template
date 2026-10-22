@@ -22,6 +22,7 @@ server {
     # Invite and account-action previews are covered too; leaving a public
     # token lookup unthrottled would create a token-guessing oracle.
     location ~ ^/api/(?:auth/(?:login|register)|invites/[^/]+(?:/accept)?|account-actions/[^/]+)$ {
+        access_log off;
         limit_req zone=al_medlit_auth burst=10 nodelay;
         limit_req_status 429;
 
@@ -54,5 +55,10 @@ server {
 
     location / {
         try_files $uri $uri/ /index.html;
+    }
+
+    location ~ ^/(?:invites|account-actions)/[^/]+$ {
+        access_log off;
+        try_files $uri /index.html;
     }
 }

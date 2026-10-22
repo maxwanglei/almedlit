@@ -10,6 +10,7 @@ from al_medlit.administration.schemas import (
     AccountActionCompleteResponse,
     AccountActionLink,
     AccountActionPreview,
+    AccountActionTokenComplete,
     AdminUserCreate,
     AdminUserCreateResponse,
     AdminUserDetail,
@@ -20,6 +21,7 @@ from al_medlit.administration.schemas import (
 )
 from al_medlit.auth.cookies import set_session_cookies
 from al_medlit.auth.models import User
+from al_medlit.auth.schemas import ActionTokenRequest
 from al_medlit.core.database import get_db
 
 admin_router = APIRouter(prefix="/admin", tags=["system-administration"])
@@ -158,12 +160,30 @@ def create_password_reset_link(
     return action
 
 
-@account_action_router.get("/{token}", response_model=AccountActionPreview)
+@account_action_router.post("/preview", response_model=AccountActionPreview)
+def preview_account_action_token(
+    payload: ActionTokenRequest, db: Session = Depends(get_db),
+):
+    return service.preview_account_action(db, payload.token)
+
+
+@account_action_router.post("/complete", response_model=AccountActionCompleteResponse)
+def complete_account_action_token(
+    payload: AccountActionTokenComplete,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    return complete_account_action(payload.token, payload, response, db)
+
+
+@account_action_router.get("/{token}", response_model=AccountActionPreview, deprecated=True)
 def preview_account_action(token: str, db: Session = Depends(get_db)):
     return service.preview_account_action(db, token)
 
 
-@account_action_router.post("/{token}", response_model=AccountActionCompleteResponse)
+@account_action_router.post(
+    "/{token}", response_model=AccountActionCompleteResponse, deprecated=True,
+)
 def complete_account_action(
     token: str,
     payload: AccountActionComplete,

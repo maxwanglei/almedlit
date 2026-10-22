@@ -156,17 +156,21 @@ class EvidenceBlockWindowBuilder:
         sentences: Sequence[WindowSentenceInput],
         gold_blocks: Sequence[GoldBlockRange] = (),
         reviewed_intervals: Sequence[ReviewedInterval] = (),
+        target_token_count: int | None = None,
     ) -> WindowBuildResult:
         ordered = sorted(sentences, key=lambda item: item.ordinal)
         self._validate_inputs(ordered, gold_blocks, reviewed_intervals)
-        target_tokens = (
-            self.token_counter(f"[TARGET] {target.name} {target.text}")
-            if self.config.target_conditioning
-            else 0
-        )
-        usable_tokens = (
-            self.config.max_tokens - target_tokens - self.config.reserved_special_tokens
-        )
+        if target_token_count is None:
+            target_tokens = (
+                self.token_counter(f"[TARGET] {target.name} {target.text}")
+                if self.config.target_conditioning
+                else 0
+            )
+        else:
+            if target_token_count < 0:
+                raise WindowBuildError("Target token count cannot be negative")
+            target_tokens = target_token_count
+        usable_tokens = self.config.max_tokens - target_tokens - self.config.reserved_special_tokens
         if usable_tokens <= 0:
             raise WindowBuildError("Target conditioning leaves no room for document sentences")
 
@@ -342,8 +346,7 @@ class EvidenceBlockWindowBuilder:
 
         report.windows_generated = len(windows)
         positive_windows = sum(
-            any(sentence.label in {"B", "I"} for sentence in window.sentences)
-            for window in windows
+            any(sentence.label in {"B", "I"} for sentence in window.sentences) for window in windows
         )
         report.positive_window_ratio = positive_windows / len(windows) if windows else 0.0
         return WindowBuildResult(tuple(windows), report)
@@ -432,8 +435,7 @@ class EvidenceBlockWindowBuilder:
                 continue
             section_break = sentences[index].section_path != sentences[index + 1].section_path
             paragraph_break = (
-                sentences[index].paragraph_ordinal
-                != sentences[index + 1].paragraph_ordinal
+                sentences[index].paragraph_ordinal != sentences[index + 1].paragraph_ordinal
             )
             if section_break or paragraph_break:
                 candidates.append((index + 1, section_break, running))

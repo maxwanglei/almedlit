@@ -80,6 +80,7 @@ def _compute_evidence_iaa(
         ).append((row.start_sentence_ordinal, row.end_sentence_ordinal))
 
     pair_reports = []
+    reviewed_intervals_by_structure: dict[int, list[tuple[int, int]]] = {}
     for left_index, left_user_id in enumerate(reviewer_ids):
         for right_user_id in reviewer_ids[left_index + 1 :]:
             common_scopes = sorted(
@@ -107,6 +108,9 @@ def _compute_evidence_iaa(
                 reviewed_sentence_count = sum(end - start + 1 for start, end in intersection)
                 if reviewed_sentence_count == 0:
                     continue
+                reviewed_intervals_by_structure.setdefault(current_structure_id, []).extend(
+                    intersection
+                )
                 annotations = (
                     db.query(Annotation)
                     .join(EvidenceBlockAnnotation)
@@ -180,7 +184,12 @@ def _compute_evidence_iaa(
         report.status = "no_items" if len(reviewer_ids) >= 2 else report.status
         return report
     report.status = "ok"
-    report.item_count = sum(row["reviewed_sentence_count"] for row in pair_reports)
+    report.item_count = 0
+    for intervals in reviewed_intervals_by_structure.values():
+        last_end = -1
+        for start, end in sorted(intervals):
+            report.item_count += max(0, end - max(start, last_end + 1) + 1)
+            last_end = max(last_end, end)
     report.evidence_metrics.pairs = [
         EvidencePairIaa.model_validate(pair_report) for pair_report in pair_reports
     ]

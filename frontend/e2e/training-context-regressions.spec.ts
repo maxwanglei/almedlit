@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./fixtures/test";
 import { installPlatformApiMock } from "./fixtures/mockPlatformApi";
 
 test("training preparation keeps its context and nested-dialog draft on SPA navigation", async ({ page }) => {

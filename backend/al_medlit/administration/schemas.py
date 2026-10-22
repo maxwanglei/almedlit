@@ -3,7 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from al_medlit.auth.schemas import PublicPassword
+from al_medlit.auth.schemas import ActionTokenRequest, PublicPassword
 
 AccountActionPurpose = Literal["activation", "password_reset"]
 
@@ -88,6 +88,10 @@ class AccountActionPreview(BaseModel):
 
 class AccountActionComplete(BaseModel):
     password: PublicPassword
+
+
+class AccountActionTokenComplete(AccountActionComplete, ActionTokenRequest):
+    pass
 
 
 class AccountActionCompleteResponse(BaseModel):

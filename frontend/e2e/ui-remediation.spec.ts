@@ -1,5 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
-import { expect, test, type Page } from "@playwright/test";
+import { type Page } from "@playwright/test";
+import { expect, test } from "./fixtures/test";
 
 import { installEvidenceApiMock } from "./fixtures/mockEvidenceApi";
 import { installPlatformApiMock } from "./fixtures/mockPlatformApi";
@@ -56,6 +57,11 @@ for (const viewport of viewports) {
       browser,
       page,
     }) => {
+      await page.route("**/api/auth/me", (route) => route.fulfill({
+        status: 401,
+        contentType: "application/json",
+        body: JSON.stringify({ detail: "Sign in required" }),
+      }));
       await page.goto("/login");
       await disableMotion(page);
       await expect(page.getByRole("heading", { name: "AL-MedLit" })).toBeVisible();

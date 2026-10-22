@@ -226,6 +226,18 @@ function ProjectContextPicker({
   );
 }
 
+async function loadAllTrainingContexts(workspaceId: number, projects: Project[]) {
+  const result = await listWorkspaceTrainingContexts(workspaceId, projects, { limit: 100 });
+  const items = [...result.items];
+  let cursor = result.next_cursor;
+  while (cursor !== null) {
+    const page = await listWorkspaceTrainingContexts(workspaceId, projects, { limit: 100, cursor });
+    items.push(...page.items);
+    cursor = page.next_cursor;
+  }
+  return { items, next_cursor: null };
+}
+
 export default function TrainingWorkspace(
   props: TrainingWorkspaceProps,
 ): React.ReactElement {
@@ -626,11 +638,7 @@ function NewTraining({
     setLoading(true);
     setError(null);
     try {
-      const result = await listWorkspaceTrainingContexts(
-        workspaceId,
-        projects,
-        { limit: 100 },
-      );
+      const result = await loadAllTrainingContexts(workspaceId, projects);
       if (requestId !== contextsRequestIdRef.current) return;
       setContexts(result.items);
       setContextsWorkspaceId(workspaceId);
@@ -1110,7 +1118,7 @@ function TrainingData({
     setContextsWorkspaceId(null);
     setData(EMPTY_PLATFORM_PROJECT_DATA);
     setLoading(true);
-    void listWorkspaceTrainingContexts(workspaceId, projects, { limit: 100 })
+    void loadAllTrainingContexts(workspaceId, projects)
       .then((result) => {
         if (!active) return;
         setContexts(result.items);
@@ -1296,7 +1304,7 @@ function TrainingRuntimes({
     setProjectId(0);
     setData(EMPTY_PLATFORM_PROJECT_DATA);
     setLoading(true);
-    void listWorkspaceTrainingContexts(workspaceId, projects, { limit: 100 })
+    void loadAllTrainingContexts(workspaceId, projects)
       .then((result) => {
         if (!active) return;
         setContexts(result.items);

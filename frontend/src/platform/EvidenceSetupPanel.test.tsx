@@ -8,7 +8,7 @@ import type { Document, DocumentStructureRead, GuidelineVersion, ProjectTask } f
 import EvidenceSetupPanel from "./EvidenceSetupPanel";
 
 const mocks = vi.hoisted(() => ({
-  listDocuments: vi.fn(),
+  listDocumentSummaries: vi.fn(),
   listEvidenceTargets: vi.fn(),
   listGuidelineVersions: vi.fn(),
   listProjectTasks: vi.fn(),
@@ -73,7 +73,7 @@ const preparedStructure = {
 beforeEach(() => {
   vi.resetAllMocks();
   mocks.listProjectTasks.mockImplementation(async (projectId: number) => [task(projectId)]);
-  mocks.listDocuments.mockImplementation(async (projectId: number) => [document(projectId)]);
+  mocks.listDocumentSummaries.mockImplementation(async (projectId: number) => [document(projectId)]);
   mocks.listEvidenceTargets.mockResolvedValue([]);
   mocks.listGuidelineVersions.mockResolvedValue([]);
   mocks.listTaskAssignments.mockResolvedValue([]);
@@ -95,7 +95,7 @@ describe("EvidenceSetupPanel", () => {
     expect(await screen.findByLabelText("Document task management")).toBeTruthy();
     expect(screen.getByText("Paper 7 · structure 1")).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
-    expect(mocks.listDocuments).toHaveBeenLastCalledWith(7, { scope: "all" });
+    expect(mocks.listDocumentSummaries).toHaveBeenLastCalledWith(7, { scope: "all" });
     expect(mocks.listTaskAssignments).toHaveBeenLastCalledWith(7, { scope: "all" });
     expect(mocks.listWorkspaceMembers).toHaveBeenLastCalledWith(5);
     expect(onChanged).toHaveBeenCalledTimes(1);
@@ -125,7 +125,7 @@ describe("EvidenceSetupPanel", () => {
 
   it("retains a prepared document after read failure and retries the read without rebuilding it", async () => {
     const onChanged = vi.fn().mockResolvedValue(undefined);
-    mocks.listDocuments.mockResolvedValueOnce([document(7, null)])
+    mocks.listDocumentSummaries.mockResolvedValueOnce([document(7, null)])
       .mockRejectedValueOnce(new Error("Document refresh failed"))
       .mockResolvedValueOnce([document(7, 77)]);
     mocks.rebuildDocumentStructure.mockResolvedValue(preparedStructure);
@@ -140,7 +140,7 @@ describe("EvidenceSetupPanel", () => {
 
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
     expect(mocks.rebuildDocumentStructure).toHaveBeenCalledExactlyOnceWith(700, true);
-    expect(mocks.listDocuments).toHaveBeenCalledTimes(3);
+    expect(mocks.listDocumentSummaries).toHaveBeenCalledTimes(3);
     expect(onChanged).toHaveBeenCalledTimes(1);
     expect(screen.getByText("Paper 7 · structure 77")).toBeTruthy();
   });
@@ -158,7 +158,7 @@ describe("EvidenceSetupPanel", () => {
   });
 
   it("keeps a document unprepared when rebuilding does not activate a structure", async () => {
-    mocks.listDocuments.mockResolvedValue([document(7, null)]);
+    mocks.listDocumentSummaries.mockResolvedValue([document(7, null)]);
     mocks.rebuildDocumentStructure.mockResolvedValue({
       ...preparedStructure,
       active_structure_version_id: null,

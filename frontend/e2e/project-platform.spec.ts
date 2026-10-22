@@ -1,5 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
-import { expect, test, type Page } from "@playwright/test";
+import { type Page } from "@playwright/test";
+import { expect, test } from "./fixtures/test";
 
 import { installPlatformApiMock } from "./fixtures/mockPlatformApi";
 
@@ -346,6 +347,7 @@ test("workspace switching reloads effective access without a not-found transitio
     )
     .toBe("/my-work");
   await expect(page).toHaveTitle("My Work | AL-MedLit");
+  await expect(page.locator("main#main-content")).toHaveCount(1);
   await expect(page.locator("main#main-content")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Page not found" })).toHaveCount(
     0,

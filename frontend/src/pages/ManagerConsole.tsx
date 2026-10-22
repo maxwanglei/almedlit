@@ -61,7 +61,7 @@ import type {
   AnnotationSubmission,
   AnnotationType,
   AnnotationValidationMode,
-  Document,
+  DocumentSummary,
   EvidenceAdjudicationRead,
   EvidenceBlockTaskSettingsV1,
   EvidenceTarget,
@@ -402,7 +402,7 @@ function sortTasks(tasks: ProjectTask[]): ProjectTask[] {
   return [...tasks].sort((a, b) => a.sort_order - b.sort_order || a.id - b.id);
 }
 
-function documentTitle(documentItem: Document): string {
+function documentTitle(documentItem: DocumentSummary): string {
   return documentItem.title ?? documentItem.external_id ?? `Document ${documentItem.id}`;
 }
 
@@ -608,7 +608,8 @@ function percent(done: number, total: number): number {
   return Math.round((done / total) * 100);
 }
 
-function wordCount(documentItem: Document): number {
+function wordCount(documentItem: DocumentSummary): number | string {
+  if (!("text" in documentItem) || typeof documentItem.text !== "string") return "Unavailable";
   const text = documentItem.text.trim();
   return text ? text.split(/\s+/).length : 0;
 }
@@ -1954,7 +1955,7 @@ export default function ManagerConsole({
     });
   }
 
-  function documentQueueStatus(documentItem: Document): QueueStatus {
+  function documentQueueStatus(documentItem: DocumentSummary): QueueStatus {
     return documentQueueStatusFromAssignments(
       assignmentsByDocument.get(documentItem.id) ?? [],
     );
@@ -3075,7 +3076,7 @@ export default function ManagerConsole({
               {assignments.map((assignment) => (
                 <tr key={assignment.id}>
                   <td>{tasksById.get(assignment.task_id)?.display_name ?? `Task ${assignment.task_id}`}</td>
-                  <td>{documentTitle(documentsById.get(assignment.document_id) ?? { id: assignment.document_id, project_id: assignment.project_id, external_id: null, title: null, text: "", source: null, metadata_: {}, sentences: [], active_structure_version_id: null })}</td>
+                  <td>{documentTitle(documentsById.get(assignment.document_id) ?? { id: assignment.document_id, project_id: assignment.project_id, external_id: null, title: null, source: null, metadata_: {}, active_structure_version_id: null })}</td>
                   <td>
                     {assignment.target_version_id
                       ? (() => {

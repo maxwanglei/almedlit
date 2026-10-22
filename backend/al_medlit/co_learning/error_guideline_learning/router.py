@@ -122,7 +122,7 @@ def draft_guideline_atom(
         return service.draft_guideline_atom(
             db,
             pattern_id=pattern_id,
-            manager_id=payload.manager_id,
+            manager_id=current_user.username,
             rule_text_override=payload.rule_text_override,
         )
     except ValueError as exc:
@@ -150,7 +150,7 @@ def approve_guideline_atom(
     atom = _require_guideline_atom(db, atom_id)
     _enforce_project_access_and_capability(db, current_user, atom.project_id)
     try:
-        return service.approve_guideline_atom(db, atom_id, payload.approved_by)
+        return service.approve_guideline_atom(db, atom_id, current_user.username)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

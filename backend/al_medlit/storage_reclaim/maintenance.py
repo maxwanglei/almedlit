@@ -6,6 +6,7 @@ from threading import Event
 
 from al_medlit.core.database import SessionLocal
 from al_medlit.core.storage import get_object_storage
+from al_medlit.model_artifacts.service import sweep_unregistered_artifact_objects
 from al_medlit.storage_reclaim.service import reclaim_orphaned_objects
 
 logger = logging.getLogger(__name__)
@@ -16,9 +17,15 @@ def reclaim_once(stop_requested: Event | None = None) -> None:
     # The background thread owns its session and transaction. Request sessions
     # must never be shared with this sweep.
     with SessionLocal.begin() as db:
+        storage = get_object_storage()
         reclaim_orphaned_objects(
             db,
-            get_object_storage(),
+            storage,
+            should_stop=stop_requested.is_set if stop_requested is not None else None,
+        )
+        sweep_unregistered_artifact_objects(
+            db,
+            storage,
             should_stop=stop_requested.is_set if stop_requested is not None else None,
         )
 

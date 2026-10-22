@@ -120,7 +120,15 @@ def historical_assignments(
     item = models.DatasetItem
     owner = models.TrainingDatasetVersion
     owners = select(owner.id).where(owner.split_map_id == split.id).correlate(split)
-    task_owners = owners.where(owner.task_version_id == task_version_id)
+    task_definition = select(models.TaskVersion.task_definition_id).where(
+        models.TaskVersion.id == task_version_id,
+        models.TaskVersion.project_id == project_id,
+    ).scalar_subquery()
+    task_versions = select(models.TaskVersion.id).where(
+        models.TaskVersion.task_definition_id == task_definition,
+        models.TaskVersion.project_id == project_id,
+    )
+    task_owners = owners.where(owner.task_version_id.in_(task_versions))
     trusted = (
         select(owner.id)
         .where(
@@ -178,10 +186,12 @@ def historical_assignments(
             ),
         )
         if task_version_id is not None:
-            query = query.filter(owner.task_version_id == task_version_id)
+            query = query.filter(owner.task_version_id.in_(task_versions))
         query = query.filter(entries.c.value.in_(("train", "validation", "test")))
     elif task_version_id is not None:
-        query = query.filter(or_(~owners.exists(), task_owners.exists()))
+        query = query.filter(or_(
+            ~func.coalesce(prepared, False), ~owners.exists(), task_owners.exists(),
+        ))
     if protected_only:
         query = query.filter(protected)
 

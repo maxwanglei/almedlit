@@ -24,6 +24,7 @@ from .common import (
     _optional_package,
     _persist,
     _scoped,
+    _scoped_many,
     _task_output_hash,
     _validate_task_input,
     _validate_task_output,
@@ -291,16 +292,9 @@ def resolve_round_labels(
         )
     if len(data.submission_ids) != len(set(data.submission_ids)):
         raise ValidationError("submission_ids must be unique")
-    submissions = [
-        _scoped(
-            db,
-            models.RoundSubmission,
-            submission_id,
-            data.project_id,
-            "Round submission",
-        )
-        for submission_id in data.submission_ids
-    ]
+    submissions = list(_scoped_many(
+        db, models.RoundSubmission, data.submission_ids, data.project_id, "Round submission"
+    ).values())
     if any(submission.annotation_round_id != annotation_round.id for submission in submissions):
         raise ValidationError("All submissions must belong to the selected round")
 
@@ -308,24 +302,19 @@ def resolve_round_labels(
     accepted_kinds = (
         {"adjudication"} if data.source_kind == "adjudicated" else {"annotation", "correction"}
     )
+    decisions_by_id = _scoped_many(
+        db, models.RoundAnnotationDecision,
+        (decision_id for submission in submissions for decision_id in submission.decision_ids),
+        data.project_id, "Submitted annotation decision",
+    )
     for submission in sorted(submissions, key=lambda item: item.id):
-        seen_items: set[int] = set()
-        for decision_id in submission.decision_ids:
-            decision = _scoped(
-                db,
-                models.RoundAnnotationDecision,
-                decision_id,
-                data.project_id,
-                "Submitted annotation decision",
-            )
+        for decision_id in sorted(set(submission.decision_ids)):
+            decision = decisions_by_id[decision_id]
             if (
                 decision.annotator_user_id != submission.annotator_user_id
                 or decision.decision_kind not in accepted_kinds
             ):
                 continue
-            if decision.round_item_id in seen_items:
-                raise ValidationError("A submission contains multiple decisions for the same item")
-            seen_items.add(decision.round_item_id)
             latest_by_item[(decision.round_item_id, decision.annotator_user_id)] = (
                 submission.id, decision
             )
@@ -339,23 +328,21 @@ def resolve_round_labels(
         db, models.TaskVersion, annotation_round.task_version_id, data.project_id, "Task version"
     )
     output_by_key: dict[str, list[tuple[str, Any]]] = {}
+    round_items = _scoped_many(
+        db, models.RoundItem, (decision.round_item_id for decision in selected_decisions),
+        data.project_id, "Round item",
+    )
+    dataset_items = _scoped_many(
+        db, models.DatasetItem, (item.dataset_item_id for item in round_items.values()),
+        data.project_id, "Dataset item",
+    )
     for decision in selected_decisions:
-        round_item = _scoped(
-            db,
-            models.RoundItem,
-            decision.round_item_id,
-            data.project_id,
-            "Round item",
-        )
+        round_item = round_items[decision.round_item_id]
         if round_item.annotation_round_id != annotation_round.id:
             raise ValidationError("Submitted decision does not belong to the round")
-        dataset_item = _scoped(
-            db,
-            models.DatasetItem,
-            round_item.dataset_item_id,
-            data.project_id,
-            "Dataset item",
-        )
+        dataset_item = dataset_items[round_item.dataset_item_id]
+        if dataset_item.dataset_version_id != annotation_round.dataset_version_id:
+            raise ValidationError("Submitted item does not belong to the pinned dataset")
         output_by_key.setdefault(dataset_item.stable_key, []).append(
             (_task_output_hash(task_version, decision.output), decision.output)
         )

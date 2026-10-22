@@ -1018,6 +1018,18 @@ it("navigates the data project picker with a fresh project URL", async () => {
   expect(baseProps.onNavigate).toHaveBeenLastCalledWith("/training/data?projectId=8&flow=prepare");
 });
 
+it("loads training contexts beyond the first page", async () => {
+  const nextProject = { ...otherProject, workspace_id: 5 };
+  mocks.listWorkspaceTrainingContexts
+    .mockResolvedValueOnce({ items: [trainingContext(project)], next_cursor: 7 })
+    .mockResolvedValueOnce({ items: [trainingContext(nextProject)], next_cursor: null });
+  render(<TrainingWorkspace {...baseProps} view="data" initialProjectId={8} />);
+  await screen.findByRole("option", { name: /Generation benchmark/ });
+  expect(mocks.listWorkspaceTrainingContexts).toHaveBeenLastCalledWith(
+    5, baseProps.projects, { limit: 100, cursor: 7 },
+  );
+});
+
 it("preserves the created project when the parent refreshes contexts from an older launch URL", async () => {
   const user = userEvent.setup();
   const created = { ...project, id: 19, name: "Created training project" };

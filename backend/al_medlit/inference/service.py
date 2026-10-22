@@ -85,6 +85,7 @@ def launch_inference_run(
         idempotency_key=data.idempotency_key,
     )
     if existing is not None:
+        _assert_idempotent_request(existing, data)
         return existing
     snapshot = db.get(CorpusSnapshot, data.corpus_snapshot_id)
     if snapshot is None or snapshot.project_id != project_id:
@@ -165,6 +166,7 @@ def launch_inference_run(
             idempotency_key=data.idempotency_key,
         )
         if existing is not None:
+            _assert_idempotent_request(existing, data)
             return existing
         raise
     db.commit()
@@ -559,11 +561,28 @@ def lock_inference_run(db: Session, run_id: int) -> InferenceRun:
     return run
 
 
-def list_inference_runs(db: Session, project_id: int) -> list[InferenceRun]:
+def _assert_idempotent_request(run: InferenceRun, data: InferenceRunCreate) -> None:
+    if (
+        run.name != data.name
+        or run.corpus_snapshot_id != data.corpus_snapshot_id
+        or run.checkpoint_id != data.checkpoint_id
+        or run.compute_profile_id != data.compute_profile_id
+        or sorted(run.target_version_ids) != sorted(data.target_version_ids)
+        or run.window_config != data.window_config.model_dump()
+        or run.decoder_config != data.decoder_config.model_dump()
+    ):
+        raise ConflictError("Inference idempotency key was already used with different parameters")
+
+
+def list_inference_runs(
+    db: Session, project_id: int, *, limit: int = 100, offset: int = 0,
+) -> list[InferenceRun]:
     return (
         db.query(InferenceRun)
         .filter(InferenceRun.project_id == project_id)
-        .order_by(InferenceRun.created_at.desc())
+        .order_by(InferenceRun.created_at.desc(), InferenceRun.id.desc())
+        .offset(max(offset, 0))
+        .limit(min(max(limit, 1), 500))
         .all()
     )
 

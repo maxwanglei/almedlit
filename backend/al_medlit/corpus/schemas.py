@@ -20,6 +20,18 @@ class DocumentRead(DocumentCreate):
     model_config = {"from_attributes": True}
 
 
+class DocumentSummaryRead(BaseModel):
+    id: int
+    project_id: int
+    external_id: str | None
+    title: str | None
+    source: str | None
+    metadata_: dict
+    active_structure_version_id: int | None
+
+    model_config = {"from_attributes": True}
+
+
 class StructureVersionRead(BaseModel):
     id: int
     document_id: int

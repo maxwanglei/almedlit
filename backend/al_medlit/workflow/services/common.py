@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -252,6 +253,25 @@ def _optional_package(db: Session, project_id: int, package_id: int | None) -> N
     if package_id is None:
         return
     _scoped(db, ArtifactPackage, package_id, project_id, "Artifact package")
+
+
+def _scoped_many[ModelT](
+    db: Session,
+    model_type: type[ModelT],
+    record_ids: Iterable[int],
+    project_id: int,
+    label: str,
+) -> dict[int, ModelT]:
+    ids = sorted(set(record_ids))
+    records: dict[int, ModelT] = {}
+    for start in range(0, len(ids), 500):
+        batch = db.query(model_type).filter(
+            model_type.id.in_(ids[start : start + 500]), model_type.project_id == project_id,
+        ).all()
+        records.update({record.id: record for record in batch})
+    if len(records) != len(ids):
+        raise NotFoundError(f"{label} not found")
+    return records
 
 
 def _next_version(db: Session, model_type, scope_column, scope_id: int) -> int:

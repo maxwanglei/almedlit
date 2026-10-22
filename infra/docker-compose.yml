@@ -12,9 +12,10 @@
 # Usage:
 #   cp .env.example .env                                    # set secrets
 #   docker compose --env-file .env -f infra/docker-compose.yml up
-#   docker compose --env-file .env -f infra/docker-compose.yml --profile lab up
-#   docker compose --env-file .env -f infra/docker-compose.yml \
-#     --profile lab --profile classical-cpu up
+#   AL_MEDLIT_DEPLOYMENT_PROFILE=lab AL_MEDLIT_AUTH_COOKIE_SECURE=true \
+#     AL_MEDLIT_CELERY_BROKER_URL=redis://redis:6379/0 AL_MEDLIT_CELERY_TASK_ALWAYS_EAGER=false \
+#     docker compose --env-file .env -f infra/docker-compose.yml --profile lab up
+#   For runtime workers, add --profile classical-cpu to the lab command above.
 #
 # Both profiles share the *same* code, schema, and migrations. The variable
 # is deployment topology, not storage technology.
@@ -82,6 +83,23 @@ services:
       minio-cert-init:
         condition: service_completed_successfully
 
+  minio-app-init:
+    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+    restart: "no"
+    entrypoint: ["/bin/sh", "/scripts/provision-minio-app.sh"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-al_medlit}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD required}
+      AL_MEDLIT_STORAGE_BUCKET: ${AL_MEDLIT_STORAGE_BUCKET:-al-medlit}
+      AL_MEDLIT_STORAGE_ACCESS_KEY: ${AL_MEDLIT_STORAGE_ACCESS_KEY:-al-medlit-app}
+      AL_MEDLIT_STORAGE_SECRET_KEY: ${AL_MEDLIT_STORAGE_SECRET_KEY:?AL_MEDLIT_STORAGE_SECRET_KEY required}
+    volumes:
+      - ./scripts/provision-minio-app.sh:/scripts/provision-minio-app.sh:ro
+      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/certs:ro
+    depends_on:
+      minio:
+        condition: service_healthy
+
   # ------------------------------------------------------------------
   # Redis  (lab profile only — broker for Celery workers)
   # ------------------------------------------------------------------
@@ -124,8 +142,9 @@ services:
       AL_MEDLIT_CELERY_BROKER_URL: ${AL_MEDLIT_CELERY_BROKER_URL:-memory://}
       AL_MEDLIT_CELERY_TASK_ALWAYS_EAGER: ${AL_MEDLIT_CELERY_TASK_ALWAYS_EAGER:-true}
       AL_MEDLIT_STORAGE_ENDPOINT: minio:9000
-      AL_MEDLIT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-al_medlit}
-      AL_MEDLIT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      AL_MEDLIT_STORAGE_BUCKET: ${AL_MEDLIT_STORAGE_BUCKET:-al-medlit}
+      AL_MEDLIT_STORAGE_ACCESS_KEY: ${AL_MEDLIT_STORAGE_ACCESS_KEY:-al-medlit-app}
+      AL_MEDLIT_STORAGE_SECRET_KEY: ${AL_MEDLIT_STORAGE_SECRET_KEY:?AL_MEDLIT_STORAGE_SECRET_KEY required}
       AL_MEDLIT_STORAGE_SECURE: "true"
       AL_MEDLIT_STORAGE_CA_CERT_PATH: /etc/al-medlit/minio-certs/CAs/ca.crt
       AL_MEDLIT_AUTO_MIGRATE_ON_STARTUP: ${AL_MEDLIT_AUTO_MIGRATE_ON_STARTUP:-true}
@@ -139,8 +158,14 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      minio:
-        condition: service_healthy
+      minio-app-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()"]
+      interval: 5s
+      timeout: 4s
+      retries: 60
+      start_period: 20s
 
   # ------------------------------------------------------------------
   # Frontend  (every profile)
@@ -179,8 +204,9 @@ services:
       AL_MEDLIT_CELERY_TASK_ALWAYS_EAGER: "false"
       AL_MEDLIT_DEFAULT_WORKSPACE_ARTIFACT_QUOTA_BYTES: ${AL_MEDLIT_DEFAULT_WORKSPACE_ARTIFACT_QUOTA_BYTES:-10737418240}
       AL_MEDLIT_STORAGE_ENDPOINT: minio:9000
-      AL_MEDLIT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-al_medlit}
-      AL_MEDLIT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      AL_MEDLIT_STORAGE_BUCKET: ${AL_MEDLIT_STORAGE_BUCKET:-al-medlit}
+      AL_MEDLIT_STORAGE_ACCESS_KEY: ${AL_MEDLIT_STORAGE_ACCESS_KEY:-al-medlit-app}
+      AL_MEDLIT_STORAGE_SECRET_KEY: ${AL_MEDLIT_STORAGE_SECRET_KEY:?AL_MEDLIT_STORAGE_SECRET_KEY required}
       AL_MEDLIT_STORAGE_SECURE: "true"
       AL_MEDLIT_STORAGE_CA_CERT_PATH: /etc/al-medlit/minio-certs/CAs/ca.crt
     volumes:
@@ -188,7 +214,7 @@ services:
       - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro
     depends_on:
       backend:
-        condition: service_started
+        condition: service_healthy
       redis:
         condition: service_healthy
 
@@ -212,8 +238,9 @@ services:
       AL_MEDLIT_CELERY_TASK_ALWAYS_EAGER: "false"
       AL_MEDLIT_DEFAULT_WORKSPACE_ARTIFACT_QUOTA_BYTES: ${AL_MEDLIT_DEFAULT_WORKSPACE_ARTIFACT_QUOTA_BYTES:-10737418240}
       AL_MEDLIT_STORAGE_ENDPOINT: minio:9000
-      AL_MEDLIT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-al_medlit}
-      AL_MEDLIT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      AL_MEDLIT_STORAGE_BUCKET: ${AL_MEDLIT_STORAGE_BUCKET:-al-medlit}
+      AL_MEDLIT_STORAGE_ACCESS_KEY: ${AL_MEDLIT_STORAGE_ACCESS_KEY:-al-medlit-app}
+      AL_MEDLIT_STORAGE_SECRET_KEY: ${AL_MEDLIT_STORAGE_SECRET_KEY:?AL_MEDLIT_STORAGE_SECRET_KEY required}
       AL_MEDLIT_STORAGE_SECURE: "true"
       AL_MEDLIT_STORAGE_CA_CERT_PATH: /etc/al-medlit/minio-certs/CAs/ca.crt
       AL_MEDLIT_RUNTIME_PROFILE: classical-cpu
@@ -226,7 +253,7 @@ services:
       - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro
     depends_on:
       backend:
-        condition: service_started
+        condition: service_healthy
       redis:
         condition: service_healthy
 
@@ -250,8 +277,9 @@ services:
       AL_MEDLIT_CELERY_TASK_ALWAYS_EAGER: "false"
       AL_MEDLIT_DEFAULT_WORKSPACE_ARTIFACT_QUOTA_BYTES: ${AL_MEDLIT_DEFAULT_WORKSPACE_ARTIFACT_QUOTA_BYTES:-10737418240}
       AL_MEDLIT_STORAGE_ENDPOINT: minio:9000
-      AL_MEDLIT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-al_medlit}
-      AL_MEDLIT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      AL_MEDLIT_STORAGE_BUCKET: ${AL_MEDLIT_STORAGE_BUCKET:-al-medlit}
+      AL_MEDLIT_STORAGE_ACCESS_KEY: ${AL_MEDLIT_STORAGE_ACCESS_KEY:-al-medlit-app}
+      AL_MEDLIT_STORAGE_SECRET_KEY: ${AL_MEDLIT_STORAGE_SECRET_KEY:?AL_MEDLIT_STORAGE_SECRET_KEY required}
       AL_MEDLIT_STORAGE_SECURE: "true"
       AL_MEDLIT_STORAGE_CA_CERT_PATH: /etc/al-medlit/minio-certs/CAs/ca.crt
       AL_MEDLIT_RUNTIME_PROFILE: torch-cpu
@@ -264,7 +292,7 @@ services:
       - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro
     depends_on:
       backend:
-        condition: service_started
+        condition: service_healthy
       redis:
         condition: service_healthy
 
@@ -288,8 +316,9 @@ services:
       AL_MEDLIT_CELERY_TASK_ALWAYS_EAGER: "false"
       AL_MEDLIT_DEFAULT_WORKSPACE_ARTIFACT_QUOTA_BYTES: ${AL_MEDLIT_DEFAULT_WORKSPACE_ARTIFACT_QUOTA_BYTES:-10737418240}
       AL_MEDLIT_STORAGE_ENDPOINT: minio:9000
-      AL_MEDLIT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-al_medlit}
-      AL_MEDLIT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      AL_MEDLIT_STORAGE_BUCKET: ${AL_MEDLIT_STORAGE_BUCKET:-al-medlit}
+      AL_MEDLIT_STORAGE_ACCESS_KEY: ${AL_MEDLIT_STORAGE_ACCESS_KEY:-al-medlit-app}
+      AL_MEDLIT_STORAGE_SECRET_KEY: ${AL_MEDLIT_STORAGE_SECRET_KEY:?AL_MEDLIT_STORAGE_SECRET_KEY required}
       AL_MEDLIT_STORAGE_SECURE: "true"
       AL_MEDLIT_STORAGE_CA_CERT_PATH: /etc/al-medlit/minio-certs/CAs/ca.crt
       AL_MEDLIT_RUNTIME_PROFILE: transformer-cpu
@@ -302,7 +331,7 @@ services:
       - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro
     depends_on:
       backend:
-        condition: service_started
+        condition: service_healthy
       redis:
         condition: service_healthy
 
@@ -327,8 +356,9 @@ services:
       AL_MEDLIT_CELERY_TASK_ALWAYS_EAGER: "false"
       AL_MEDLIT_DEFAULT_WORKSPACE_ARTIFACT_QUOTA_BYTES: ${AL_MEDLIT_DEFAULT_WORKSPACE_ARTIFACT_QUOTA_BYTES:-10737418240}
       AL_MEDLIT_STORAGE_ENDPOINT: minio:9000
-      AL_MEDLIT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-al_medlit}
-      AL_MEDLIT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      AL_MEDLIT_STORAGE_BUCKET: ${AL_MEDLIT_STORAGE_BUCKET:-al-medlit}
+      AL_MEDLIT_STORAGE_ACCESS_KEY: ${AL_MEDLIT_STORAGE_ACCESS_KEY:-al-medlit-app}
+      AL_MEDLIT_STORAGE_SECRET_KEY: ${AL_MEDLIT_STORAGE_SECRET_KEY:?AL_MEDLIT_STORAGE_SECRET_KEY required}
       AL_MEDLIT_STORAGE_SECURE: "true"
       AL_MEDLIT_STORAGE_CA_CERT_PATH: /etc/al-medlit/minio-certs/CAs/ca.crt
       AL_MEDLIT_RUNTIME_PROFILE: peft-accelerator
@@ -340,7 +370,7 @@ services:
       - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro
     depends_on:
       backend:
-        condition: service_started
+        condition: service_healthy
       redis:
         condition: service_healthy
 
@@ -365,8 +395,9 @@ services:
       AL_MEDLIT_CELERY_TASK_ALWAYS_EAGER: "false"
       AL_MEDLIT_DEFAULT_WORKSPACE_ARTIFACT_QUOTA_BYTES: ${AL_MEDLIT_DEFAULT_WORKSPACE_ARTIFACT_QUOTA_BYTES:-10737418240}
       AL_MEDLIT_STORAGE_ENDPOINT: minio:9000
-      AL_MEDLIT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-al_medlit}
-      AL_MEDLIT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      AL_MEDLIT_STORAGE_BUCKET: ${AL_MEDLIT_STORAGE_BUCKET:-al-medlit}
+      AL_MEDLIT_STORAGE_ACCESS_KEY: ${AL_MEDLIT_STORAGE_ACCESS_KEY:-al-medlit-app}
+      AL_MEDLIT_STORAGE_SECRET_KEY: ${AL_MEDLIT_STORAGE_SECRET_KEY:?AL_MEDLIT_STORAGE_SECRET_KEY required}
       AL_MEDLIT_STORAGE_SECURE: "true"
       AL_MEDLIT_STORAGE_CA_CERT_PATH: /etc/al-medlit/minio-certs/CAs/ca.crt
       AL_MEDLIT_RUNTIME_PROFILE: qlora-cuda
@@ -378,7 +409,7 @@ services:
       - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro
     depends_on:
       backend:
-        condition: service_started
+        condition: service_healthy
       redis:
         condition: service_healthy
 
@@ -401,8 +432,9 @@ services:
       AL_MEDLIT_CELERY_TASK_ALWAYS_EAGER: "false"
       AL_MEDLIT_DEFAULT_WORKSPACE_ARTIFACT_QUOTA_BYTES: ${AL_MEDLIT_DEFAULT_WORKSPACE_ARTIFACT_QUOTA_BYTES:-10737418240}
       AL_MEDLIT_STORAGE_ENDPOINT: minio:9000
-      AL_MEDLIT_STORAGE_ACCESS_KEY: ${MINIO_ROOT_USER:-al_medlit}
-      AL_MEDLIT_STORAGE_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      AL_MEDLIT_STORAGE_BUCKET: ${AL_MEDLIT_STORAGE_BUCKET:-al-medlit}
+      AL_MEDLIT_STORAGE_ACCESS_KEY: ${AL_MEDLIT_STORAGE_ACCESS_KEY:-al-medlit-app}
+      AL_MEDLIT_STORAGE_SECRET_KEY: ${AL_MEDLIT_STORAGE_SECRET_KEY:?AL_MEDLIT_STORAGE_SECRET_KEY required}
       AL_MEDLIT_STORAGE_SECURE: "true"
       AL_MEDLIT_STORAGE_CA_CERT_PATH: /etc/al-medlit/minio-certs/CAs/ca.crt
     volumes:
@@ -410,7 +442,7 @@ services:
       - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro
     depends_on:
       backend:
-        condition: service_started
+        condition: service_healthy
       redis:
         condition: service_healthy
 

@@ -9,6 +9,7 @@ from al_medlit.core.database import get_db
 from al_medlit.core.exceptions import NotFoundError
 from al_medlit.project.models import Project
 from al_medlit.workflow import models, schemas, service
+from al_medlit.workflow.services.common import _canonical_hash
 
 from .shared import (
     _read,
@@ -45,6 +46,8 @@ def create_round(
 def list_rounds(
     project_id: int = Query(...),
     cycle_id: int | None = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -55,7 +58,7 @@ def list_rounds(
         min_role="trainer",
         module=("annotate", "activity"),
     )
-    return service.list_annotation_rounds(db, project_id, cycle_id)
+    return service.list_annotation_rounds(db, project_id, cycle_id, limit=limit, offset=offset)
 
 
 @router.get("/rounds/{round_id}", response_model=schemas.AnnotationRoundRead)
@@ -64,7 +67,7 @@ def get_round(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    annotation_round = service.get_annotation_round(db, round_id)
+    annotation_round = service.get_annotation_round(db, round_id, actor=current_user)
     _read(
         db,
         current_user,
@@ -89,7 +92,7 @@ def get_round_work_context(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    annotation_round = service.get_annotation_round(db, round_id)
+    annotation_round = service.get_annotation_round(db, round_id, actor=current_user)
     if workspace_id is not None:
         project = db.get(Project, annotation_round.project_id)
         if project is None or project.workspace_id != workspace_id:
@@ -113,6 +116,8 @@ def get_round_work_context(
 )
 def list_workspace_round_work_contexts(
     workspace_id: int,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -121,6 +126,8 @@ def list_workspace_round_work_contexts(
         db,
         workspace_id=workspace_id,
         actor=current_user,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -128,6 +135,8 @@ def list_workspace_round_work_contexts(
 def list_round_items(
     round_id: int,
     project_id: int = Query(...),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -146,7 +155,7 @@ def list_round_items(
         annotation_round,
         current_user,
     )
-    return service.list_round_items(db, project_id, round_id)
+    return service.list_round_items(db, project_id, round_id, limit=limit, offset=offset)
 
 
 @router.get(
@@ -156,6 +165,8 @@ def list_round_items(
 def list_round_work_items(
     round_id: int,
     project_id: int = Query(...),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -168,14 +179,30 @@ def list_round_work_items(
         annotation_round,
         current_user,
     )
-    return [
-        {"round_item": round_item, "dataset_item": dataset_item}
-        for round_item, dataset_item in service.list_round_work_items(
-            db,
-            project_id,
-            round_id,
-        )
-    ]
+    task = db.get(models.TaskVersion, annotation_round.task_version_id)
+    fields = set(task.input_schema.get("properties", {}))
+    if not fields:
+        fields = {
+            key for key, value in task.input_schema.items()
+            if isinstance(value, str)
+            and key not in {"type", "$schema", "$id", "title", "description"}
+        }
+    fields = fields or {"text"}
+    dataset = db.get(models.DatasetVersion, annotation_round.dataset_version_id)
+    if dataset.source_format == "project_corpus":
+        fields.update({"document_id", "title", "external_id"})
+    result = []
+    for round_item, dataset_item in service.list_round_work_items(
+        db, project_id, round_id, limit=limit, offset=offset,
+    ):
+        payload = {key: value for key, value in dataset_item.payload.items() if key in fields}
+        result.append({
+            "round_item": round_item,
+            "dataset_item": schemas.DatasetItemRead.model_validate(dataset_item).model_copy(
+                update={"payload": payload, "content_hash": _canonical_hash(payload)},
+            ),
+        })
+    return result
 
 
 @router.get(
@@ -186,6 +213,8 @@ def list_round_decisions(
     round_id: int,
     project_id: int = Query(...),
     annotator_user_id: int | None = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -196,6 +225,8 @@ def list_round_decisions(
         round_id,
         current_user,
         annotator_user_id,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -207,6 +238,8 @@ def list_round_submissions(
     round_id: int,
     project_id: int = Query(...),
     annotator_user_id: int | None = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -217,6 +250,8 @@ def list_round_submissions(
         round_id,
         current_user,
         annotator_user_id,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -369,7 +404,7 @@ def create_feedback_event(
         db,
         current_user,
         payload.project_id,
-        min_role=None,
+        min_role="manager",
         module="learning",
     )
     return service.create_feedback_event(db, payload, current_user)

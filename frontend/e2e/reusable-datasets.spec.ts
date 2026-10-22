@@ -1,15 +1,17 @@
 import AxeBuilder from "@axe-core/playwright";
-import { expect, test, type Page } from "@playwright/test";
+import { type Page } from "@playwright/test";
+import { expect, test } from "./fixtures/test";
 import { installPlatformApiMock } from "./fixtures/mockPlatformApi";
 
 const timestamp = "2026-09-14T12:00:00Z";
 const hash = "a".repeat(64);
 const base = { project_id: 1, created_at: timestamp, updated_at: timestamp, created_by_user_id: 2 };
 
-async function installReusableMock(page: Page, populated = false) {
+async function installReusableMock(page: Page, populated = false, withLabels = false) {
   const existing = await installPlatformApiMock(page, { role: "personal" });
   const datasets: Record<string, unknown>[] = populated ? [{ ...base, id: 21, name: "Tucatinib papers", source_type: "project_corpus", purposes: ["annotation", "inference"] }] : [];
-  const versions: Record<string, unknown>[] = populated ? [{ ...base, id: 22, dataset_id: 21, version_number: 1, item_count: 3, content_hash: hash, data_schema: {}, provenance: { source_document_ids: [1, 2, 3] }, source_format: "other", source_revision: hash, license_info: {} }] : [];
+  const dataSchema = { type: "object", properties: { text: { type: "string" }, ...(withLabels ? { label: { type: "string", enum: ["include", "exclude"] } } : {}) } };
+  const versions: Record<string, unknown>[] = populated ? [{ ...base, id: 22, dataset_id: 21, version_number: 1, item_count: 3, content_hash: hash, data_schema: dataSchema, provenance: { source_document_ids: [1, 2, 3] }, source_format: "other", source_revision: hash, license_info: {} }] : [];
   const training: Record<string, unknown>[] = [];
   const mutations: Array<{ path: string; body: Record<string, unknown> }> = [];
   const runs: Record<string, unknown>[] = [];
@@ -57,7 +59,7 @@ async function installReusableMock(page: Page, populated = false) {
     }
     if (path === "/api/projects/1/prediction-runs") {
       if (req.method() === "GET") return json(runs);
-      const run = { ...base, ...body, id: 91, task_version_id: 12, status: "completed", result_count: 3, failure_reason: null, completed_at: timestamp }; runs.push(run); return json(run, 201);
+      const run = { ...base, ...body, id: 91, task_version_id: 12, status: "completed", result_count: 3, failure_reason: null, completed_at: timestamp }; runs.push(run); return json(run, 202);
     }
     if (path === "/api/projects/1/prediction-runs/91/results") return json({ total: 3, offset: 0, limit: 50, items: [
       { dataset_item_id: 221, stable_key: "pmid:12345678", title: "Tucatinib full text", text: "Treatment results", prediction: "include", confidence: 0.91, uncertainty: 0.09, already_submitted: false, protected: false },
@@ -106,7 +108,7 @@ test("PMID import includes abstracts and reused papers, then pins annotation to 
 });
 
 test("training preparation previews external labels and hands the immutable version to training", async ({ page }, testInfo) => {
-  const state = await installReusableMock(page, true);
+  const state = await installReusableMock(page, true, true);
   await page.goto("/training/data?projectId=1&flow=prepare&datasetVersionId=22&taskVersionId=12");
   await page.getByLabel("Training dataset name").fill("Tucatinib training");
   await page.getByRole("button", { name: "Preview training dataset" }).click();
