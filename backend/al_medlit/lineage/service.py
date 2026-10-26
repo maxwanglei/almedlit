@@ -233,6 +233,9 @@ _FROZEN_ASSIGNMENT_STATUSES = {
     "adjudicated",
     "completed",
 }
+# Until a round is marked adjudicated, a reviewer's unpromoted blocks are
+# pending decisions; freezing them inside reviewed coverage would export "O".
+_PENDING_ADJUDICATION_STATUSES = {"submitted", "adjudication_ready"}
 
 
 def _derive_frozen_annotation_contents(
@@ -245,6 +248,7 @@ def _derive_frozen_annotation_contents(
 ) -> tuple[list[AnnotationSetItemCreate], list[AnnotationSetReviewRegionCreate]]:
     reviewed_by_scope: dict[tuple[int, int, int], list[tuple[int, int]]] = {}
     regions: list[AnnotationSetReviewRegionCreate] = []
+    pending_source_ids: set[int] = set()
 
     for snapshot_document in snapshot_documents.values():
         for target_version_id in sorted(requested_targets):
@@ -290,6 +294,36 @@ def _derive_frozen_annotation_contents(
                     for row in rows
                 )
             effective = _intersect_interval_sets(list(reviewer_intervals.values()))
+            for assignment in assignments:
+                if assignment.status not in _PENDING_ADJUDICATION_STATUSES:
+                    continue
+                reviewer_blocks = (
+                    db.query(Annotation)
+                    .join(EvidenceBlockAnnotation)
+                    .filter(
+                        Annotation.project_id == project_id,
+                        Annotation.document_id == snapshot_document.document_id,
+                        Annotation.annotation_type == "evidence_block",
+                        Annotation.source == "human",
+                        Annotation.status.in_(("draft", "accepted")),
+                        Annotation.annotator_user_id == assignment.assignee_user_id,
+                        Annotation.guideline_version_id
+                        == assignment.guideline_version_id,
+                        EvidenceBlockAnnotation.structure_version_id
+                        == snapshot_document.structure_version_id,
+                        EvidenceBlockAnnotation.target_version_id == target_version_id,
+                    )
+                    .all()
+                )
+                pending_source_ids.update(
+                    annotation.id
+                    for annotation in reviewer_blocks
+                    if any(
+                        start <= annotation.evidence_block.end_sentence_ordinal
+                        and end >= annotation.evidence_block.start_sentence_ordinal
+                        for start, end in effective
+                    )
+                )
             scope = (
                 snapshot_document.document_id,
                 snapshot_document.structure_version_id,
@@ -371,6 +405,7 @@ def _derive_frozen_annotation_contents(
             .all()
         )
         source_ids = adjudication.get("source_annotation_ids") or []
+        pending_source_ids.difference_update(source_ids)
         solo_gold = adjudication.get("solo_gold", not source_ids)
         items.append(
             AnnotationSetItemCreate(
@@ -394,6 +429,12 @@ def _derive_frozen_annotation_contents(
                     "note": block.note,
                 },
             )
+        )
+    if pending_source_ids:
+        raise ValidationError(
+            "Reviewed evidence blocks are awaiting adjudication; adjudicate them or "
+            "mark their assignments adjudicated before freezing: "
+            f"{sorted(pending_source_ids)}"
         )
     return items, regions
 

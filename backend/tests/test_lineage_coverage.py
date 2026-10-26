@@ -127,7 +127,22 @@ def _coverage(scope, guideline_id, start, end, *, reviewer=0):
     return coverage
 
 
-def _gold(scope, guideline_id, ordinal):
+def _gold(scope, guideline_id, ordinal, *, source_annotation_ids=()):
+    return _block(
+        scope,
+        guideline_id,
+        ordinal,
+        status="gold",
+        attributes={
+            "adjudication": {
+                "strategy": "a",
+                "source_annotation_ids": list(source_annotation_ids),
+            }
+        },
+    )
+
+
+def _block(scope, guideline_id, ordinal, *, status, attributes=None):
     sentence = scope.sentences[ordinal]
     annotation = Annotation(
         project_id=scope.project.id,
@@ -138,11 +153,11 @@ def _gold(scope, guideline_id, ordinal):
         start_offset=sentence.start_offset,
         end_offset=sentence.end_offset,
         text_span=scope.document.text[sentence.start_offset : sentence.end_offset],
-        status="gold",
+        status=status,
         source="human",
         annotator_user_id=scope.users[0].id,
         annotator_id=scope.users[0].username,
-        attributes={"adjudication": {"strategy": "a", "source_annotation_ids": []}},
+        attributes=attributes or {},
     )
     annotation.evidence_block = EvidenceBlockAnnotation(
         structure_version_id=scope.structure.id,
@@ -152,7 +167,7 @@ def _gold(scope, guideline_id, ordinal):
         start_sentence_ordinal=ordinal,
         end_sentence_ordinal=ordinal,
         labels=["supporting"],
-        locked=True,
+        locked=status == "gold",
     )
     scope.db.add(annotation)
     scope.db.flush()
@@ -232,6 +247,37 @@ def test_freeze_filters_gold_annotations_by_requested_guideline(frozen_scope):
     annotation_set = _freeze(scope, [v1])
     assert [item.source_annotation_id for item in annotation_set.items] == [selected.id]
     assert annotation_set.guideline_version_ids == [v1]
+
+
+@pytest.mark.parametrize("assignment_status", ["submitted", "adjudication_ready"])
+@pytest.mark.parametrize("block_status", ["draft", "accepted"])
+def test_freeze_rejects_reviewed_blocks_awaiting_adjudication(
+    frozen_scope, assignment_status, block_status
+):
+    scope = frozen_scope
+    v1 = scope.guidelines[0].id
+    _assignment(scope, v1, status=assignment_status)
+    _coverage(scope, v1, 0, 2)
+    _gold(scope, v1, 0, source_annotation_ids=[_block(scope, v1, 0, status=block_status).id])
+    pending = _block(scope, v1, 2, status=block_status)
+
+    with pytest.raises(ValidationError, match=rf"awaiting adjudication.*\[{pending.id}\]"):
+        _freeze(scope, [v1])
+
+
+@pytest.mark.parametrize("assignment_status", ["adjudicated", "completed"])
+def test_freeze_treats_unpromoted_blocks_as_negative_once_adjudicated(
+    frozen_scope, assignment_status
+):
+    scope = frozen_scope
+    v1 = scope.guidelines[0].id
+    _assignment(scope, v1, status=assignment_status)
+    _coverage(scope, v1, 0, 2)
+    _block(scope, v1, 1, status="accepted")
+
+    annotation_set = _freeze(scope, [v1])
+    assert annotation_set.block_count == 0
+    assert annotation_set.reviewed_region_count == 1
 
 
 def test_freeze_rejects_guideline_without_finalized_assignments(frozen_scope):
