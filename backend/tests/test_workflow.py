@@ -1770,7 +1770,7 @@ def test_public_dataset_training_launch_is_independent_of_annotation(
     )
     with pytest.raises(
         ValidationError,
-        match="registered trusted worker contract",
+        match="No trusted protected-test evaluator is registered",
     ):
         service.create_training_run(
             db,
@@ -2313,22 +2313,18 @@ def test_workspace_training_aggregates_are_enriched_isolated_and_paginated(
         role="manager",
     )
     db.commit()
-    manager_cancel = client.post(
-        f"/api/training-runs/{training_run.id}/transition",
-        params={"project_id": project_id},
-        json={"status": "cancelled"},
-        headers=_headers(other_manager),
-    )
-    assert manager_cancel.status_code == 403
-    assert "only their own" in manager_cancel.json()["detail"]
-    administrator_cancel = client.post(
-        f"/api/training-runs/{training_run.id}/transition",
-        params={"project_id": project_id},
-        json={"status": "cancelled"},
-        headers=_headers(workflow_scope.manager),
-    )
-    assert administrator_cancel.status_code == 403
-    assert "only their own" in administrator_cancel.json()["detail"]
+    for actor in (other_manager, workflow_scope.manager):
+        manager_cancel = client.post(
+            f"/api/training-runs/{training_run.id}/transition",
+            params={"project_id": project_id},
+            json={"status": "cancelled"},
+            headers=_headers(actor),
+        )
+        assert manager_cancel.status_code == 200, manager_cancel.text
+        assert manager_cancel.json()["status"] == "cancelled"
+        db.refresh(training_run)
+        training_run.status = "queued"
+        db.commit()
     creator_cancel = client.post(
         f"/api/training-runs/{training_run.id}/transition",
         params={"project_id": project_id},

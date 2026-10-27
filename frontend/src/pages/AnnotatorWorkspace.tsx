@@ -700,7 +700,7 @@ export default function AnnotatorWorkspace({
   const isMobileWorkspace = useMediaQuery("(max-width: 1120px)");
 
   const readPaneRef = useRef<HTMLDivElement | null>(null);
-  const spanRefs = useRef<Map<number, HTMLElement>>(new Map());
+  const spanRefs = useRef<Map<number, Map<string, HTMLElement>>>(new Map());
   const clearAnnotationInteractions = useCallback((): void => {
     setPendingSelection(null);
     setSaveStatus("idle");
@@ -716,9 +716,8 @@ export default function AnnotatorWorkspace({
   }, []);
   const handleActiveEvidenceAssignmentChange = useCallback(
     (assignment: TaskAssignment | null): void => {
-      if (assignment === null) return;
-      setSubmissionAssignmentId(assignment.id);
-      updateSearch({ assignment: assignment.id }, "replace");
+      setSubmissionAssignmentId(assignment?.id ?? null);
+      updateSearch({ assignment: assignment?.id ?? null }, "replace");
     },
     [updateSearch],
   );
@@ -1601,11 +1600,14 @@ export default function AnnotatorWorkspace({
     [selectedDocumentId, setWorkbench],
   );
 
-  function setSpanRef(annotationId: number, element: HTMLElement | null): void {
+  function setSpanRef(annotationId: number, segment: string, element: HTMLElement | null): void {
+    const segments = spanRefs.current.get(annotationId) ?? new Map<string, HTMLElement>();
     if (element) {
-      spanRefs.current.set(annotationId, element);
+      segments.set(segment, element);
+      spanRefs.current.set(annotationId, segments);
     } else {
-      spanRefs.current.delete(annotationId);
+      segments.delete(segment);
+      if (segments.size === 0) spanRefs.current.delete(annotationId);
     }
   }
 
@@ -2298,7 +2300,7 @@ export default function AnnotatorWorkspace({
           )}
           key={`ann-${start}-${end}-${covering.map((annotation) => annotation.id).join("-")}`}
           ref={(element) => {
-            covering.forEach((annotation) => setSpanRef(annotation.id, element));
+            covering.forEach((annotation) => setSpanRef(annotation.id, `${start}:${end}`, element));
           }}
           style={
             {
@@ -2307,8 +2309,8 @@ export default function AnnotatorWorkspace({
               borderBottomColor: color,
             } as React.CSSProperties
           }
-          role={isTaskEditable(tasksByType.get(primary.annotation_type)?.id) ? "button" : undefined}
-          tabIndex={isTaskEditable(tasksByType.get(primary.annotation_type)?.id) ? 0 : undefined}
+          role={covering.length === 1 && isTaskEditable(tasksByType.get(primary.annotation_type)?.id) ? "button" : undefined}
+          tabIndex={covering.length === 1 && isTaskEditable(tasksByType.get(primary.annotation_type)?.id) ? 0 : undefined}
           aria-label={isTaskEditable(tasksByType.get(primary.annotation_type)?.id) ? `${primary.label}: ${sliceDocumentText(start, end)}` : undefined}
           onClick={(event) => handleSpanClick(primary.id, event)}
           onKeyDown={(event) => handleSpanKeyDown(primary.id, event)}
@@ -2325,10 +2327,14 @@ export default function AnnotatorWorkspace({
           }}
           title={covering.map((annotation) => annotation.label).join(", ")}
         >
-          <span className="aw-span-badge" aria-hidden="true">
-            {compactLabel(primary.label)}
-            {covering.length > 1 ? ` +${covering.length - 1}` : ""}
-          </span>
+          {covering.length > 1 ? <span className="aw-span-badge aw-span-choices">
+            {covering.map((annotation) => <button key={annotation.id} type="button"
+              aria-label={`Select ${annotation.label} annotation ${annotation.id}`}
+              onClick={(event) => handleSpanClick(annotation.id, event)}
+              onKeyDown={(event) => handleSpanKeyDown(annotation.id, event)}>
+              {compactLabel(annotation.label)}
+            </button>)}
+          </span> : <span className="aw-span-badge" aria-hidden="true">{compactLabel(primary.label)}</span>}
           {sliceDocumentText(start, end)}
         </span>,
       ];
@@ -2346,8 +2352,8 @@ export default function AnnotatorWorkspace({
       if (relation.head_annotation_id === null || relation.tail_annotation_id === null) {
         return [];
       }
-      const head = spanRefs.current.get(relation.head_annotation_id);
-      const tail = spanRefs.current.get(relation.tail_annotation_id);
+      const head = Array.from(spanRefs.current.get(relation.head_annotation_id)?.values() ?? []).find((element) => element.isConnected);
+      const tail = Array.from(spanRefs.current.get(relation.tail_annotation_id)?.values() ?? []).find((element) => element.isConnected);
       if (!head || !tail) {
         return [];
       }

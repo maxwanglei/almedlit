@@ -122,6 +122,10 @@ def update_project_modules(
     selected: list[str],
 ) -> dict:
     project = _project(db, project_id)
+    project = (
+        db.query(Project).filter(Project.id == project_id)
+        .populate_existing().with_for_update().one()
+    )
     if len(selected) != len(set(selected)):
         raise ValidationError("Project modules must be unique")
     unknown = sorted(set(selected) - set(PROJECT_MODULES))

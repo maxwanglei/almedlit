@@ -8,6 +8,8 @@ from al_medlit.corpus.models import Document
 from al_medlit.evidence.models import EvidenceBlockAnnotation, EvidenceReviewCoverage
 from al_medlit.iaa import alignment, evidence_metrics, metrics
 from al_medlit.iaa.schemas import EvidencePairIaa, IaaReport
+from al_medlit.project.models import TaskAssignment
+from al_medlit.submission.models import AnnotationSubmission
 
 
 def _compute_evidence_iaa(
@@ -40,6 +42,20 @@ def _compute_evidence_iaa(
             EvidenceReviewCoverage.guideline_version_id == guideline_version_id
         )
     coverage_rows = coverage_query.all()
+    assignments = db.query(TaskAssignment).filter(
+        TaskAssignment.project_id == project_id,
+        TaskAssignment.document_id == document_id,
+        TaskAssignment.target_version_id == target_version_id,
+    ).populate_existing().all()
+    if assignments:
+        finalized_scopes = {
+            (row.assignee_user_id, row.structure_version_id, row.guideline_version_id)
+            for row in assignments
+            if row.status in {"submitted", "adjudication_ready", "adjudicated", "completed"}
+        }
+        coverage_rows = [row for row in coverage_rows if (
+            row.reviewer_user_id, row.structure_version_id, row.guideline_version_id
+        ) in finalized_scopes]
     reviewer_ids = sorted({row.reviewer_user_id for row in coverage_rows})
     usernames = {
         user.id: user.username
@@ -222,6 +238,8 @@ def compute_iaa(
             filter_guideline_version=filter_guideline_version,
         )
 
+    filter_structure = filter_structure_version or structure_version_id is not None
+    filter_guideline = filter_guideline_version or guideline_version_id is not None
     query = (
         db.query(Annotation)
         .join(Document, Document.id == Annotation.document_id)
@@ -237,35 +255,67 @@ def compute_iaa(
         query = query.options(joinedload(Annotation.head), joinedload(Annotation.tail))
     if document_id is not None:
         query = query.filter(Annotation.document_id == document_id)
-    if filter_structure_version or structure_version_id is not None:
+    if filter_structure:
         query = query.filter(
             Annotation.structure_version_id == structure_version_id
         )
-    if filter_guideline_version or guideline_version_id is not None:
+    if filter_guideline:
         query = query.filter(
             Annotation.guideline_version_id == guideline_version_id
         )
     annotations = query.all()
+
+    selected_scopes = {
+        (
+            annotation.document_id,
+            annotation.structure_version_id,
+            annotation.guideline_version_id,
+        )
+        for annotation in annotations
+    }
+    submissions = db.query(AnnotationSubmission).options(
+        joinedload(AnnotationSubmission.assignment).joinedload(TaskAssignment.task)
+    ).filter(
+        AnnotationSubmission.project_id == project_id,
+        AnnotationSubmission.kind == "submission",
+    )
+    if document_id is not None:
+        submissions = submissions.filter(AnnotationSubmission.document_id == document_id)
+    submitted_annotators = set()
+    for submission in submissions:
+        assignment = submission.assignment
+        if assignment is not None:
+            if assignment.task.annotation_type != annotation_type:
+                continue
+            if filter_structure and assignment.structure_version_id != structure_version_id:
+                continue
+            if filter_guideline and assignment.guideline_version_id != guideline_version_id:
+                continue
+            selected_scopes.add((
+                submission.document_id,
+                assignment.structure_version_id,
+                assignment.guideline_version_id,
+            ))
+        elif filter_structure or filter_guideline:
+            continue
+        if submission.annotator_id:
+            submitted_annotators.add(submission.annotator_id)
 
     # Never collapse multiple annotation rounds into one agreement score. A
     # structure id is document-specific, so project-wide IAA may legitimately
     # contain one different structure per document; what is ambiguous is more
     # than one structure for the same document, or more than one guideline
     # version across the selected records when that pin was omitted.
-    if guideline_version_id is None and not filter_guideline_version:
-        selected_guidelines = {
-            annotation.guideline_version_id for annotation in annotations
-        }
+    if not filter_guideline:
+        selected_guidelines = {scope[2] for scope in selected_scopes}
         if len(selected_guidelines) > 1:
             raise ValidationError(
                 "IAA cannot combine annotation rounds; specify guideline_version_id"
             )
-    if structure_version_id is None and not filter_structure_version:
+    if not filter_structure:
         structures_by_document: dict[int, set[int | None]] = {}
-        for annotation in annotations:
-            structures_by_document.setdefault(annotation.document_id, set()).add(
-                annotation.structure_version_id
-            )
+        for scope_document_id, scope_structure_id, _ in selected_scopes:
+            structures_by_document.setdefault(scope_document_id, set()).add(scope_structure_id)
         if any(len(structures) > 1 for structures in structures_by_document.values()):
             raise ValidationError(
                 "IAA cannot combine annotation rounds; specify document_id and "
@@ -273,7 +323,9 @@ def compute_iaa(
             )
 
     try:
-        annotators, items, spans_by_annotator = alignment.build_rating_matrix(annotations)
+        annotators, items, spans_by_annotator = alignment.build_rating_matrix(
+            annotations, submitted_annotators=submitted_annotators,
+        )
     except ValueError as exc:
         raise ValidationError(str(exc)) from exc
 

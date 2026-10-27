@@ -1011,6 +1011,10 @@ def downgrade() -> None:
         batch_op.drop_index(batch_op.f('ix_evidence_target_versions_id'))
         batch_op.drop_index(batch_op.f('ix_evidence_target_versions_created_by_user_id'))
 
+    if op.get_bind().dialect.name != 'sqlite':
+        op.drop_constraint(
+            'fk_evidence_targets_active_version_id', 'evidence_targets', type_='foreignkey'
+        )
     op.drop_table('evidence_target_versions')
     with op.batch_alter_table('document_sections', schema=None) as batch_op:
         batch_op.drop_index(batch_op.f('ix_document_sections_structure_version_id'))

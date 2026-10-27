@@ -460,6 +460,8 @@ def _open_round_ready_to_close(
     db: Session, scope: _Scope, assistance_policy: str
 ) -> tuple[int, int, int]:
     annotation_round = _round(db, scope, assistance_policy=assistance_policy, status="open")
+    annotation_round.annotator_user_ids = []
+    annotation_round.open_to_all_annotators = True
     item = models.RoundItem(
         project_id=scope.project_id,
         annotation_round_id=annotation_round.id,

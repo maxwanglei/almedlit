@@ -407,7 +407,7 @@ def evaluate_peft_examples(
                 sentence_ordinals=tuple(ordinals),
                 sentence_texts=tuple(group["sentences"][ordinal] for ordinal in ordinals),
                 target_text=group["target_text"],
-                reference_blocks=blocks_from_bio(gold),
+                reference_blocks=blocks_from_bio(gold, sentence_ordinals=tuple(ordinals)),
                 predicted_labels=predicted,
             )
         )

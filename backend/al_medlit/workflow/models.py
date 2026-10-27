@@ -479,6 +479,10 @@ class AnnotationRound(Base, IntPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "annotation_rounds"
     __table_args__ = (
         UniqueConstraint(
+            "project_id", "created_by_user_id", "request_key",
+            name="uq_annotation_rounds_actor_request",
+        ),
+        UniqueConstraint(
             "project_id",
             "cycle_id",
             "sequence",
@@ -494,6 +498,8 @@ class AnnotationRound(Base, IntPrimaryKeyMixin, TimestampMixin):
     )
 
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), index=True)
+    request_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    request_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     parent_round_id: Mapped[int | None] = mapped_column(
         ForeignKey("annotation_rounds.id"), nullable=True, index=True
     )
@@ -821,6 +827,11 @@ class StoragePolicy(Base, IntPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "storage_policies"
     __table_args__ = (
         UniqueConstraint("project_id", "name", name="uq_storage_policies_project_name"),
+        Index(
+            "uq_storage_policies_project_default", "project_id", unique=True,
+            postgresql_where=text("is_default = true"),
+            sqlite_where=text("is_default = 1"),
+        ),
         CheckConstraint(
             "backend IN ('minio', 'local')",
             name="ck_storage_policies_executable_backend",

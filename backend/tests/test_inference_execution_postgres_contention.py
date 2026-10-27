@@ -401,16 +401,16 @@ def test_cancel_during_local_execution_is_not_overwritten(
             profile_config={"runtime_root": str(tmp_path / "attempts")},
         )
 
-    storing_diagnostics = threading.Event()
+    building_windows = threading.Event()
     cancel_committed = threading.Event()
-    original_store = service.store_inference_diagnostics
+    original_build = EvidenceBlockWindowBuilder.build
 
-    def paused_store(*args, **kwargs):
-        storing_diagnostics.set()
+    def paused_build(self, *args, **kwargs):
+        building_windows.set()
         assert cancel_committed.wait(timeout=_LOCK_TIMEOUT_SECONDS)
-        return original_store(*args, **kwargs)
+        return original_build(self, *args, **kwargs)
 
-    monkeypatch.setattr(service, "store_inference_diagnostics", paused_store)
+    monkeypatch.setattr(EvidenceBlockWindowBuilder, "build", paused_build)
 
     def execute(db: Session) -> str:
         return execution.execute_local_inference(
@@ -427,7 +427,7 @@ def test_cancel_during_local_execution_is_not_overwritten(
     worker = _Worker(postgres_session_factory)
     worker.start("executor", execute)
     try:
-        assert storing_diagnostics.wait(timeout=_LOCK_TIMEOUT_SECONDS), worker.results
+        assert building_windows.wait(timeout=_LOCK_TIMEOUT_SECONDS), worker.results
         worker.start("cancel", cancel)
         worker.join("cancel")
     finally:
@@ -442,6 +442,10 @@ def test_cancel_during_local_execution_is_not_overwritten(
         run = db.get(InferenceRun, run_id)
         assert run.status == "cancelled"
         assert run.completed_at is not None
+        assert db.query(InferenceWindow).filter(InferenceWindow.run_id == run_id).count() == 0
+        assert db.query(EvidenceCandidatePrediction).filter(
+            EvidenceCandidatePrediction.run_id == run_id,
+        ).count() == 0
 
 
 def test_concurrent_remote_finalizations_store_one_result(

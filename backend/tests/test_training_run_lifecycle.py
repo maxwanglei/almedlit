@@ -140,3 +140,43 @@ def test_late_failure_preserves_cancelled_run(db):
     )
     _mark_failed(db, scope.run.id, RuntimeError("late failure"), execution_token="owner")
     assert db.get(models.TrainingRun, scope.run.id).status == "cancelled"
+
+
+def test_dispatch_acknowledgement_failure_preserves_claim_at_transition_boundary(db, monkeypatch):
+    from types import SimpleNamespace
+
+    from al_medlit.training.run_execution import _claim_training_run
+    from al_medlit.workflow import service
+    from al_medlit.workflow.routes import training as routes
+
+    scope = _training_run_fixture(db, storage=MemoryObjectStorage(), suffix="dispatch-race")
+    monkeypatch.setattr(routes, "_write", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "create_training_run", lambda *args, **kwargs: scope.run)
+
+    def accepted_without_acknowledgement(*args, **kwargs):
+        raise RuntimeError("broker accepted delivery but acknowledgement was lost")
+
+    monkeypatch.setattr(routes, "enqueue_training_run", accepted_without_acknowledgement)
+    real_lock = service.lock_training_run_for_mutation
+    claimed = False
+
+    def worker_claim_before_recovery_lock(*args, **kwargs):
+        nonlocal claimed
+        if not claimed:
+            claimed = True
+            _claim_training_run(db, scope.run.id, execution_token="worker")
+        return real_lock(*args, **kwargs)
+
+    monkeypatch.setattr(
+        service, "lock_training_run_for_mutation", worker_claim_before_recovery_lock
+    )
+    returned = routes.create_training_run(
+        SimpleNamespace(project_id=scope.project.id),
+        current_user=object(),
+        db=db,
+    )
+    assert claimed
+    assert returned.status == "running"
+    reservation = db.get(ArtifactStorageReservation, returned.artifact_reservation_id)
+    assert reservation.status == "active"
+    assert returned.runtime_snapshot["worker_execution_token"] == "worker"

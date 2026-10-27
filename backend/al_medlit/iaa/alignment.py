@@ -45,7 +45,7 @@ def _item_key(annotation) -> ItemKey:
     return ("relation", endpoints[0], endpoints[1])
 
 
-def build_rating_matrix(annotations):
+def build_rating_matrix(annotations, *, submitted_annotators=()):
     """Build the aligned rating matrix for one annotation type in one scope.
 
     Returns a tuple ``(annotators, items, spans_by_annotator)`` where:
@@ -60,6 +60,7 @@ def build_rating_matrix(annotations):
     """
     annotators = sorted(
         {annotation.annotator_id for annotation in annotations if annotation.annotator_id}
+        | set(submitted_annotators)
     )
     by_item: dict[ItemKey, dict[str, set[str]]] = {}
     spans_by_annotator: dict[str, set[ItemKey]] = {annotator: set() for annotator in annotators}

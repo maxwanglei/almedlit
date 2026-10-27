@@ -554,11 +554,15 @@ def _declared_label_vocabulary(
     for source in (task.label_rules, task.output_schema):
         if not isinstance(source, Mapping):
             continue
-        for key in ("labels", "classes", target_field):
+        for key in ("values", "labels", "classes", "enum", target_field):
             value = source.get(key)
             if isinstance(value, list) and all(isinstance(item, str) for item in value):
                 candidates = value
                 break
+        if candidates is None and isinstance(source.get("items"), Mapping):
+            value = source["items"].get("enum")
+            if isinstance(value, list) and all(isinstance(item, str) for item in value):
+                candidates = value
         if candidates is not None:
             break
     if candidates is None:
@@ -1540,6 +1544,8 @@ def _run_protected_test_evaluation(
         ),
         actor_user_id=pinned.run.created_by_user_id,
         upstream_lineage_artifact_ids=upstream_ids,
+        reservation_id=pinned.run.artifact_reservation_id,
+        keep_reservation_open=True,
     )
     return _ProtectedEvaluationResult(
         evaluation_input=evaluation_input,
@@ -1814,11 +1820,17 @@ def execute_training_run(
         evaluation_requested = "test" in _evaluation_plan_splits(pinned)
         evaluator = None
         if evaluation_requested:
+            _requested_evaluation_metrics(pinned)
             if evaluator_registry is None:
                 from al_medlit.training.evaluators import evaluator_plugins
 
                 evaluator_registry = evaluator_plugins
             evaluator = evaluator_registry.find_for_recipe(pinned.recipe.key)
+            if evaluator is None:
+                raise ValidationError(
+                    f"No trusted protected-test evaluator is registered for recipe "
+                    f"'{pinned.recipe.key}'"
+                )
 
         with tempfile.TemporaryDirectory(prefix=f"al-medlit-run-{run.id}-") as temporary:
             root = Path(temporary)
@@ -1925,6 +1937,7 @@ def execute_training_run(
                     actor_user_id=run.created_by_user_id,
                     upstream_lineage_artifact_ids=upstream_ids,
                     reservation_id=run.artifact_reservation_id,
+                    keep_reservation_open=True,
                 )
                 db.commit()
                 evaluation_result = _run_protected_test_evaluation(
@@ -1992,7 +2005,11 @@ def execute_training_run(
                                 evaluation_package.lineage_artifact_id,
                             }
                         ),
+                        reservation_id=run.artifact_reservation_id,
                     )
+                    candidate_package.retention.pinned = False
+                    candidate_package.retention.retention_class = retention
+                    candidate_package.retention.expires_at = package.retention.expires_at
                 else:
                     package = candidate_package
             else:

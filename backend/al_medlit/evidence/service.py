@@ -2110,6 +2110,8 @@ def adjudicate(
         operation="adjudicate",
     )
     annotation.evidence_block.locked = True
+    for source in sources:
+        source.evidence_block.locked = True
     db.commit()
     db.refresh(annotation)
     return annotation
@@ -2544,6 +2546,34 @@ def _set_command_state(
         raise ConflictError(
             "Evidence command cannot restore an annotation because its id is in use"
         ) from exc
+    for state in desired_states:
+        if not state:
+            continue
+        payload = EvidenceBlockPayloadV1(
+            structure_version_id=state["structure_version_id"],
+            target_version_id=state["target_version_id"],
+            start_sentence_id=state["start_sentence_id"],
+            end_sentence_id=state["end_sentence_id"],
+            labels=state["labels"],
+            note=state["note"],
+        )
+        start, end = _sentence_range(
+            db,
+            structure_version_id=payload.structure_version_id,
+            start_sentence_id=payload.start_sentence_id,
+            end_sentence_id=payload.end_sentence_id,
+        )
+        _validate_block_policy(
+            db,
+            project_id=state["project_id"],
+            guideline_version_id=state["guideline_version_id"],
+            payload=payload,
+            start=start,
+            end=end,
+            annotator_user_id=state["annotator_user_id"],
+            status=state["status"],
+            exclude_annotation_ids=(state["annotation_id"],),
+        )
     for row in rows:
         row.is_undone = undo
     _reopen_command_coverage(

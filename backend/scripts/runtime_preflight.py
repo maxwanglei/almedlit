@@ -15,7 +15,9 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
+from al_medlit.core.database import SessionLocal
 from al_medlit.core.storage import get_object_storage
+from al_medlit.storage_reclaim.service import record_orphaned_object
 from al_medlit.training.runtime_profiles import (
     RUNTIME_PROFILES,
     RuntimeReadinessReport,
@@ -24,7 +26,7 @@ from al_medlit.training.runtime_profiles import (
 
 
 def normalize_worker_image_digest(value: str | None) -> str | None:
-    normalized = (value or "").strip()
+    normalized = (value or "").strip().lower()
     if normalized.startswith("sha256:"):
         normalized = normalized.removeprefix("sha256:")
     return normalized or None
@@ -66,7 +68,12 @@ def _probe_storage() -> bool:
         storage.put_bytes(key, payload, content_type="application/octet-stream")
         return storage.get_bytes(key) == payload
     finally:
-        storage.delete(key)
+        try:
+            storage.delete(key)
+        except Exception as exc:
+            with SessionLocal() as db:
+                record_orphaned_object(db, key, origin="runtime.preflight", error=exc)
+            raise
 
 
 def collect_runtime_readiness(
@@ -76,6 +83,7 @@ def collect_runtime_readiness(
     worker_image_digest: str | None,
     storage_probe: Callable[[], bool] = _probe_storage,
 ) -> RuntimeReadinessReport:
+    worker_image_digest = normalize_worker_image_digest(worker_image_digest)
     descriptor = RUNTIME_PROFILES[runtime_profile]
     dependency_versions: dict[str, str] = {}
     missing_dependencies: list[str] = []

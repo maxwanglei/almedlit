@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime
 
+from sqlalchemy import Integer, cast, select
 from sqlalchemy.orm import Session
 
 from al_medlit.auth.models import User
@@ -9,11 +10,14 @@ from al_medlit.core.exceptions import ConflictError, NotFoundError, ValidationEr
 from al_medlit.project.models import Project
 from al_medlit.workflow import models
 from al_medlit.workflow import prediction_schemas as schemas
+from al_medlit.workspace.models import WorkspaceMember
 
 from .common import _canonical_hash, _commit, _next_sequence, _scoped
 from .feedback_scoring import _validate_scoring_context
+from .holdout_queries import _json_entries
 from .holdouts import protected_dataset_item_ids as _protected_items
 from .rounds import _lock_and_validate_active_round_annotators
+from .selection import _unavailable_selection_item_ids
 
 ORIGIN = "standalone_prediction_v1"
 
@@ -90,7 +94,10 @@ def create_prediction_run(
 ) -> models.FeedbackRun:
     _lock_project(db, project_id)
     digest = _canonical_hash(data.model_dump(exclude={"request_key"}))
-    for run in list_prediction_runs(db, project_id):
+    for run in db.query(models.FeedbackRun).filter(
+        models.FeedbackRun.project_id == project_id,
+        models.FeedbackRun.configuration[ORIGIN]["request_key"].as_string() == data.request_key,
+    ):
         marker = _metadata(run)
         if marker.get("request_key") == data.request_key:
             if marker.get("request_hash") != digest or run.created_by_user_id != actor.id:
@@ -136,44 +143,40 @@ def _output(db: Session, run: models.FeedbackRun) -> models.FeedbackSetVersion:
     return output
 
 
-def _submitted_items(db: Session, run: models.FeedbackRun) -> set[int]:
-    submissions = (
-        db.query(models.RoundSubmission)
-        .join(
-            models.AnnotationRound,
-            models.RoundSubmission.annotation_round_id == models.AnnotationRound.id,
-        )
-        .filter(
-            models.AnnotationRound.project_id == run.project_id,
-            models.AnnotationRound.task_version_id == run.task_version_id,
-        )
-        .all()
+def _submitted_items(
+    db: Session, run: models.FeedbackRun, item_ids: list[int] | None = None,
+) -> set[int]:
+    entries = _json_entries(db, models.RoundSubmission.decision_ids, array=True)
+    submitted_ids = select(cast(entries.c.value, Integer)).select_from(entries).correlate(
+        models.RoundSubmission
     )
-    decision_ids = {
-        decision_id for submission in submissions for decision_id in submission.decision_ids
-    }
-    if not decision_ids:
-        return set()
-    return {
-        item_id
-        for item_id, decision_id in db.query(
-            models.RoundItem.dataset_item_id,
-            models.RoundAnnotationDecision.id,
-        )
-        .join(
-            models.RoundAnnotationDecision,
-            models.RoundAnnotationDecision.round_item_id == models.RoundItem.id,
-        )
-        .filter(
-            models.RoundItem.project_id == run.project_id,
-        )
-        .all()
-        if decision_id in decision_ids
-    }
+    query = db.query(models.RoundItem.dataset_item_id).join(
+        models.RoundAnnotationDecision,
+        models.RoundAnnotationDecision.round_item_id == models.RoundItem.id,
+    ).join(
+        models.RoundSubmission,
+        (models.RoundSubmission.annotation_round_id == models.RoundItem.annotation_round_id)
+        & (
+            models.RoundSubmission.annotator_user_id
+            == models.RoundAnnotationDecision.annotator_user_id
+        ),
+    ).join(
+        models.AnnotationRound,
+        models.AnnotationRound.id == models.RoundItem.annotation_round_id,
+    ).filter(
+        models.AnnotationRound.project_id == run.project_id,
+        models.AnnotationRound.task_version_id == run.task_version_id,
+        models.RoundItem.project_id == run.project_id,
+        models.RoundAnnotationDecision.id.in_(submitted_ids),
+    )
+    if item_ids is not None:
+        query = query.filter(models.RoundItem.dataset_item_id.in_(item_ids))
+    return {item_id for (item_id,) in query.distinct()}
 
 
 def result_rows(
-    db: Session, run: models.FeedbackRun, *, offset: int = 0, limit: int | None = None
+    db: Session, run: models.FeedbackRun, *, offset: int = 0, limit: int | None = None,
+    include_protected: bool = True,
 ) -> list[dict]:
     output = _output(db, run)
     query = (
@@ -195,7 +198,7 @@ def result_rows(
     if limit is not None:
         query = query.limit(limit)
     records = query.all()
-    submitted = _submitted_items(db, run)
+    submitted = _submitted_items(db, run, [item.id for _, item in records])
     protected = _protected_items(db, [item for _, item in records], run.task_version_id)
     model = db.get(models.ModelVersion, run.model_version_id)
     input_field = ((model.parameters or {}).get("fields") or {}).get("input_field", "text")
@@ -212,6 +215,7 @@ def result_rows(
             "protected": item.id in protected,
         }
         for candidate, item in records
+        if include_protected or item.id not in protected
     ]
 
 
@@ -223,6 +227,12 @@ def create_review_round(
     run = get_prediction_run(db, project_id, run_id)
     db.refresh(run)
     output = _output(db, run)
+    project = db.get(Project, project_id)
+    if db.query(WorkspaceMember.id).filter(
+        WorkspaceMember.workspace_id == project.workspace_id,
+        WorkspaceMember.user_id == actor.id,
+    ).with_for_update().first() is None:
+        raise ValidationError("Review annotator must be a project workspace member")
     marker = dict(_metadata(run))
     previous = dict(marker.get("review_requests", {}))
     request_hash = _canonical_hash(
@@ -232,6 +242,19 @@ def create_review_round(
             "actor_id": actor.id,
         }
     )
+    review_reason = f"prediction_review:{run.id}:{data.request_key}"
+    previous_round = db.query(models.AnnotationRound).filter(
+        models.AnnotationRound.project_id == project_id,
+        models.AnnotationRound.reason == review_reason,
+    ).first()
+    if previous_round is not None:
+        item = db.query(models.RoundItem).filter(
+            models.RoundItem.annotation_round_id == previous_round.id,
+        ).order_by(models.RoundItem.id).first()
+        details = item.selection_reason if item is not None else {}
+        if details.get("request_hash") != request_hash:
+            raise ConflictError("Review request key was already used for another selection")
+        return details["review_result"]
     if data.request_key in previous:
         stored = previous[data.request_key]
         if stored["request_hash"] != request_hash:
@@ -262,11 +285,15 @@ def create_review_round(
     if candidate_ids != set(data.dataset_item_ids):
         raise ValidationError("Each selected item must have a prediction in the pinned output")
     protected = _protected_items(db, items, run.task_version_id)
-    submitted = _submitted_items(db, run) if not data.include_submitted else set()
+    reserved = _unavailable_selection_item_ids(db, run, include_submitted=False)
+    submitted = (
+        _unavailable_selection_item_ids(db, run) - reserved
+        if not data.include_submitted else set()
+    )
     eligible = [
         item_id
         for item_id in data.dataset_item_ids
-        if item_id not in protected and item_id not in submitted
+        if item_id not in protected and item_id not in submitted and item_id not in reserved
     ]
     if not eligible:
         raise ValidationError(
@@ -283,13 +310,19 @@ def create_review_round(
         annotator_user_ids=[actor.id],
         open_to_all_annotators=False,
         sequence=_next_sequence(db, models.AnnotationRound, project_id, cycle_id=None),
-        reason=f"Manual review of prediction run {run.id}",
+        reason=review_reason,
         status="open",
         opened_at=datetime.now(UTC),
         created_by_user_id=actor.id,
     )
     db.add(annotation_round)
     db.flush()
+    result = {
+        "round_id": annotation_round.id,
+        "item_count": len(eligible),
+        "excluded_protected": len(protected),
+        "excluded_submitted": len(set(data.dataset_item_ids) & submitted - protected),
+    }
     for rank, item_id in enumerate(eligible, start=1):
         db.add(
             models.RoundItem(
@@ -300,18 +333,11 @@ def create_review_round(
                 selection_reason={
                     "strategy": "manual_prediction_review",
                     "prediction_run_id": run.id,
+                    "request_hash": request_hash,
+                    "review_result": result,
                 },
                 metadata_={"prediction_run_id": run.id, "feedback_set_version_id": output.id},
             )
         )
-    result = {
-        "round_id": annotation_round.id,
-        "item_count": len(eligible),
-        "excluded_protected": len(protected),
-        "excluded_submitted": len(set(data.dataset_item_ids) & submitted - protected),
-    }
-    previous[data.request_key] = {"request_hash": request_hash, "result": result}
-    marker["review_requests"] = previous
-    run.configuration = {**run.configuration, ORIGIN: marker}
     _commit(db, "Could not create the prediction review round")
     return result

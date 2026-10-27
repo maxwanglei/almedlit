@@ -1,4 +1,4 @@
-FROM golang:1.24.2-alpine@sha256:7772cb5322baa875edd74705556d08f0eeca7b9c4b5367754ce3f2f00041ccee AS builder
+FROM golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS builder
 
 ENV CGO_ENABLED=0 GOTOOLCHAIN=local
 
@@ -16,8 +16,13 @@ FROM alpine:3.22@sha256:d406446bc05b82480756ce8f1287964d28768c23955fa9480d2a74a2
 RUN apk add --no-cache ca-certificates
 
 FROM runtime AS minio
-RUN apk add --no-cache curl
+RUN apk add --no-cache curl \
+    && addgroup -g 10001 minio \
+    && adduser -D -u 10001 -G minio minio \
+    && mkdir -p /data \
+    && chown minio:minio /data
 COPY --from=minio-build /go/bin/minio /usr/local/bin/minio
+USER 10001:10001
 ENTRYPOINT ["/usr/local/bin/minio"]
 
 FROM runtime AS mc

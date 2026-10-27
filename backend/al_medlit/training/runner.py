@@ -617,7 +617,7 @@ def _evaluate_checkpoint_splits(
                 "sentence_ordinals": tuple(ordinals),
                 "sentence_texts": tuple(group["sentences"][ordinal] for ordinal in ordinals),
                 "target_text": group["target_text"] or "",
-                "reference_blocks": blocks_from_bio(gold_labels),
+                "reference_blocks": blocks_from_bio(gold_labels, sentence_ordinals=tuple(ordinals)),
             }
             if conventional and predictor.produces_sentence_scores:
                 example_data["predicted_scores"] = tuple(
@@ -1131,8 +1131,8 @@ def _train_neural_checkpoint(
             if report is None:
                 raise RunnerError("Validation split produced no comparable Evidence metrics")
             return NeuralCheckpointScore(
-                macro_block_iou_f1_0_50=float(report["metrics"]["macro_block_iou_f1_0_50"]),
-                macro_exact_block_f1=float(report["metrics"]["macro_exact_block_f1"]),
+                macro_block_iou_f1_0_50=float(report["metrics"]["macro_block_iou_f1_0_50"] or 0.0),
+                macro_exact_block_f1=float(report["metrics"]["macro_exact_block_f1"] or 0.0),
             )
 
         bundle, summary = plugin.fit(
@@ -1528,6 +1528,15 @@ def run_inference_job(manifest_path: str | Path) -> dict:
     )
 
     window_config = job["window_config"]
+    sentence_score_threshold = (
+        predictor.config.sentence_score_threshold
+        if conventional and not synthetic_mode and predictor.produces_sentence_scores else None
+    )
+    if (
+        "sentence_score_threshold" in checkpoint
+        and checkpoint["sentence_score_threshold"] != sentence_score_threshold
+    ):
+        raise RunnerError("Sentence scorer threshold does not match the immutable job contract")
     builder = EvidenceBlockWindowBuilder(
         token_counter,
         WindowBuilderConfig(
@@ -1610,7 +1619,14 @@ def run_inference_job(manifest_path: str | Path) -> dict:
                         previous_ordinal = sentence.ordinal
                     else:
                         label = str(prediction)
-                    conventional_logits[str(sentence.ordinal)] = label_probabilities(label)
+                    conventional_logits[str(sentence.ordinal)] = (
+                        (
+                            1 - float(prediction),
+                            float(prediction) if label != "I" else 0.0,
+                            float(prediction) if label == "I" else 0.0,
+                        )
+                        if predictor.produces_sentence_scores else label_probabilities(label)
+                    )
             for window in result.windows:
                 if synthetic_mode:
                     logits = {
@@ -1741,6 +1757,7 @@ def run_inference_job(manifest_path: str | Path) -> dict:
         "schema_version": "inference-window-logits-v1",
         "checkpoint_checksum_sha256": checkpoint["checksum_sha256"],
         "synthetic_mode": synthetic_mode,
+        "sentence_score_threshold": sentence_score_threshold,
         "windows": output_windows,
     }
     _write_json(output_root / "inference-result.json", inference_result)

@@ -20,6 +20,7 @@ import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
 import pytest
@@ -236,7 +237,7 @@ def _run_concurrently(
 
 
 def _raw_token(action_url: str) -> str:
-    return action_url.rsplit("/", 1)[-1]
+    return parse_qs(urlsplit(action_url).fragment)["token"][0]
 
 
 def _token_hash(raw_token: str) -> str:
@@ -1124,6 +1125,7 @@ def test_lower_id_round_assignee_and_higher_id_superuser_deactivation_do_not_dea
             target,
             "Round lock contention team",
         )
+        workspace_service.add_member(db, workspace.id, system_admin.id, role="admin")
         project = Project(
             name=f"Round contention {uuid4().hex[:8]}",
             workspace_id=workspace.id,

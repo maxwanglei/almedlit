@@ -45,3 +45,6 @@ def test_worker_image_digest_normalization_treats_compose_blanks_as_missing():
     assert runtime_preflight.normalize_worker_image_digest(
         " sha256:" + "a" * 64 + " "
     ) == "a" * 64
+    assert runtime_preflight.normalize_worker_image_digest(
+        " SHA256:" + "A" * 64 + " "
+    ) == "a" * 64

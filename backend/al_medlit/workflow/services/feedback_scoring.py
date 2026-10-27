@@ -410,10 +410,19 @@ def reconcile_feedback_scoring_runs(
             run.completed_at = effective_now
             db.commit()
             failed_ids.append(run.id)
-        elif run.status == "queued" and _as_utc(run.updated_at) <= queued_cutoff:
-            run.updated_at = effective_now
+        elif run.status == "queued" and _as_utc(run.created_at) <= (
+            effective_now - timedelta(seconds=max(3600, queued_stale_after_seconds * 3))
+        ):
+            run.status = "failed"
+            run.failure_code = "scoring_queue_wait_expired"
+            run.failure_reason = "Feedback scoring did not start before the queue deadline"
+            run.completed_at = effective_now
             db.commit()
-            redispatch_ids.append(run.id)
+            failed_ids.append(run.id)
+        elif run.status == "queued" and _as_utc(run.updated_at) <= queued_cutoff:
+            # The broker owns a queued delivery; republishing would accumulate
+            # duplicate messages while its runtime queue has no available worker.
+            db.rollback()
         else:
             db.rollback()
     return {"failed_ids": failed_ids, "redispatch_ids": redispatch_ids}

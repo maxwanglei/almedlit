@@ -135,7 +135,7 @@ def _seed_everything(torch, config: EvidenceNeuralConfig) -> None:
     if npu is not None and npu.is_available() and hasattr(npu, "manual_seed_all"):
         npu.manual_seed_all(config.seed)
     if config.deterministic_algorithms:
-        torch.use_deterministic_algorithms(True)
+        torch.use_deterministic_algorithms(True, warn_only=True)
         cudnn = getattr(getattr(torch, "backends", None), "cudnn", None)
         if cudnn is not None:
             cudnn.benchmark = False

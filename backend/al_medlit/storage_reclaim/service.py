@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
+from al_medlit.core.database import begin_savepoint
 from al_medlit.core.models import utc_now
 from al_medlit.core.storage import ObjectStorage
 from al_medlit.storage_reclaim.models import OrphanedStorageObject
@@ -59,39 +60,40 @@ def record_orphaned_object(
     """Queue ``storage_key`` for a later reclaim attempt.
 
     Callers are already on a failure path that must not be made worse, so this
-    never raises: a queueing failure is logged and the key is dropped, which is
-    no worse than the leak it was trying to record.
+    logs a queueing failure and leaves the caller's transaction intact. With
+    commit=False, errors flushing the caller's own pending changes propagate.
     """
 
     now = utc_now()
+    if not commit:
+        db.flush()
     try:
-        entry = (
-            db.query(OrphanedStorageObject)
-            .filter(OrphanedStorageObject.storage_key == storage_key)
-            .one_or_none()
-        )
-        if entry is None:
-            entry = OrphanedStorageObject(storage_key=storage_key, attempts=0)
-            db.add(entry)
-        entry.origin = origin
-        entry.attempts += 1
-        entry.last_error = _describe(error)
-        entry.last_attempted_at = now
-        entry.next_attempt_at = now + _retry_delay(entry.attempts)
+        with begin_savepoint(db):
+            entry = (
+                db.query(OrphanedStorageObject)
+                .filter(OrphanedStorageObject.storage_key == storage_key)
+                .with_for_update()
+                .one_or_none()
+            )
+            if entry is None:
+                entry = OrphanedStorageObject(storage_key=storage_key, attempts=0)
+                db.add(entry)
+            entry.origin = origin
+            entry.attempts += 1
+            entry.last_error = _describe(error)
+            entry.last_attempted_at = now
+            entry.next_attempt_at = now + _retry_delay(entry.attempts)
+            db.flush()
         if commit:
             db.commit()
-        else:
-            db.flush()
         return entry
     except Exception:
         logger.exception(
             "Failed to queue an unreferenced object for reclamation",
             extra={"storage_key": storage_key, "origin": origin},
         )
-        try:
+        if commit:
             db.rollback()
-        except Exception:
-            logger.exception("Failed to roll back after a reclaim-queue failure")
         return None
 
 

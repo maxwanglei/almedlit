@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from al_medlit.core.storage import ObjectStorage
 from al_medlit.inference.models import InferenceRun
+from al_medlit.inference.service import lock_inference_run
 from al_medlit.lineage.service import register_stored_artifact
 from al_medlit.training.compute.slurm import SSHSlurmComputeBackend
 from al_medlit.training.compute_profiles import build_compute_backend
@@ -34,7 +35,10 @@ def cleanup_remote_inference_jobs(
             InferenceRun.completed_at < cutoff,
             (
                 (InferenceRun.status != "succeeded")
-                | InferenceRun.diagnostics_artifact_id.is_not(None)
+                | (
+                    InferenceRun.diagnostics_artifact_id.is_not(None)
+                    & InferenceRun.metrics["inference_log_artifact_id"].as_integer().is_not(None)
+                )
             ),
             InferenceRun.metrics["remote_cleanup_completed_at"].as_string().is_(None),
         )
@@ -46,6 +50,13 @@ def cleanup_remote_inference_jobs(
     for run in runs:
         run_id = run.id
         try:
+            run = lock_inference_run(db, run_id)
+            if run.status == "succeeded" and (
+                run.diagnostics_artifact_id is None
+                or run.metrics.get("inference_log_artifact_id") is None
+            ):
+                db.rollback()
+                continue
             backend = build_compute_backend(run.compute_profile)
             if not isinstance(backend, SSHSlurmComputeBackend):
                 continue
@@ -76,6 +87,7 @@ def cleanup_remote_inference_jobs(
                         )
                         run.metrics = {**run.metrics, "scheduler_log_artifact_id": artifact.id}
                         db.commit()
+                        run = lock_inference_run(db, run_id)
             backend.cleanup_job_directory(f"inference-{run.id}")
             run.metrics = {
                 **run.metrics,

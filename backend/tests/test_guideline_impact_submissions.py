@@ -145,6 +145,9 @@ def test_unsubmitted_superseding_draft_keeps_finalized_pilot_evidence(client, db
 
 
 def test_repeated_submissions_do_not_count_one_author_as_two_annotators(client, db, pilot):
+    pilot.round.annotator_user_ids = []
+    pilot.round.open_to_all_annotators = True
+    db.commit()
     actor = pilot.actors[0]
     decisions = [_decision(db, pilot, actor, item) for item in pilot.items]
     _submit(db, pilot, actor, decisions)
@@ -160,6 +163,9 @@ def test_repeated_submissions_do_not_count_one_author_as_two_annotators(client, 
 
 
 def test_disjoint_one_author_submissions_do_not_invent_round_agreement(client, db, pilot):
+    pilot.round.annotator_user_ids = []
+    pilot.round.open_to_all_annotators = True
+    db.commit()
     for actor, item in zip(pilot.actors, pilot.items, strict=True):
         _submit(db, pilot, actor, [_decision(db, pilot, actor, item)])
     _close(db, pilot)

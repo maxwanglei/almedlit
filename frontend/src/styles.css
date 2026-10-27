@@ -4828,6 +4828,25 @@ select:disabled {
   opacity: 1;
 }
 
+.aw-span-choices {
+  display: flex;
+  gap: 3px;
+  pointer-events: auto;
+}
+
+.aw-span-choices:focus-within {
+  opacity: 1;
+}
+
+.aw-span-choices button {
+  border: 1px solid var(--border-default);
+  border-radius: 3px;
+  background: var(--surface-primary);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
 .aw-relation-svg {
   position: absolute;
   inset: 0 auto auto 0;

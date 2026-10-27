@@ -2,8 +2,7 @@
 #
 # One Postgres + Redis + MinIO topology with opt-in execution profiles:
 #   * laptop  (default) — backend + db + minio + frontend. Celery runs eager
-#                          in-process for core tasks. No ML packages are
-#                          installed in the API image.
+#                          in-process, including classical CPU training.
 #   * lab               — adds Redis, a lightweight control worker, and beat.
 #   * runtime profiles  — add only the selected training stack:
 #                          classical-cpu, torch-cpu, transformer-cpu,
@@ -51,9 +50,18 @@ services:
     image: python:3.12-slim
     restart: "no"
     entrypoint: ["/bin/sh", "/scripts/generate-minio-certs.sh", "/certs"]
+    environment:
+      MINIO_CERT_OWNER: "10001:10001"
     volumes:
       - ./scripts/generate-minio-certs.sh:/scripts/generate-minio-certs.sh:ro
       - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/certs
+
+  minio-data-init:
+    image: alpine:3.22@sha256:d406446bc05b82480756ce8f1287964d28768c23955fa9480d2a74a2eae7a654
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c", "chown -R 10001:10001 /data"]
+    volumes:
+      - minio_data:/data
 
   minio:
     # The release images reject anonymous pulls. Build the pinned sources
@@ -84,6 +92,8 @@ services:
     depends_on:
       minio-cert-init:
         condition: service_completed_successfully
+      minio-data-init:
+        condition: service_completed_successfully
 
   minio-app-init:
     build:
@@ -100,7 +110,7 @@ services:
       AL_MEDLIT_STORAGE_SECRET_KEY: ${AL_MEDLIT_STORAGE_SECRET_KEY:?AL_MEDLIT_STORAGE_SECRET_KEY required}
     volumes:
       - ./scripts/provision-minio-app.sh:/scripts/provision-minio-app.sh:ro
-      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/certs:ro
+      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}/CAs/ca.crt:/certs/ca.crt:ro
     depends_on:
       minio:
         condition: service_healthy
@@ -155,7 +165,7 @@ services:
       AL_MEDLIT_AUTO_MIGRATE_ON_STARTUP: ${AL_MEDLIT_AUTO_MIGRATE_ON_STARTUP:-true}
     volumes:
       - attempt_data:/var/lib/al-medlit/attempts
-      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro
+      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}/CAs/ca.crt:/etc/al-medlit/minio-certs/CAs/ca.crt:ro
     ports:
       # Keep direct API access available to host-side local development without
       # exposing a path that bypasses the frontend's authentication rate limit.
@@ -216,7 +226,7 @@ services:
       AL_MEDLIT_STORAGE_CA_CERT_PATH: /etc/al-medlit/minio-certs/CAs/ca.crt
     volumes:
       - attempt_data:/var/lib/al-medlit/attempts
-      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro
+      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}/CAs/ca.crt:/etc/al-medlit/minio-certs/CAs/ca.crt:ro
     depends_on:
       backend:
         condition: service_healthy
@@ -227,6 +237,7 @@ services:
   # Optional worker — classical CPU models
   # ------------------------------------------------------------------
   worker-classical:
+    image: al-medlit-worker-classical-cpu:local
     build:
       context: ..
       dockerfile: infra/docker/worker.Dockerfile
@@ -255,7 +266,7 @@ services:
       AL_MEDLIT_RUNTIME_REPORT_PATH: /var/lib/al-medlit/attempts/runtime-reports/classical-cpu.json
     volumes:
       - attempt_data:/var/lib/al-medlit/attempts
-      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro
+      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}/CAs/ca.crt:/etc/al-medlit/minio-certs/CAs/ca.crt:ro
     depends_on:
       backend:
         condition: service_healthy
@@ -266,6 +277,7 @@ services:
   # Optional worker — PyTorch CPU models
   # ------------------------------------------------------------------
   worker-torch:
+    image: al-medlit-worker-torch-cpu:local
     build:
       context: ..
       dockerfile: infra/docker/worker.Dockerfile
@@ -294,7 +306,7 @@ services:
       AL_MEDLIT_RUNTIME_REPORT_PATH: /var/lib/al-medlit/attempts/runtime-reports/torch-cpu.json
     volumes:
       - attempt_data:/var/lib/al-medlit/attempts
-      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro
+      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}/CAs/ca.crt:/etc/al-medlit/minio-certs/CAs/ca.crt:ro
     depends_on:
       backend:
         condition: service_healthy
@@ -305,6 +317,7 @@ services:
   # Optional worker — transformer CPU models
   # ------------------------------------------------------------------
   worker-transformer:
+    image: al-medlit-worker-transformer-cpu:local
     build:
       context: ..
       dockerfile: infra/docker/worker.Dockerfile
@@ -333,7 +346,7 @@ services:
       AL_MEDLIT_RUNTIME_REPORT_PATH: /var/lib/al-medlit/attempts/runtime-reports/transformer-cpu.json
     volumes:
       - attempt_data:/var/lib/al-medlit/attempts
-      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro
+      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}/CAs/ca.crt:/etc/al-medlit/minio-certs/CAs/ca.crt:ro
     depends_on:
       backend:
         condition: service_healthy
@@ -344,6 +357,7 @@ services:
   # Optional worker — LoRA accelerator models
   # ------------------------------------------------------------------
   worker-peft:
+    image: al-medlit-worker-peft-accelerator:local
     build:
       context: ..
       dockerfile: infra/docker/worker.Dockerfile
@@ -372,7 +386,7 @@ services:
       AL_MEDLIT_RUNTIME_REPORT_PATH: /var/lib/al-medlit/attempts/runtime-reports/peft-accelerator.json
     volumes:
       - attempt_data:/var/lib/al-medlit/attempts
-      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro
+      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}/CAs/ca.crt:/etc/al-medlit/minio-certs/CAs/ca.crt:ro
     depends_on:
       backend:
         condition: service_healthy
@@ -383,6 +397,7 @@ services:
   # Optional worker — QLoRA CUDA models
   # ------------------------------------------------------------------
   worker-qlora:
+    image: al-medlit-worker-qlora-cuda:local
     build:
       context: ..
       dockerfile: infra/docker/worker.Dockerfile
@@ -411,7 +426,7 @@ services:
       AL_MEDLIT_RUNTIME_REPORT_PATH: /var/lib/al-medlit/attempts/runtime-reports/qlora-cuda.json
     volumes:
       - attempt_data:/var/lib/al-medlit/attempts
-      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro
+      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}/CAs/ca.crt:/etc/al-medlit/minio-certs/CAs/ca.crt:ro
     depends_on:
       backend:
         condition: service_healthy
@@ -444,7 +459,7 @@ services:
       AL_MEDLIT_STORAGE_CA_CERT_PATH: /etc/al-medlit/minio-certs/CAs/ca.crt
     volumes:
       - attempt_data:/var/lib/al-medlit/attempts
-      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro
+      - ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}/CAs/ca.crt:/etc/al-medlit/minio-certs/CAs/ca.crt:ro
     depends_on:
       backend:
         condition: service_healthy

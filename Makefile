@@ -10,6 +10,7 @@ LAB_ENV := AL_MEDLIT_CELERY_BROKER_URL=redis://redis:6379/0 \
 UV := uv
 # Keep in sync with frontend.Dockerfile so lockfile updates use the same npm as `npm ci` in Docker.
 FRONTEND_NODE_IMAGE := node:20-alpine
+FRONTEND_NPM_VERSION := 11.17.0
 
 .PHONY: help sync backend backend-deps-up frontend frontend-lock laptop-up laptop-down laptop-logs lab-up lab-down lab-logs runtime-up runtime-down db-current migrate seed test lint clean
 
@@ -43,18 +44,16 @@ backend:
 	$(MAKE) -C backend dev
 
 backend-deps-up:
-	$(COMPOSE) up -d db minio
+	$(COMPOSE) up -d db minio-app-init
 
 frontend:
 	cd frontend && npm run dev
 
-# Regenerate package-lock.json using the same npm as the Docker build (node:20-alpine),
-# so `npm ci` inside the image stays in sync. The host npm (11.x) dedupes nested esbuild
-# differently and corrupts the lockfile. Pass packages to add via ARGS, e.g.
+# Regenerate the lock with the Docker build's npm version. Pass packages via ARGS, e.g.
 #   make frontend-lock ARGS="lodash @types/lodash"
 frontend-lock:
 	docker run --rm -v "$(CURDIR)/frontend":/app -w /app $(FRONTEND_NODE_IMAGE) \
-		npm install --package-lock-only --no-audit --no-fund $(ARGS)
+		npx --yes npm@$(FRONTEND_NPM_VERSION) install --package-lock-only --no-audit --no-fund $(ARGS)
 
 laptop-up:
 	$(COMPOSE) up --build -d
@@ -77,7 +76,7 @@ lab-logs:
 RUNTIME ?= classical-cpu
 
 runtime-up:
-	$(LAB_ENV) $(COMPOSE) --profile lab --profile $(RUNTIME) up --build -d
+	$(LAB_ENV) sh infra/scripts/start-runtime.sh $(RUNTIME) --env-file $(COMPOSE_ENV_FILE) -f $(COMPOSE_FILE)
 
 runtime-down:
 	$(COMPOSE) --profile lab --profile $(RUNTIME) down

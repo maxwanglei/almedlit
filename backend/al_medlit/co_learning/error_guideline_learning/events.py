@@ -7,6 +7,11 @@ from al_medlit.annotation.models import AnnotationCorrection
 from al_medlit.co_learning.error_guideline_learning.service import upsert_pattern_from_correction
 from al_medlit.core.database import SessionLocal
 from al_medlit.core.events import event_bus
+from al_medlit.lineage.models import CorpusSnapshot, CorpusSnapshotDocument
+from al_medlit.project.models import Project
+from al_medlit.workflow.models import DatasetItem, TaskVersion
+from al_medlit.workflow.services.holdouts import protected_dataset_item_ids
+from al_medlit.workspace.capability_service import effective_capabilities_for_workspace
 
 SessionFactory = Callable[[], Session]
 
@@ -40,6 +45,28 @@ def handle_annotation_correction_created(payload: dict) -> None:
     try:
         correction = db.get(AnnotationCorrection, correction_id)
         if correction is not None:
+            project = db.get(Project, correction.project_id)
+            if project is None or "co_learning" not in effective_capabilities_for_workspace(
+                db, project.workspace_id
+            ):
+                return
+            if db.query(CorpusSnapshotDocument.id).join(CorpusSnapshot).filter(
+                CorpusSnapshot.project_id == project.id,
+                CorpusSnapshotDocument.document_id == correction.document_id,
+                CorpusSnapshotDocument.split == "test",
+            ).first() is not None:
+                return
+            items = db.query(DatasetItem).filter(
+                DatasetItem.project_id == project.id,
+                DatasetItem.payload["document_id"].as_integer() == correction.document_id,
+            ).all()
+            if items and any(
+                protected_dataset_item_ids(db, items, task_id)
+                for (task_id,) in db.query(TaskVersion.id).filter(
+                    TaskVersion.project_id == project.id
+                )
+            ):
+                return
             upsert_pattern_from_correction(db, correction)
     finally:
         db.close()

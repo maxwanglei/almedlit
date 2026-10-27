@@ -3,10 +3,13 @@ from types import SimpleNamespace
 import pytest
 
 from al_medlit.annotation.models import Annotation
+from al_medlit.auth.models import User
 from al_medlit.core.exceptions import ValidationError
 from al_medlit.corpus.models import Document
+from al_medlit.guideline.models import GuidelineVersion
 from al_medlit.iaa import alignment, metrics, service
-from al_medlit.project.models import Project
+from al_medlit.project.models import Project, ProjectTask, TaskAssignment
+from al_medlit.submission.models import AnnotationSubmission
 from al_medlit.workspace import service as workspace_service
 
 
@@ -178,6 +181,111 @@ def _add_entity_annotation(
     )
     db.add(annotation)
     db.commit()
+
+
+def _add_zero_span_submission(db, project_id, document_id, annotator_id, **version_pins):
+    user = User(username=annotator_id, password_hash="test-only", display_name=annotator_id)
+    task = db.query(ProjectTask).filter_by(
+        project_id=project_id, annotation_type="entity"
+    ).first()
+    if task is None:
+        task = ProjectTask(
+            project_id=project_id, display_name="Entities", annotation_type="entity"
+        )
+        db.add(task)
+    db.add(user)
+    db.flush()
+    assignment = TaskAssignment(
+        project_id=project_id,
+        task_id=task.id,
+        document_id=document_id,
+        assignee_user_id=user.id,
+        annotator_id=annotator_id,
+        status="submitted",
+        **version_pins,
+    )
+    db.add(assignment)
+    db.flush()
+    db.add(AnnotationSubmission(
+        project_id=project_id,
+        document_id=document_id,
+        assignment_id=assignment.id,
+        annotator_id=annotator_id,
+        kind="submission",
+        storage_key=f"zero-spans-{annotator_id}",
+        file_name="zero-spans.json",
+        size_bytes=1,
+        checksum_sha256="a" * 64,
+        annotation_count=0,
+    ))
+    db.commit()
+
+
+def _iaa_version_pins(db, project, document, version_kind):
+    if version_kind == "structure":
+        from al_medlit.corpus import service as corpus_service
+
+        return {
+            "structure_version_id": corpus_service.rebuild_document_structure(
+                db, document.id
+            ).id
+        }
+    guideline = GuidelineVersion(project_id=project.id, version_label="round")
+    db.add(guideline)
+    db.commit()
+    return {"guideline_version_id": guideline.id}
+
+
+@pytest.mark.parametrize("version_kind", ["guideline", "structure"])
+@pytest.mark.parametrize("first_has_spans", [True, False])
+def test_zero_span_submissions_require_pins_when_rounds_differ(
+    db, version_kind, first_has_spans
+):
+    project, document = _make_project_and_document(db, "iaa-zero-span-rounds")
+    current_pins = _iaa_version_pins(db, project, document, version_kind)
+    historical_pins = _iaa_version_pins(db, project, document, version_kind)
+    if first_has_spans:
+        _add_entity_annotation(
+            db, project.id, document.id, "alice", 0, 5, "Drug", **current_pins
+        )
+    else:
+        _add_zero_span_submission(db, project.id, document.id, "alice", **current_pins)
+    _add_zero_span_submission(db, project.id, document.id, "bob", **historical_pins)
+
+    with pytest.raises(ValidationError, match=f"specify .*{version_kind}_version_id"):
+        service.compute_iaa(db, project_id=project.id, annotation_type="entity")
+
+    report = service.compute_iaa(
+        db, project_id=project.id, annotation_type="entity", **current_pins
+    )
+    assert report.status == "insufficient_annotators"
+    assert report.annotator_ids == ["alice"]
+    assert report.item_count == int(first_has_spans)
+    assert report.percent_agreement is None
+
+
+@pytest.mark.parametrize("version_kind", ["guideline", "structure"])
+@pytest.mark.parametrize("explicit_filter", [True, False])
+def test_zero_span_submission_in_same_round_counts_as_review(
+    db, version_kind, explicit_filter
+):
+    project, document = _make_project_and_document(db, "iaa-zero-span-same-round")
+    pins = _iaa_version_pins(db, project, document, version_kind)
+    _add_entity_annotation(db, project.id, document.id, "alice", 0, 5, "Drug", **pins)
+    _add_zero_span_submission(db, project.id, document.id, "bob", **pins)
+
+    report = service.compute_iaa(
+        db,
+        project_id=project.id,
+        annotation_type="entity",
+        **(pins if explicit_filter else {}),
+    )
+
+    assert report.status == "ok"
+    assert report.annotator_ids == ["alice", "bob"]
+    assert report.item_count == 1
+    assert report.percent_agreement == pytest.approx(0.0)
+    assert report.span_detection_f1 == pytest.approx(0.0)
 
 
 def test_compute_iaa_reports_insufficient_annotators(db):

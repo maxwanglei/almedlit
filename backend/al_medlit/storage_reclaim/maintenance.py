@@ -16,17 +16,19 @@ RECLAIM_INTERVAL_SECONDS = 15 * 60
 def reclaim_once(stop_requested: Event | None = None) -> None:
     # The background thread owns its session and transaction. Request sessions
     # must never be shared with this sweep.
-    with SessionLocal.begin() as db:
+    with SessionLocal() as db:
         storage = get_object_storage()
         reclaim_orphaned_objects(
             db,
             storage,
             should_stop=stop_requested.is_set if stop_requested is not None else None,
         )
+        db.commit()
         sweep_unregistered_artifact_objects(
             db,
             storage,
             should_stop=stop_requested.is_set if stop_requested is not None else None,
+            commit_batches=True,
         )
 
 

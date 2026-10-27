@@ -6,6 +6,7 @@ from test_inference_execution import (
     _candidates,
     _finalize,
     _runner_result,
+    _sentence_scorer_checkpoint,
 )
 
 from al_medlit.inference import service
@@ -13,17 +14,27 @@ from al_medlit.inference.models import InferenceWindow
 from al_medlit.lineage.models import LineageArtifact
 
 
-def _scope_and_result(db, *, labels=("B", "I", "O", "O")):
+def _scope_and_result(
+    db, object_storage, tmp_path, *, labels=("B", "I", "O", "O"), run_status="running"
+):
+    threshold = 0.5
     scope = _inference_scope(
         db,
         checkpoint_manifest={"model_type": "evidence_svm"},
+        checkpoint_object=_sentence_scorer_checkpoint(
+            tmp_path, object_storage, model_type="evidence_svm", threshold=threshold
+        ),
         decoder_config=DECODER_CONFIG,
+        run_status=run_status,
         with_window=False,
     )
+    scope.run.metrics = {"remote_result_ready": True}
+    db.commit()
     result = _runner_result(
         scope,
         {"window-0": {ordinal: ONE_HOT[label] for ordinal, label in enumerate(labels)}},
     )
+    result["sentence_score_threshold"] = threshold
     return scope, result
 
 
@@ -42,7 +53,7 @@ def _artifact_count(db, run, artifact_type):
 def test_remote_finalization_rolls_back_failed_outputs_and_retries(
     db, object_storage, tmp_path, monkeypatch, failure_stage
 ):
-    scope, inference_result = _scope_and_result(db)
+    scope, inference_result = _scope_and_result(db, object_storage, tmp_path)
     original_put_file = object_storage.put_file
 
     def fail_candidate_storage(*args, **kwargs):
@@ -61,7 +72,7 @@ def test_remote_finalization_rolls_back_failed_outputs_and_retries(
         with pytest.raises(RuntimeError, match="unavailable"):
             _finalize(db, object_storage, tmp_path, scope, inference_result)
 
-    assert scope.run.status == "succeeded"
+    assert scope.run.status == "running"
     assert scope.run.diagnostics_artifact_id is None
     assert _candidates(db, scope.run.id) == []
     assert db.query(InferenceWindow).filter(InferenceWindow.run_id == scope.run.id).count() == 0
@@ -81,7 +92,9 @@ def test_remote_finalization_rolls_back_failed_outputs_and_retries(
 def test_remote_finalization_recovers_preexisting_partial_diagnostics(
     db, object_storage, tmp_path
 ):
-    scope, inference_result = _scope_and_result(db)
+    scope, inference_result = _scope_and_result(
+        db, object_storage, tmp_path, run_status="succeeded"
+    )
     diagnostics_id = service.store_inference_diagnostics(
         db,
         object_storage,
@@ -103,7 +116,9 @@ def test_remote_finalization_recovers_preexisting_partial_diagnostics(
 def test_remote_finalization_with_no_candidates_is_complete_on_retry(
     db, object_storage, tmp_path, monkeypatch
 ):
-    scope, inference_result = _scope_and_result(db, labels=("O", "O", "O", "O"))
+    scope, inference_result = _scope_and_result(
+        db, object_storage, tmp_path, labels=("O", "O", "O", "O")
+    )
     run = _finalize(db, object_storage, tmp_path, scope, inference_result)
     artifact_ids = (run.diagnostics_artifact_id, run.metrics["inference_log_artifact_id"])
 

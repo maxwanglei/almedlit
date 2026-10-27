@@ -173,7 +173,11 @@ def test_historical_missing_test_labels_fail_before_training_and_publication(
 
     with pytest.raises(
         ValidationError,
-        match="Protected test evaluation requires labels for every test item: test-1",
+        match=(
+            "Protected test evaluation requires labels for every test item: test-1"
+            if evaluator_available
+            else "No trusted protected-test evaluator is registered"
+        ),
     ):
         execute_training_run(
             db,

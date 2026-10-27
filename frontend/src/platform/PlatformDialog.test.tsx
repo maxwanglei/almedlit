@@ -6,6 +6,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import PlatformDialog from "./PlatformDialog";
+import type { RoundDraft } from "./api";
 import {
   EMPTY_PLATFORM_PROJECT_DATA,
   type PlatformProjectData,
@@ -34,6 +35,35 @@ function Harness(): React.ReactElement {
     </>
   );
 }
+
+it("retains one round intent through retries and starts a new intent on a new form", async () => {
+  const user = userEvent.setup();
+  const intents: string[] = [];
+  const onCreateRound = vi.fn(async (draft: RoundDraft) => {
+    intents.push(draft.creationIntentId);
+    throw new Error("Response lost");
+  });
+  const complete = async (): Promise<void> => undefined;
+  const form = () => <PlatformDialog kind="round" data={learningProjectData()} busy={false}
+    onClose={vi.fn()} onCreateDataset={complete} onCreateRound={onCreateRound}
+    onScoreFeedback={complete} onCreateTask={complete} />;
+  const first = render(form());
+  await user.type(screen.getByLabelText("Round name"), "Retry this round");
+  await user.click(screen.getByLabelText("Open to all workspace annotators"));
+  await user.click(screen.getByRole("button", { name: "Create" }));
+  await waitFor(() => expect(onCreateRound).toHaveBeenCalledTimes(1));
+  await user.click(screen.getByRole("button", { name: "Create" }));
+  await waitFor(() => expect(onCreateRound).toHaveBeenCalledTimes(2));
+  expect(intents[0]).toMatch(/^[0-9a-f-]{36}$/);
+  expect(intents[1]).toBe(intents[0]);
+  first.unmount();
+  render(form());
+  await user.type(screen.getByLabelText("Round name"), "Retry this round");
+  await user.click(screen.getByLabelText("Open to all workspace annotators"));
+  await user.click(screen.getByRole("button", { name: "Create" }));
+  await waitFor(() => expect(onCreateRound).toHaveBeenCalledTimes(3));
+  expect(intents[2]).not.toBe(intents[0]);
+});
 
 function learningProjectData(): PlatformProjectData {
   return {
@@ -562,5 +592,13 @@ describe("PlatformDialog accessibility", () => {
         assistancePolicy: "blind",
       }),
     ));
+  });
+
+  it("prefills a round from the scoring panel's selected feedback set", () => {
+    const complete = async (): Promise<void> => undefined;
+    render(<PlatformDialog kind="round" data={learningProjectData()} busy={false} initialFeedbackSetVersionId={73}
+      onClose={vi.fn()} onCreateDataset={complete} onCreateRound={complete} onScoreFeedback={complete} onCreateTask={complete} />);
+    expect(screen.getByRole<HTMLSelectElement>("combobox", { name: /Model feedback set/ }).value).toBe("73");
+    expect(screen.getByRole<HTMLSelectElement>("combobox", { name: "Selection strategy" }).value).toBe("uncertainty");
   });
 });

@@ -379,6 +379,27 @@ def test_csv_neutralizes_spreadsheet_formulas():
     assert routes._csv_cell("ordinary text") == "ordinary text"
 
 
+def test_trainers_cannot_download_protected_item_predictions(client, db, scope):
+    run = complete(db, scope)
+    protected = {
+        row["dataset_item_id"] for row in predictions.result_rows(db, run) if row["protected"]
+    }
+    assert protected
+    membership = db.query(WorkspaceMember).filter_by(
+        workspace_id=scope.workspace.id, user_id=scope.actor.id
+    ).one()
+    membership.role = "trainer"
+    db.commit()
+    base = f"/api/projects/{scope.project.id}/prediction-runs/{run.id}"
+    page = client.get(base + "/results", headers=headers(scope))
+    assert page.status_code == 200, page.text
+    assert protected.isdisjoint(row["dataset_item_id"] for row in page.json()["items"])
+    download = client.get(base + "/download?format=jsonl", headers=headers(scope))
+    assert download.status_code == 200, download.text
+    rows = [json.loads(line) for line in download.text.splitlines()]
+    assert protected.isdisjoint(row["dataset_item_id"] for row in rows)
+
+
 def test_review_excludes_only_submitted_decisions_and_can_explicitly_revisit(client, db, scope):
     run = complete(db, scope)
     eligible = [
@@ -429,6 +450,19 @@ def test_review_excludes_only_submitted_decisions_and_can_explicitly_revisit(cli
     assert not next(row for row in rows if row["dataset_item_id"] == eligible[1])[
         "already_submitted"
     ]
+    from al_medlit.core.exceptions import ValidationError
+
+    with pytest.raises(ValidationError, match="No eligible items"):
+        predictions.create_review_round(
+            db, scope.project.id, run.id,
+            schemas.PredictionReviewCreate(
+                name="Overlapping open review", request_key="overlapping-open-review",
+                dataset_item_ids=eligible[:2],
+            ),
+            scope.actor,
+        )
+    db.get(models.AnnotationRound, initial["round_id"]).status = "cancelled"
+    db.commit()
     result = predictions.create_review_round(
         db,
         scope.project.id,

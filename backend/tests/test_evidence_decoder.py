@@ -196,3 +196,55 @@ def test_invalid_probabilities_are_rejected(scores):
 def test_unknown_score_kind_is_rejected():
     with pytest.raises(DecoderError, match="Unsupported sentence score kind"):
         aggregate_window_logits([{0: [0, 1, 0]}], score_kind="log_probabilities")
+
+
+@pytest.mark.parametrize(
+    ("score", "threshold", "positive"),
+    [(0.7, 0.8, False), (0.4, 0.3, True), (0.5, 0.5, True)],
+)
+def test_sentence_scorer_uses_configured_threshold_after_overlap(score, threshold, positive):
+    aggregated = aggregate_window_logits(
+        [{0: [1 - score, score, 0]}],
+        score_kind="probabilities",
+    )
+    result = decode_evidence_blocks(
+        _sentences(1),
+        aggregated,
+        DecoderConfig(block_threshold=0, sentence_score_threshold=threshold),
+    )
+    assert bool(result.blocks) is positive
+    assert result.sentences[0].probabilities == pytest.approx((1 - score, score, 0))
+    if positive:
+        assert result.blocks[0].confidence == pytest.approx(score)
+        assert result.blocks[0].start_confidence == pytest.approx(score)
+
+
+def test_sentence_scorer_derives_continuity_from_aggregated_scores_and_sections():
+    aggregated = aggregate_window_logits(
+        [
+            {0: [0.6, 0.4, 0], 1: [0.6, 0, 0.4], 2: [0.8, 0.2, 0]},
+            {1: [0.4, 0.6, 0], 2: [0.8, 0, 0.2]},
+        ],
+        score_kind="probabilities",
+    )
+    result = decode_evidence_blocks(
+        _sentences(3),
+        aggregated,
+        DecoderConfig(block_threshold=0, sentence_score_threshold=0.3),
+    )
+    assert [sentence.decoded_label for sentence in result.sentences] == ["B", "I", "O"]
+    assert result.blocks[0].confidence == pytest.approx(0.45)
+    assert result.blocks[0].end_confidence == pytest.approx(0.8)
+    assert result.blocks[0].uncertainty > 0
+    split = decode_evidence_blocks(
+        _sentences(3, section_break=1),
+        aggregated,
+        DecoderConfig(block_threshold=0, sentence_score_threshold=0.3),
+    )
+    assert [(b.start_ordinal, b.end_ordinal) for b in split.blocks] == [(0, 0), (1, 1)]
+    gap = decode_evidence_blocks(
+        [_sentences(3)[0], _sentences(3)[2]],
+        aggregate_window_logits([{0: [0.6, 0.4, 0], 2: [0.6, 0, 0.4]}], score_kind="probabilities"),
+        DecoderConfig(block_threshold=0, sentence_score_threshold=0.3),
+    )
+    assert [(b.start_ordinal, b.end_ordinal) for b in gap.blocks] == [(0, 0), (2, 2)]

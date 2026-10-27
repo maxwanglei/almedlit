@@ -12,6 +12,7 @@ from scripts.runtime_preflight import (
     compute_profile_fragment,
     normalize_worker_image_digest,
 )
+from scripts.start_api import _run_security_checks
 
 
 def main() -> None:
@@ -33,6 +34,8 @@ def main() -> None:
         raise SystemExit("Worker concurrency must be a positive integer")
     if descriptor.required_device != "cpu" and concurrency != 1:
         raise SystemExit("Accelerator worker concurrency must be 1 per device")
+
+    _run_security_checks()
 
     image_digest = normalize_worker_image_digest(
         os.environ.get("AL_MEDLIT_WORKER_IMAGE_DIGEST")

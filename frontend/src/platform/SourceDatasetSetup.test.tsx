@@ -31,6 +31,15 @@ function sourceData(tasks: TaskVersion[] = []) {
   };
 }
 describe("SourceDatasetSetup", () => {
+  it("starts a new round after a saved round was cancelled", async () => {
+    const user = userEvent.setup(); const task = classificationTask(31); const data = sourceData([task]);
+    sessionStorage.setItem("al-medlit:source-setup:7:12", JSON.stringify({ datasetId: 12, version: data.datasetVersions[0], taskVersion: task, selectedTaskId: 31, roundId: 902, roundTaskVersionId: 31, roundDatasetVersionId: 13 }));
+    mocks.request.mockResolvedValue({ id: 902, status: "cancelled" });
+    mocks.round.mockResolvedValue({ id: 903 });
+    render(<SourceDatasetSetup projectId={7} projectName="Tucatinib" data={data} datasetId={12} datasetVersionId={13} initialTaskVersionId={31} currentUserId={9} canAnnotate canInfer={false} onRefresh={async () => undefined} onNavigate={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "Start annotating" }));
+    await waitFor(() => expect(mocks.round).toHaveBeenCalledTimes(1));
+  });
   it("continues an older source version's open round after adding papers", async () => {
     const user = userEvent.setup(); const navigate = vi.fn();
     const data = sourceData([classificationTask(31)]);

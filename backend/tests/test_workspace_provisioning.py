@@ -526,9 +526,9 @@ def test_personal_version_changes_provision_fresh_self_assignment_rounds(
     ).json()
     assert len(assignments) == 1
     first = assignments[0]
-    assert auth_client.patch(
-        f"{assignment_url}/{first['id']}",
-        json={"status": "submitted"},
+    assert auth_client.post(
+        f"/api/projects/{project['id']}/documents/{document['id']}/submissions",
+        json={"assignment_id": first["id"]},
     ).status_code == 200
 
     guideline = auth_client.post(
@@ -547,9 +547,9 @@ def test_personal_version_changes_provision_fresh_self_assignment_rounds(
     assert len(assignments) == 2
     second = max(assignments, key=lambda item: item["id"])
     assert second["guideline_version_id"] == guideline.json()["id"]
-    assert auth_client.patch(
-        f"{assignment_url}/{second['id']}",
-        json={"status": "submitted"},
+    assert auth_client.post(
+        f"/api/projects/{project['id']}/documents/{document['id']}/submissions",
+        json={"assignment_id": second["id"]},
     ).status_code == 200
 
     rebuilt = auth_client.post(
@@ -621,14 +621,13 @@ def test_personal_evidence_provisioning_keeps_one_open_logical_target_round(
         json={"version_id": version_a2["id"]},
     )
     assert activated_a2.status_code == 200, activated_a2.text
-    # A new immutable version of target A does not create a second writable
-    # assignment while A v1 is still open.
-    assert len(
-        auth_client.get(
-            assignment_url,
-            params={"scope": "mine", "document_id": document["id"]},
-        ).json()
-    ) == 1
+    rounds = auth_client.get(
+        assignment_url,
+        params={"scope": "mine", "document_id": document["id"]},
+    ).json()
+    assert {(item["target_version_id"], item["status"]) for item in rounds} == {
+        (version_a1["id"], "withdrawn"), (version_a2["id"], "assigned"),
+    }
 
     target_b = auth_client.post(
         f"/api/projects/{project['id']}/evidence-targets",
@@ -651,8 +650,9 @@ def test_personal_evidence_provisioning_keeps_one_open_logical_target_round(
             assignment_url,
             params={"scope": "mine", "document_id": document["id"]},
         ).json()
+        if item["status"] != "withdrawn"
     }
-    assert target_versions == {version_a1["id"], version_b1["id"]}
+    assert target_versions == {version_a2["id"], version_b1["id"]}
 
 
 def test_personal_submission_unblocks_version_activated_during_open_round(
@@ -1584,7 +1584,7 @@ def test_invite_create_and_accept_new_user(auth_client):
         headers={"Authorization": ""},
     )
     assert accept.status_code == 200
-    assert accept.json() == {"authenticated": True}
+    assert accept.json() == {"authenticated": True, "workspace_id": ws["id"]}
 
     repeated = auth_client.post(
         f"/api/invites/{token}/accept",
@@ -1899,7 +1899,7 @@ def test_invite_accept_authenticates_an_existing_user_without_exposing_a_token(
     )
 
     assert accepted.status_code == 200
-    assert accepted.json() == {"authenticated": True}
+    assert accepted.json() == {"authenticated": True, "workspace_id": workspace["id"]}
     assert accepted.cookies.get(SESSION_COOKIE_NAME)
     assert accepted.cookies.get(CSRF_COOKIE_NAME)
     assert "access_token" not in accepted.json()

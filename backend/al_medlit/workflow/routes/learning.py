@@ -243,7 +243,26 @@ def materialize_feedback_run(
         actor=current_user,
     )
     if dispatch.should_enqueue:
-        enqueue_feedback_scoring(dispatch.run.id)
+        try:
+            enqueue_feedback_scoring(dispatch.run.id)
+        except Exception as exc:
+            from datetime import UTC, datetime
+
+            from al_medlit.workflow.models import FeedbackRun
+
+            run = (
+                db.query(FeedbackRun)
+                .filter(FeedbackRun.id == dispatch.run.id)
+                .populate_existing()
+                .with_for_update()
+                .one()
+            )
+            if run.status == "queued":
+                run.status = "failed"
+                run.failure_code = "broker_dispatch_failed"
+                run.failure_reason = str(exc)[:4000] or "Feedback scoring dispatch failed"
+                run.completed_at = datetime.now(UTC)
+                db.commit()
         db.expire_all()
     return service.get_feedback_run(
         db,

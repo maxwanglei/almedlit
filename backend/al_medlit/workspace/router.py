@@ -5,11 +5,11 @@ from al_medlit.auth import service as auth_service
 from al_medlit.auth.cookies import set_session_cookies
 from al_medlit.auth.dependencies import get_current_user
 from al_medlit.auth.models import User
-from al_medlit.auth.schemas import ActionTokenRequest, SessionResponse, UserCreate
+from al_medlit.auth.schemas import ActionTokenRequest, UserCreate
 from al_medlit.core import capabilities as cap
 from al_medlit.core.config import settings
 from al_medlit.core.database import get_db
-from al_medlit.core.exceptions import ForbiddenError, NotFoundError
+from al_medlit.core.exceptions import ForbiddenError, NotFoundError, ValidationError
 from al_medlit.workspace import capability_service, service
 from al_medlit.workspace.dependencies import ROLE_ORDER, require_role
 from al_medlit.workspace.models import WorkspaceJoinRequest, WorkspaceMember
@@ -17,6 +17,7 @@ from al_medlit.workspace.schemas import (
     CapabilitiesRead,
     CapabilityUpdate,
     InviteAccept,
+    InviteAcceptanceResponse,
     InviteCreate,
     InvitePreview,
     InviteRead,
@@ -268,7 +269,7 @@ def preview_invite_token(payload: ActionTokenRequest, db: Session = Depends(get_
     return preview_invite(payload.token, db)
 
 
-@invite_router.post("/accept", response_model=SessionResponse)
+@invite_router.post("/accept", response_model=InviteAcceptanceResponse)
 def accept_invite_token(
     payload: InviteTokenAccept,
     request: Request,
@@ -298,7 +299,7 @@ def preview_invite(token: str, db: Session = Depends(get_db)):
     )
 
 
-@invite_router.post("/{token}/accept", response_model=SessionResponse, deprecated=True)
+@invite_router.post("/{token}/accept", response_model=InviteAcceptanceResponse, deprecated=True)
 def accept_invite(
     token: str,
     payload: InviteAccept,
@@ -308,6 +309,8 @@ def accept_invite(
     db: Session = Depends(get_db),
 ):
     invite = service.get_open_invite(db, token)
+    if bool(payload.username) != bool(payload.password):
+        raise ValidationError("Both username and password are required")
     if authorization:
         # Explicit API-client authentication takes precedence over both a
         # browser cookie and any credential payload.
@@ -324,6 +327,7 @@ def accept_invite(
                     display_name=payload.display_name,
                 ),
             )
+            service.create_personal_workspace(db, user)
         else:
             user = auth_service.authenticate_login(db, payload.username, payload.password)
     else:
@@ -336,7 +340,7 @@ def accept_invite(
         user_id=user.id,
         session_version=user.session_version,
     )
-    return SessionResponse()
+    return InviteAcceptanceResponse(workspace_id=invite.workspace_id)
 
 
 join_request_router = APIRouter(prefix="/join-requests", tags=["join-requests"])

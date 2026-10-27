@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
+import lzma
 import shutil
+import stat
 import struct
 import zipfile
+import zlib
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO
+from typing import BinaryIO, Literal
 
 _END_OF_CENTRAL_DIRECTORY_SIGNATURE = b"PK\x05\x06"
-_ZIP64_END_OF_CENTRAL_DIRECTORY_SIGNATURE = b"PK\x06\x06"
-_ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR_SIGNATURE = b"PK\x06\x07"
 _CENTRAL_DIRECTORY_MEMBER_SIGNATURE = b"PK\x01\x02"
 _END_OF_CENTRAL_DIRECTORY = struct.Struct("<4s4H2LH")
-_ZIP64_END_OF_CENTRAL_DIRECTORY = struct.Struct("<4sQ2H2L4Q")
-_ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR = struct.Struct("<4sLQL")
 _CENTRAL_DIRECTORY_MEMBER_SIZE = 46
 _MAX_ZIP_COMMENT_BYTES = (1 << 16) - 1
 
@@ -41,8 +41,7 @@ class ArchiveExtractionLimits:
             self.max_path_length,
         )
         if any(
-            not isinstance(value, int) or isinstance(value, bool) or value <= 0
-            for value in values
+            not isinstance(value, int) or isinstance(value, bool) or value <= 0 for value in values
         ):
             raise ValueError("Archive extraction limits must be positive integers")
 
@@ -75,47 +74,24 @@ def _validate_zip_inventory(source: BinaryIO, limits: ArchiveExtractionLimits) -
     if end_record is None or end_record_offset is None:
         raise ArchiveExtractionError("Archive is not a valid ZIP file")
 
-    member_count = end_record[4]
-    central_directory_size = end_record[5]
-    central_directory_end = end_record_offset
-    locator = None
-    locator_offset = end_record_offset - _ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR.size
-    if locator_offset >= 0:
-        source.seek(locator_offset)
-        locator_data = source.read(_ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR.size)
-        if len(locator_data) == _ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR.size:
-            candidate = _ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR.unpack(locator_data)
-            if candidate[0] == _ZIP64_END_OF_CENTRAL_DIRECTORY_LOCATOR_SIGNATURE:
-                locator = candidate
-    if locator is not None:
-        if locator[1] != 0 or locator[3] != 1:
-            raise ArchiveExtractionError("Multi-disk ZIP archives are not supported")
-        zip64_record_offset = locator_offset - _ZIP64_END_OF_CENTRAL_DIRECTORY.size
-        if zip64_record_offset < 0:
-            raise ArchiveExtractionError("Archive has invalid ZIP64 metadata")
-        source.seek(zip64_record_offset)
-        zip64_data = source.read(_ZIP64_END_OF_CENTRAL_DIRECTORY.size)
-        if len(zip64_data) != _ZIP64_END_OF_CENTRAL_DIRECTORY.size:
-            raise ArchiveExtractionError("Archive has truncated ZIP64 metadata")
-        zip64_record = _ZIP64_END_OF_CENTRAL_DIRECTORY.unpack(zip64_data)
-        if (
-            zip64_record[0] != _ZIP64_END_OF_CENTRAL_DIRECTORY_SIGNATURE
-            or zip64_record[1] != 44
-            or zip64_record[4] != 0
-            or zip64_record[5] != 0
-            or zip64_record[6] != zip64_record[7]
-        ):
-            raise ArchiveExtractionError("Archive has invalid ZIP64 metadata")
-        member_count = zip64_record[7]
-        central_directory_size = zip64_record[8]
-        central_directory_end = zip64_record_offset
-    elif (
-        member_count == 0xFFFF
-        or central_directory_size == 0xFFFFFFFF
-        or end_record[1] != 0
-        or end_record[2] != 0
-        or end_record[3] != member_count
+    # Use ZipFile's bounded metadata reader so preflight checks its exact directory.
+    selected = zipfile._EndRecData(source)
+    if selected is None:
+        raise ArchiveExtractionError("Archive is not a valid ZIP file")
+    member_count = selected[zipfile._ECD_ENTRIES_TOTAL]
+    central_directory_size = selected[zipfile._ECD_SIZE]
+    central_directory_end = selected[zipfile._ECD_LOCATION]
+    if (
+        selected[zipfile._ECD_DISK_NUMBER] != 0
+        or selected[zipfile._ECD_DISK_START] != 0
+        or selected[zipfile._ECD_ENTRIES_THIS_DISK] != member_count
     ):
+        raise ArchiveExtractionError("Archive has invalid or unsupported ZIP metadata")
+    if selected[zipfile._ECD_SIGNATURE] == zipfile.stringEndArchive64:
+        # Older 3.12 releases leave LOCATION at the classic EOCD, unlike newer patches.
+        if central_directory_end == end_record_offset:
+            central_directory_end -= zipfile.sizeEndCentDir64 + zipfile.sizeEndCentDir64Locator
+    elif member_count == 0xFFFF or central_directory_size == 0xFFFFFFFF:
         raise ArchiveExtractionError("Archive has invalid or unsupported ZIP metadata")
 
     if member_count > limits.max_members:
@@ -147,9 +123,7 @@ def _validate_zip_inventory(source: BinaryIO, limits: ArchiveExtractionLimits) -
             raise ArchiveExtractionError("Archive contains an invalid path")
         observed_members += 1
         if observed_members > limits.max_members:
-            raise ArchiveExtractionError(
-                f"Archive contains more than {limits.max_members} members"
-            )
+            raise ArchiveExtractionError(f"Archive contains more than {limits.max_members} members")
         source.seek(variable_length, 1)
         consumed += member_size
     if observed_members != member_count:
@@ -163,22 +137,42 @@ def _validated_archive_members(
 ) -> list[tuple[zipfile.ZipInfo, Path]]:
     members = archive.infolist()
     if len(members) > limits.max_members:
-        raise ArchiveExtractionError(
-            f"Archive contains more than {limits.max_members} members"
-        )
+        raise ArchiveExtractionError(f"Archive contains more than {limits.max_members} members")
 
     validated: list[tuple[zipfile.ZipInfo, Path]] = []
     seen_paths: set[Path] = set()
+    path_kinds: dict[Path, Literal["file", "directory"]] = {destination: "directory"}
     total_bytes = 0
     for member in members:
         if not member.filename or len(member.filename) > limits.max_path_length:
             raise ArchiveExtractionError("Archive contains an invalid path")
+        if member.flag_bits & 1:
+            raise ArchiveExtractionError("Encrypted archive members are not supported")
+        if member.flag_bits & 0x60:
+            raise ArchiveExtractionError("Archive contains unsupported member flags")
+        zipfile._check_compression(member.compress_type)
+        is_directory = member.is_dir()
+        if member.create_system == 3:
+            file_type = stat.S_IFMT(member.external_attr >> 16)
+            expected_type = stat.S_IFDIR if is_directory else stat.S_IFREG
+            if file_type not in (0, expected_type):
+                raise ArchiveExtractionError("Archive contains an unsupported file type")
+
         path = (destination / member.filename).resolve()
         if not path.is_relative_to(destination):
             raise ArchiveExtractionError("Archive contains an unsafe path")
         if path in seen_paths:
             raise ArchiveExtractionError("Archive contains duplicate paths")
         seen_paths.add(path)
+        kind = "directory" if is_directory else "file"
+        if path in path_kinds and path_kinds[path] != kind:
+            raise ArchiveExtractionError("Archive contains file/directory path collisions")
+        path_kinds[path] = kind
+        for relative_parent in path.relative_to(destination).parents:
+            parent = destination / relative_parent
+            if path_kinds.get(parent) == "file":
+                raise ArchiveExtractionError("Archive contains file/directory path collisions")
+            path_kinds[parent] = "directory"
 
         if member.file_size > limits.max_member_bytes:
             raise ArchiveExtractionError(
@@ -203,18 +197,18 @@ def extract_zip_bounded(
 
     extraction_limits = limits or ArchiveExtractionLimits()
     source_path = Path(archive_path)
-    if source_path.is_symlink() or not source_path.is_file():
-        raise ArchiveExtractionError("Archive source must be a regular, non-symlink file")
-    archive_size = source_path.stat().st_size
-    if archive_size > extraction_limits.max_archive_bytes:
-        raise ArchiveExtractionError(
-            f"Archive exceeds the {extraction_limits.max_archive_bytes}-byte input limit"
-        )
-
     destination_path = Path(destination)
-    destination_path.mkdir(parents=True, exist_ok=True)
-    resolved_destination = destination_path.resolve()
     try:
+        if source_path.is_symlink() or not source_path.is_file():
+            raise ArchiveExtractionError("Archive source must be a regular, non-symlink file")
+        archive_size = source_path.stat().st_size
+        if archive_size > extraction_limits.max_archive_bytes:
+            raise ArchiveExtractionError(
+                f"Archive exceeds the {extraction_limits.max_archive_bytes}-byte input limit"
+            )
+
+        destination_path.mkdir(parents=True, exist_ok=True)
+        resolved_destination = destination_path.resolve()
         with source_path.open("rb") as archive_source:
             _validate_zip_inventory(archive_source, extraction_limits)
 
@@ -231,8 +225,10 @@ def extract_zip_bounded(
                         continue
                     path.parent.mkdir(parents=True, exist_ok=True)
                     member_written = 0
+                    target_opened = False
                     try:
                         with archive.open(member) as source, path.open("wb") as target:
+                            target_opened = True
                             while chunk := source.read(1024 * 1024):
                                 member_written += len(chunk)
                                 if member_written > extraction_limits.max_member_bytes:
@@ -246,10 +242,16 @@ def extract_zip_bounded(
                                     )
                                 target.write(chunk)
                     except Exception:
-                        path.unlink(missing_ok=True)
+                        if target_opened:
+                            with suppress(OSError):
+                                path.unlink(missing_ok=True)
                         raise
+    except ArchiveExtractionError:
+        raise
     except zipfile.BadZipFile as exc:
         raise ArchiveExtractionError("Archive is not a valid ZIP file") from exc
+    except (OSError, RuntimeError, ValueError, EOFError, zlib.error, lzma.LZMAError) as exc:
+        raise ArchiveExtractionError(f"Archive could not be extracted: {exc}") from exc
     return resolved_destination
 
 

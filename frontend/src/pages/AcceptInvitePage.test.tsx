@@ -8,11 +8,13 @@ import AcceptInvitePage from "@/pages/AcceptInvitePage";
 const mocks = vi.hoisted(() => ({
   acceptInvite: vi.fn(),
   getInvitePreview: vi.fn(),
+  logout: vi.fn(),
 }));
 
 vi.mock("@/api/client", () => ({
   acceptInvite: mocks.acceptInvite,
   getInvitePreview: mocks.getInvitePreview,
+  logout: mocks.logout,
 }));
 
 function input(label: string): HTMLInputElement {
@@ -31,7 +33,8 @@ beforeEach(() => {
     role: "annotator",
     expires_at: null,
   });
-  mocks.acceptInvite.mockResolvedValue(undefined);
+  mocks.acceptInvite.mockResolvedValue({ workspace_id: 42 });
+  mocks.logout.mockResolvedValue(undefined);
   Object.defineProperty(window, "matchMedia", {
     configurable: true,
     value: vi.fn().mockImplementation((query: string) => ({
@@ -50,6 +53,16 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("AcceptInvitePage", () => {
+  it("allows switching accounts without leaving the invite", async () => {
+    const onAccepted = vi.fn();
+    render(<AcceptInvitePage token="tok-1" signedIn onAccepted={onAccepted} />);
+    await screen.findByText(/Lab Team/);
+    fireEvent.click(screen.getByRole("button", { name: "Switch account" }));
+    await waitFor(() => expect(mocks.logout).toHaveBeenCalledOnce());
+    expect(mocks.acceptInvite).not.toHaveBeenCalled();
+    expect(onAccepted).not.toHaveBeenCalled();
+    expect(screen.getByText(/Lab Team/)).toBeTruthy();
+  });
   it("names the workspace and role from the preview", async () => {
     render(<AcceptInvitePage token="tok-1" signedIn={false} onAccepted={vi.fn()} />);
 
@@ -75,7 +88,7 @@ describe("AcceptInvitePage", () => {
         create_account: true,
       });
     });
-    await waitFor(() => expect(onAccepted).toHaveBeenCalled());
+    await waitFor(() => expect(onAccepted).toHaveBeenCalledWith(42));
   });
 
   it("authenticates an existing user while accepting", async () => {
@@ -95,7 +108,7 @@ describe("AcceptInvitePage", () => {
         create_account: false,
       });
     });
-    await waitFor(() => expect(onAccepted).toHaveBeenCalled());
+    await waitFor(() => expect(onAccepted).toHaveBeenCalledWith(42));
   });
 
   it("confirms directly when a session already exists", async () => {
@@ -107,7 +120,7 @@ describe("AcceptInvitePage", () => {
     fireEvent.click(acceptButton());
 
     await waitFor(() => expect(mocks.acceptInvite).toHaveBeenCalledWith("tok-1"));
-    await waitFor(() => expect(onAccepted).toHaveBeenCalled());
+    await waitFor(() => expect(onAccepted).toHaveBeenCalledWith(42));
   });
 
   it("explains an expired or consumed invite instead of showing a form", async () => {

@@ -23,6 +23,10 @@ class EvidenceBlocksJSONLFormat:
         annotation_set = context.annotation_set
         if annotation_set is None:
             raise ValidationError("evidence-blocks-v1 requires an annotation set")
+        splits = {
+            document.document_id: document.split
+            for document in annotation_set.corpus_snapshot.documents
+        }
         for item in annotation_set.items:
             document = context.db.get(Document, item.document_id)
             target_version = context.db.get(EvidenceTargetVersion, item.target_version_id)
@@ -30,6 +34,7 @@ class EvidenceBlocksJSONLFormat:
             yield {
                 "schema_version": "evidence-blocks-v1",
                 "document_id": item.document_id,
+                "split": splits[item.document_id],
                 "source_document_id": document.external_id,
                 "target": {
                     "id": target_version.id,

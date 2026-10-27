@@ -281,7 +281,7 @@ describe("TrainingScreen base-model selection", () => {
         /Asset ID: 161 · Source: medical\/abstract-encoder · Revision: encoder-commit-42/,
       ),
     ).toBeTruthy();
-    expect(screen.getByText("Protected test split")).toBeTruthy();
+    expect(screen.getByText("Validation split")).toBeTruthy();
     expect(screen.getByText("Metrics: f1")).toBeTruthy();
     expect(screen.queryByText("hidden-secret")).toBeNull();
     await user.click(screen.getByRole("button", { name: "Launch training" }));
@@ -290,6 +290,7 @@ describe("TrainingScreen base-model selection", () => {
       expect(onLaunch).toHaveBeenCalledWith(
         expect.objectContaining({
           config: expect.objectContaining({ base_model_asset_id: 161 }),
+          evaluationPlan: { splits: ["validation"], metrics: ["f1"] },
         }),
       ),
     );
@@ -636,7 +637,7 @@ describe("TrainingScreen base-model selection", () => {
         expect.objectContaining({
           environmentId: 132,
           storagePolicyId: 142,
-          evaluationPlan: { splits: ["validation"] },
+          evaluationPlan: { splits: ["validation"], metrics: ["f1"] },
         }),
       ),
     );

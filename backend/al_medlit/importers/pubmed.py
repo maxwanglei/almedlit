@@ -337,7 +337,7 @@ class _NCBIRequestGate:
             if delay > 0:
                 time.sleep(delay)
             self._next_request_at = time.monotonic() + NCBI_REQUEST_INTERVAL
-            yield
+        yield
 
     def defer(self, delay: float) -> None:
         with self._lock:

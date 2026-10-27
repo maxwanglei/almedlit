@@ -2,7 +2,6 @@ import asyncio
 from contextlib import contextmanager
 from datetime import timedelta
 from threading import Event
-from types import SimpleNamespace
 
 import pytest
 
@@ -79,15 +78,15 @@ def test_shutdown_finishes_active_delete_and_closes_session_before_returning(
     original_sweep = maintenance.reclaim_once
 
     @contextmanager
-    def tracked_transaction():
+    def tracked_session():
         try:
-            with testing_session_factory.begin() as session:
+            with testing_session_factory() as session:
                 yield session
         finally:
             session_closed.set()
 
     monkeypatch.setattr(
-        maintenance, "SessionLocal", SimpleNamespace(begin=tracked_transaction),
+        maintenance, "SessionLocal", tracked_session,
     )
 
     def observed_sweep(stop_requested):

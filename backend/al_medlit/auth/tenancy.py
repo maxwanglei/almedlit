@@ -74,6 +74,7 @@ def assignment_access_clause(
         TaskAssignment.project_id == project_id,
         TaskAssignment.document_id == document_id,
         TaskAssignment.assignee_user_id == user.id,
+        TaskAssignment.status != "withdrawn",
         ProjectTask.id == TaskAssignment.task_id,
         ProjectTask.project_id == project_id,
         ProjectTask.enabled.is_(True),
@@ -273,16 +274,17 @@ def lock_project_member_for_mutation(
     *,
     min_role: str | None = None,
     related_user_ids: Iterable[int] = (),
+    lock_workspace: bool = False,
 ) -> WorkspaceMember:
     """Lock and refresh the actor's project membership before a mutation.
 
     Route dependencies are intentionally only an early rejection.  A concurrent
     membership removal or role demotion can make their cached membership stale,
     so every project-scoped write locks the active user and that user's membership
-    before it locks domain rows or assignments and commits.  Offboarding and role
-    changes lock the same membership row after their workspace lock.  This route
-    never acquires the workspace lock afterward, so the ordering is deadlock-safe
-    without serializing unrelated members' writes on one workspace row.
+    before it locks domain rows or assignments and commits. Offboarding and role
+    changes lock the same membership row after their workspace lock. Callers
+    whose services acquire the workspace lock pass lock_workspace=True so it is
+    acquired before the membership lock as well.
 
     Assignment policy is locked separately by document authorization. Holding a
     shared project lock here would deadlock concurrent trainers when their
@@ -334,6 +336,8 @@ def lock_project_member_for_mutation(
     actor = next((locked_user for locked_user in locked_users if locked_user.id == user.id), None)
     if actor is None or not actor.is_active:
         raise ForbiddenError("Workspace mutation actor is not active")
+    if lock_workspace:
+        workspace_service.lock_workspace_for_update(db, workspace_id)
     if actor.is_superuser:
         member = WorkspaceMember(
             workspace_id=workspace_id,
@@ -408,6 +412,7 @@ def lock_document_resource_for_mutation(
                     TaskAssignment.project_id == project_id,
                     TaskAssignment.document_id == document_id,
                     TaskAssignment.assignee_user_id == user.id,
+            TaskAssignment.status != "withdrawn",
                     ProjectTask.project_id == project_id,
                     ProjectTask.enabled.is_(True),
                 )
@@ -498,6 +503,7 @@ def assert_document_assigned(
             TaskAssignment.project_id == project_id,
             TaskAssignment.document_id == document_id,
             TaskAssignment.assignee_user_id == user.id,
+            TaskAssignment.status != "withdrawn",
             ProjectTask.project_id == project_id,
             ProjectTask.enabled.is_(True),
         )
@@ -538,6 +544,7 @@ def assert_task_assigned(
             TaskAssignment.project_id == project_id,
             TaskAssignment.document_id == document_id,
             TaskAssignment.assignee_user_id == user.id,
+            TaskAssignment.status != "withdrawn",
             ProjectTask.project_id == project_id,
             ProjectTask.annotation_type == annotation_type,
             ProjectTask.enabled.is_(True),

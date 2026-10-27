@@ -117,6 +117,10 @@ def _as_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
+def _remaining_reserved_bytes(reservation: ArtifactStorageReservation) -> int:
+    return max(0, reservation.reserved_bytes - reservation.committed_bytes)
+
+
 def _expire_locked(
     db: Session,
     quota: WorkspaceArtifactQuota,
@@ -133,7 +137,7 @@ def _expire_locked(
         .with_for_update()
         .all()
     )
-    released_bytes = sum(item.reserved_bytes for item in expired)
+    released_bytes = sum(_remaining_reserved_bytes(item) for item in expired)
     if released_bytes > quota.reserved_bytes:
         raise ConflictError("Workspace artifact reservation accounting is inconsistent")
     for reservation in expired:
@@ -313,9 +317,10 @@ def release_artifact_reservation(
     quota, reservation = _locked_reservation(db, reservation_id)
     if reservation.status in _TERMINAL_STATUSES:
         return reservation
-    if reservation.reserved_bytes > quota.reserved_bytes:
+    remaining = _remaining_reserved_bytes(reservation)
+    if remaining > quota.reserved_bytes:
         raise ConflictError("Workspace artifact reservation accounting is inconsistent")
-    quota.reserved_bytes -= reservation.reserved_bytes
+    quota.reserved_bytes -= remaining
     reservation.status = "released"
     reservation.released_at = now or datetime.now(UTC)
     reservation.release_reason = normalized_reason
@@ -361,7 +366,10 @@ def renew_owner_artifact_reservation(
         )
         .one_or_none()
     )
-    if reservation is None or reservation.status != _ACTIVE_STATUS:
+    if reservation is None:
+        return None
+    _, reservation = _locked_reservation(db, reservation.id)
+    if reservation.status != _ACTIVE_STATUS:
         return reservation
     return renew_artifact_reservation(db, reservation_id=reservation.id)
 
@@ -387,6 +395,7 @@ def admit_artifact_publication(
     project_id: int,
     candidates: Iterable[tuple[str, int]],
     reservation_id: int | None = None,
+    keep_reservation_open: bool = False,
 ) -> int:
     """Atomically convert a reservation into workspace-unique physical usage."""
 
@@ -442,7 +451,7 @@ def admit_artifact_publication(
                 f"Artifact reservation cannot be committed from status "
                 f"'{reservation.status}'"
             )
-        own_reserved_bytes = reservation.reserved_bytes
+        own_reserved_bytes = _remaining_reserved_bytes(reservation)
 
     projected = (
         quota.used_bytes
@@ -465,12 +474,16 @@ def admit_artifact_publication(
 
     quota.used_bytes += physical_delta
     if reservation is not None:
-        if reservation.reserved_bytes > quota.reserved_bytes:
+        if own_reserved_bytes > quota.reserved_bytes:
             raise ConflictError("Workspace artifact reservation accounting is inconsistent")
-        quota.reserved_bytes -= reservation.reserved_bytes
-        reservation.status = "committed"
-        reservation.committed_bytes = physical_delta
-        reservation.committed_at = effective_now
+        quota.reserved_bytes -= (
+            min(own_reserved_bytes, physical_delta)
+            if keep_reservation_open else own_reserved_bytes
+        )
+        reservation.committed_bytes += physical_delta
+        if not keep_reservation_open:
+            reservation.status = "committed"
+            reservation.committed_at = effective_now
     db.flush()
     return physical_delta
 
@@ -490,13 +503,22 @@ def link_reservation_artifact_package(
     )
     if reservation is None:
         raise NotFoundError("Artifact storage reservation not found")
-    if reservation.status != "committed":
-        raise ConflictError("Only committed reservations can link an artifact package")
+    if reservation.status not in {"active", "committed"}:
+        raise ConflictError("Only active or committed reservations can link an artifact package")
     if (
         reservation.artifact_package_id is not None
         and reservation.artifact_package_id != artifact_package_id
     ):
-        raise ConflictError("Artifact reservation is already linked to another package")
+        from al_medlit.model_artifacts.models import ArtifactPackageReference
+
+        promoted = db.query(ArtifactPackageReference.id).filter(
+            ArtifactPackageReference.source_package_id == artifact_package_id,
+            ArtifactPackageReference.target_package_id == reservation.artifact_package_id,
+            ArtifactPackageReference.relationship_type == "promoted_from_candidate",
+        ).first()
+        if promoted is None:
+            raise ConflictError("Artifact reservation is already linked to another package")
+        return reservation
     reservation.artifact_package_id = artifact_package_id
     db.flush()
     return reservation
@@ -521,11 +543,11 @@ def complete_owner_artifact_reservation(
     quota, reservation = _locked_reservation(db, reservation.id)
     if reservation.status != _ACTIVE_STATUS:
         return reservation
-    if reservation.reserved_bytes > quota.reserved_bytes:
+    remaining = _remaining_reserved_bytes(reservation)
+    if remaining > quota.reserved_bytes:
         raise ConflictError("Workspace artifact reservation accounting is inconsistent")
-    quota.reserved_bytes -= reservation.reserved_bytes
+    quota.reserved_bytes -= remaining
     reservation.status = "committed"
-    reservation.committed_bytes = 0
     reservation.committed_at = datetime.now(UTC)
     db.flush()
     return reservation

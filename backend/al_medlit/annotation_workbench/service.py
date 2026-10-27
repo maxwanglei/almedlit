@@ -136,6 +136,7 @@ def get_annotation_workbench(
     return AnnotationWorkbenchRead(
         project=ProjectRead.model_validate(project).model_copy(
             update={
+                "settings": project.settings if has_assignment_bypass(current_user, member) else {},
                 "tasks": [
                     ProjectTaskRead.model_validate(task) for task in project_tasks
                 ]

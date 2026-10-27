@@ -389,7 +389,7 @@ export default function EvidenceBlockCanvas({
     () => documentAssignments.find((assignment) => assignment.id === selectedAssignmentId) ?? null,
     [documentAssignments, selectedAssignmentId],
   );
-  const selectedTargetVersionId = requestedAssignment?.target_version_id ?? targetVersionId;
+  const selectedTargetVersionId = targetVersionId;
   const options = useMemo(
     () => targetOptions(targets, documentAssignments, settings),
     [documentAssignments, settings, targets],
@@ -443,13 +443,13 @@ export default function EvidenceBlockCanvas({
 
   useEffect(() => {
     setSelectedTargetVersionId((current) =>
-      preferredTargetVersionId(options, documentAssignments, current),
+      requestedAssignment?.target_version_id ?? preferredTargetVersionId(options, documentAssignments, current),
     );
-  }, [documentAssignments, options]);
+  }, [documentAssignments, options, requestedAssignment?.id, requestedAssignment?.target_version_id]);
 
   const selectedAssignment = useMemo(
     () => {
-      if (requestedAssignment) return requestedAssignment;
+      if (requestedAssignment?.target_version_id === selectedTargetVersionId) return requestedAssignment;
       const targetAssignments = documentAssignments.filter(
         (assignment) => assignment.target_version_id === selectedTargetVersionId,
       );
@@ -463,11 +463,10 @@ export default function EvidenceBlockCanvas({
     [documentAssignments, requestedAssignment, selectedTargetVersionId],
   );
   useEffect(() => {
-    // The workspace resolves controlled selections from the URL. Reporting an
-    // earlier render here could overwrite a newer navigation before it settles.
-    if (selectedAssignmentId !== undefined) return;
+    if (requestedAssignment && requestedAssignment.target_version_id !== selectedTargetVersionId) return;
+    if ((selectedAssignment?.id ?? null) === (selectedAssignmentId ?? null)) return;
     onActiveAssignmentChange?.(selectedAssignment);
-  }, [onActiveAssignmentChange, selectedAssignment, selectedAssignmentId]);
+  }, [onActiveAssignmentChange, requestedAssignment, selectedAssignment, selectedAssignmentId, selectedTargetVersionId]);
   const structureVersionId =
     selectedAssignment?.structure_version_id ?? document.active_structure_version_id;
   const assignmentEditable = selectedAssignment
@@ -971,8 +970,10 @@ export default function EvidenceBlockCanvas({
         evidence_block: payloadFor(...boundaries),
       });
       onAnnotationsChanged([created]);
-      selectAnnotation(created.id);
+      selectAnnotation(null);
       clearSelection();
+      setNote("");
+      setLabels([]);
     });
   }
 
@@ -988,6 +989,9 @@ export default function EvidenceBlockCanvas({
       });
       onAnnotationsChanged([updated]);
       clearSelection();
+      selectAnnotation(null);
+      setNote("");
+      setLabels([]);
     });
   }
 

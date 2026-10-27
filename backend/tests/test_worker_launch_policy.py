@@ -61,6 +61,7 @@ def _worker_command(tmp_path, profile):
     runner.write_text("""
 from types import SimpleNamespace
 from scripts import start_worker
+start_worker._run_security_checks = lambda: None
 start_worker.collect_runtime_readiness = lambda *a, **k: SimpleNamespace(ready=True)
 start_worker.compute_profile_fragment = lambda report: {'ready': report.ready}
 start_worker.main()

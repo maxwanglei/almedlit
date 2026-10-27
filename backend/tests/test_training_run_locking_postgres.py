@@ -275,7 +275,7 @@ def test_heartbeat_keeps_run_alive_after_candidate_publication(
             results["executor"] = ("conflict", str(exc))
 
     assert results == {
-        "reservation": "committed",
+        "reservation": "active",
         "heartbeat": True,
         "reconciled": [],
         "executor": ("ok", "succeeded"),
@@ -285,3 +285,15 @@ def test_heartbeat_keeps_run_alive_after_candidate_publication(
         assert run.status == "succeeded"
         assert "worker_recovery" not in run.runtime_snapshot
         assert run.runtime_snapshot["protected_test_evaluation"]["status"] == "succeeded"
+        reservation = db.get(ArtifactStorageReservation, reservation_id)
+        assert reservation.status == "committed"
+        version = db.get(ModelVersion, run.output_model_version_id)
+        candidate = db.get(ArtifactPackage, reservation.artifact_package_id)
+        assert candidate.package_kind == "model_candidate"
+        assert candidate.retention.pinned is False
+        promoted = db.get(ArtifactPackage, version.checkpoint_package_id)
+        assert any(
+            reference.target_package_id == candidate.id
+            and reference.relationship_type == "promoted_from_candidate"
+            for reference in promoted.outgoing_references
+        )

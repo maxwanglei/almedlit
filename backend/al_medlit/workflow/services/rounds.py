@@ -210,9 +210,45 @@ def _validate_document_entity_output(
 
 
 
+def _round_creation_replay(
+    db: Session, data: schemas.AnnotationRoundCreate, actor: User, request_hash: str
+) -> models.AnnotationRound | None:
+    if data.request_key is None:
+        return None
+    existing = (
+        db.query(models.AnnotationRound)
+        .filter(
+            models.AnnotationRound.project_id == data.project_id,
+            models.AnnotationRound.created_by_user_id == actor.id,
+            models.AnnotationRound.request_key == data.request_key,
+        )
+        .populate_existing()
+        .first()
+    )
+    if existing is not None and existing.request_hash != request_hash:
+        raise ConflictError("The round request key was already used with different inputs")
+    return existing
+
+
 def create_annotation_round(
     db: Session, data: schemas.AnnotationRoundCreate, actor: User
 ) -> models.AnnotationRound:
+    request_hash = _canonical_hash({
+        **data.model_dump(exclude={"request_key"}),
+        "annotator_user_ids": sorted(data.annotator_user_ids),
+    })
+    existing = _round_creation_replay(db, data, actor, request_hash)
+    if existing is not None:
+        return existing
+    project = _project(db, data.project_id)
+    if data.annotator_user_ids:
+        db.query(User.id).filter(User.id.in_(data.annotator_user_ids)).order_by(
+            User.id
+        ).with_for_update().all()
+    db.query(Project.id).filter(Project.id == data.project_id).with_for_update().one()
+    existing = _round_creation_replay(db, data, actor, request_hash)
+    if existing is not None:
+        return existing
     dataset = _scoped(
         db,
         models.DatasetVersion,
@@ -229,7 +265,6 @@ def create_annotation_round(
         raise ValidationError(
             "Annotation rounds require explicit annotators or open_to_all_annotators"
         )
-    project = _project(db, data.project_id)
     if data.annotator_user_ids:
         # Account deactivation locks the User row before withdrawing mutable
         # work. Use the same boundary here so a new explicit round assignment
@@ -242,6 +277,8 @@ def create_annotation_round(
                 WorkspaceMember.workspace_id == project.workspace_id,
                 WorkspaceMember.user_id.in_(data.annotator_user_ids),
             )
+            .order_by(WorkspaceMember.id)
+            .with_for_update()
             .all()
         }
         missing = sorted(set(data.annotator_user_ids) - member_user_ids)
@@ -393,6 +430,7 @@ def create_annotation_round(
     )
     annotation_round = models.AnnotationRound(
         **data.model_dump(),
+        request_hash=request_hash if data.request_key is not None else None,
         sequence=sequence,
         created_by_user_id=actor.id,
     )
@@ -837,6 +875,40 @@ def list_round_submissions(
     ).offset(offset).limit(limit).all()
 
 
+def update_annotation_round_assignees(
+    db: Session,
+    project_id: int,
+    annotation_round_id: int,
+    data: schemas.AnnotationRoundAssigneesUpdate,
+) -> models.AnnotationRound:
+    user_ids = data.annotator_user_ids
+    if len(user_ids) != len(set(user_ids)):
+        raise ValidationError("annotator_user_ids must be unique")
+    if bool(user_ids) == data.open_to_all_annotators:
+        raise ValidationError("Choose explicit annotators or an open round")
+    _lock_and_validate_active_round_annotators(db, user_ids)
+    project = _project(db, project_id)
+    member_ids = {user_id for (user_id,) in db.query(WorkspaceMember.user_id).filter(
+        WorkspaceMember.workspace_id == project.workspace_id,
+        WorkspaceMember.user_id.in_(user_ids),
+    ).order_by(WorkspaceMember.id).with_for_update()}
+    if set(user_ids) - member_ids:
+        raise ValidationError("All round annotators must be project workspace members")
+    annotation_round = db.query(models.AnnotationRound).filter(
+        models.AnnotationRound.id == annotation_round_id,
+        models.AnnotationRound.project_id == project_id,
+    ).populate_existing().with_for_update().first()
+    if annotation_round is None:
+        raise NotFoundError("Annotation round not found")
+    if annotation_round.status not in {"draft", "open"}:
+        raise ConflictError("Only draft or open rounds can change annotators")
+    annotation_round.annotator_user_ids = list(user_ids)
+    annotation_round.open_to_all_annotators = data.open_to_all_annotators
+    _commit(db, "Could not update round annotators")
+    db.refresh(annotation_round)
+    return annotation_round
+
+
 def transition_annotation_round(
     db: Session, project_id: int, annotation_round_id: int, status: str
 ) -> models.AnnotationRound:
@@ -853,6 +925,13 @@ def transition_annotation_round(
         # Acquire the explicit assignees in canonical order, then refresh and
         # lock the round so an offboarding transaction cannot race this open.
         _lock_and_validate_active_round_annotators(db, candidate_annotator_ids)
+        project = _project(db, project_id)
+        member_ids = {user_id for (user_id,) in db.query(WorkspaceMember.user_id).filter(
+            WorkspaceMember.workspace_id == project.workspace_id,
+            WorkspaceMember.user_id.in_(candidate_annotator_ids),
+        ).order_by(WorkspaceMember.id).with_for_update().all()}
+        if set(candidate_annotator_ids) - member_ids:
+            raise ValidationError("All round annotators must be project workspace members")
         if candidate.assistance_policy != "blind":
             lock_holdout_policy(db, project_id)
     annotation_round = (
@@ -918,6 +997,13 @@ def transition_annotation_round(
             raise ValidationError(
                 "A round can close only after finalized submissions cover every item"
             )
+        for annotator_id in annotation_round.annotator_user_ids or []:
+            submitted_ids = {
+                decision.round_item_id for decision in submitted_decisions.values()
+                if decision.annotator_user_id == annotator_id
+            }
+            if submitted_ids != round_item_ids:
+                raise ValidationError("Every assigned annotator must submit every round item")
         annotation_round.closed_at = datetime.now(UTC)
     elif status == "cancelled":
         annotation_round.closed_at = datetime.now(UTC)

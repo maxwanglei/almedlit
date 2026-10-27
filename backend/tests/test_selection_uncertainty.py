@@ -211,13 +211,16 @@ def test_confidence_fallback_accepts_zero_and_one(client, strategy):
 @pytest.mark.parametrize("confidence", [-0.01, 1.01])
 def test_uncertainty_rejects_out_of_range_confidence_fallback(client, strategy, confidence):
     context = _selection_context(client, f"invalid-confidence-{strategy}")
-    feedback_set = _create_feedback_set(client, context, [{
-        "dataset_item_id": context["item_by_key"]["a"]["id"],
-        "candidate_key": "primary",
-        "score": confidence,
-        "output": "candidate",
-        "explanation": {"diversity_score": 0.5},
-    }])
+    feedback_set = _create_feedback_set(client, context, [
+        {
+            "dataset_item_id": context["item_by_key"][key]["id"],
+            "candidate_key": "primary",
+            "score": confidence if key == "a" else 0.5,
+            "output": "candidate",
+            "explanation": {"diversity_score": 0.5},
+        }
+        for key in ("a", "b", "c")
+    ])
 
     response = _materialize_strategy(
         client,

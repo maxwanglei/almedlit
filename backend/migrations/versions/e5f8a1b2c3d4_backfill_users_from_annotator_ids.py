@@ -215,15 +215,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    bind = op.get_bind()
-    default_ws = bind.execute(
-        sa.text(
-            "SELECT id FROM workspaces WHERE name = 'Default' "
-            "AND kind = 'team' ORDER BY id LIMIT 1"
-        )
-    ).first()
-    if default_ws is not None:
-        bind.execute(
-            sa.text("DELETE FROM workspace_members WHERE workspace_id = :workspace_id"),
-            {"workspace_id": default_ws[0]},
-        )
+    # The backfill cannot distinguish new memberships from pre-existing ones.
+    # Preserve identity and membership history when reverting this data migration.
+    pass

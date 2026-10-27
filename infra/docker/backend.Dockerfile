@@ -12,7 +12,11 @@ COPY --from=uv /uv /uvx /bin/
 COPY pyproject.toml uv.lock ./
 COPY backend/pyproject.toml backend/README.md backend/
 COPY backend/al_medlit/ backend/al_medlit/
-RUN uv sync --frozen --no-dev --package al-medlit-backend --no-editable
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends openssh-client \
+	&& rm -rf /var/lib/apt/lists/*
+RUN uv sync --frozen --no-dev --package al-medlit-backend --no-editable \
+	--extra runtime-classical-cpu
 COPY backend/alembic.ini backend/
 COPY backend/migrations/ backend/migrations/
 COPY backend/scripts/ backend/scripts/

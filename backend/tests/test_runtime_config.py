@@ -25,7 +25,7 @@ BOOTSTRAP_ADMIN_PASSWORD_LINE = (
     "AL_MEDLIT_BOOTSTRAP_ADMIN_PASSWORD: ${AL_MEDLIT_BOOTSTRAP_ADMIN_PASSWORD:-}"
 )
 ALLOW_SELF_REGISTRATION_LINE = (
-    "AL_MEDLIT_ALLOW_SELF_REGISTRATION: ${AL_MEDLIT_ALLOW_SELF_REGISTRATION:-true}"
+    "AL_MEDLIT_ALLOW_SELF_REGISTRATION: ${AL_MEDLIT_ALLOW_SELF_REGISTRATION:-false}"
 )
 DEPLOYMENT_PROFILE_LINE = "AL_MEDLIT_DEPLOYMENT_PROFILE: ${AL_MEDLIT_DEPLOYMENT_PROFILE:-laptop}"
 AUTH_COOKIE_LINE = (
@@ -36,7 +36,8 @@ LOCAL_ATTEMPT_VOLUME_LINE = "- attempt_data:/var/lib/al-medlit/attempts"
 SECURE_MINIO_LINE = 'AL_MEDLIT_STORAGE_SECURE: "true"'
 MINIO_CA_PATH_LINE = "AL_MEDLIT_STORAGE_CA_CERT_PATH: /etc/al-medlit/minio-certs/CAs/ca.crt"
 MINIO_CERT_MOUNT_LINE = (
-    "- ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}:/etc/al-medlit/minio-certs:ro"
+    "- ${AL_MEDLIT_MINIO_CERTS_DIR:-./certs/minio}/CAs/ca.crt:"
+    "/etc/al-medlit/minio-certs/CAs/ca.crt:ro"
 )
 HEAVY_TRAINING_PACKAGES = {
     "bitsandbytes",
@@ -160,7 +161,7 @@ def test_lab_make_target_sets_lab_deployment_profile():
     assert "AL_MEDLIT_AUTH_COOKIE_SECURE=true" in makefile
 
 
-def test_default_api_install_excludes_training_and_accelerator_packages():
+def test_api_keeps_accelerator_packages_optional_and_installs_laptop_classical_runtime():
     backend_project = tomllib.loads(
         (ROOT_DIR / "backend" / "pyproject.toml").read_text()
     )
@@ -173,14 +174,14 @@ def test_default_api_install_excludes_training_and_accelerator_packages():
     ).read_text()
 
     assert default_dependencies.isdisjoint(HEAVY_TRAINING_PACKAGES)
-    assert "--extra" not in backend_dockerfile
+    assert "--extra runtime-classical-cpu" in backend_dockerfile
     assert "worker.Dockerfile" not in backend_dockerfile
 
 
 def test_env_example_documents_registration_and_deployment_profile():
     example = (ROOT_DIR / ".env.example").read_text()
 
-    assert "AL_MEDLIT_ALLOW_SELF_REGISTRATION=true" in example
+    assert "AL_MEDLIT_ALLOW_SELF_REGISTRATION=false" in example
     assert "AL_MEDLIT_DEPLOYMENT_PROFILE=laptop" in example
 
 

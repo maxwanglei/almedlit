@@ -87,11 +87,12 @@ export default function EvidenceAdjudicationPanel({
     [],
   );
   const [strategy, setStrategy] = useState<Strategy>(
-    allowSoloGold ? "custom" : "union",
+    allowSoloGold ? "a" : "union",
   );
   const [customStart, setCustomStart] = useState("");
   const [customEnd, setCustomEnd] = useState("");
   const [note, setNote] = useState("");
+  const [goldLabels, setGoldLabels] = useState("");
   const [busy, setBusy] = useState(false);
   const [rangeError, setRangeError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -118,6 +119,7 @@ export default function EvidenceAdjudicationPanel({
     setBusy(false);
     setComparison(null);
     setSelectedAnnotationIds([]);
+    setGoldLabels("");
     setError(null);
     setRangeError(null);
     setStatus(null);
@@ -163,6 +165,10 @@ export default function EvidenceAdjudicationPanel({
   }
 
   function toggleSource(annotationId: number): void {
+    if (!selectedAnnotationIds.includes(annotationId)) {
+      const block = comparison?.blocks.find((item) => item.annotation_id === annotationId);
+      if (block) setGoldLabels([...new Set([...goldLabels.split(",").map((label) => label.trim()).filter(Boolean), ...block.labels])].join(", "));
+    }
     setSelectedAnnotationIds((current) =>
       current.includes(annotationId)
         ? current.filter((id) => id !== annotationId)
@@ -177,7 +183,7 @@ export default function EvidenceAdjudicationPanel({
     }
     const operationScope = activeScope.current;
     const isCurrentScope = (): boolean => operationScope === activeScope.current;
-    const effectiveStrategy: Strategy = allowSoloGold ? "custom" : strategy;
+    const effectiveStrategy = strategy;
     const selectedBlocks = comparison.blocks.filter((block) =>
       selectedAnnotationIds.includes(block.annotation_id),
     );
@@ -190,6 +196,12 @@ export default function EvidenceAdjudicationPanel({
       setError(
         "Select reviewed evidence from at least two distinct annotators.",
       );
+      return;
+    }
+    if (
+      effectiveStrategy === "a" && selectedAnnotationIds.length === 0
+    ) {
+      setError("Select a source block to retain its boundaries and labels.");
       return;
     }
     if (
@@ -256,6 +268,7 @@ export default function EvidenceAdjudicationPanel({
           guideline_version_id: selectedScope.guidelineVersionId,
           strategy: effectiveStrategy,
           source_annotation_ids: selectedAnnotationIds,
+          ...(effectiveStrategy === "custom" ? { labels: goldLabels.split(",").map((label) => label.trim()).filter(Boolean) } : {}),
           start_sentence_id:
             effectiveStrategy === "custom" ? startSentenceId : null,
           end_sentence_id:
@@ -267,6 +280,7 @@ export default function EvidenceAdjudicationPanel({
       if (!isCurrentScope()) return;
       setStatus(`Gold evidence block #${created.id} created`);
       setSelectedAnnotationIds([]);
+      setGoldLabels("");
       setNote("");
       await loadComparison();
       if (isCurrentScope()) setStatus(`Gold evidence block #${created.id} created`);
@@ -388,8 +402,8 @@ export default function EvidenceAdjudicationPanel({
                 <label>
                   <span>Gold boundary</span>
                   <NativeSelect
-                    value={allowSoloGold ? "custom" : strategy}
-                    disabled={busy || allowSoloGold}
+                    value={strategy}
+                    disabled={busy}
                     onChange={(event) =>
                       setStrategy(event.target.value as Strategy)
                     }
@@ -401,8 +415,9 @@ export default function EvidenceAdjudicationPanel({
                     <option value="custom">Custom</option>
                   </NativeSelect>
                 </label>
-                {allowSoloGold || strategy === "custom" ? (
+                {strategy === "custom" ? (
                   <>
+                    <label><span>Gold labels</span><NativeInput value={goldLabels} disabled={busy} placeholder="Comma-separated labels" onChange={(event) => setGoldLabels(event.target.value)} /></label>
                     <label>
                       <span>Start sentence ordinal</span>
                       <NativeInput

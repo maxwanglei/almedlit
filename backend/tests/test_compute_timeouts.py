@@ -151,17 +151,30 @@ def test_remote_inference_timeout_rolls_back_and_can_finalize_on_retry(
     monkeypatch,
 ):
     from test_inference_candidate_queries import _inference_scope
-    from test_inference_execution import DECODER_CONFIG, ONE_HOT, _finalize, _runner_result
+    from test_inference_execution import (
+        DECODER_CONFIG,
+        ONE_HOT,
+        _finalize,
+        _runner_result,
+        _sentence_scorer_checkpoint,
+    )
 
     from al_medlit.core.exceptions import ConflictError
     from al_medlit.inference import execution
 
+    threshold = 0.5
     scope = _inference_scope(
         db,
         checkpoint_manifest={"model_type": "evidence_svm"},
+        checkpoint_object=_sentence_scorer_checkpoint(
+            tmp_path, object_storage, model_type="evidence_svm", threshold=threshold
+        ),
         decoder_config=DECODER_CONFIG,
+        run_status="running",
         with_window=False,
     )
+    scope.run.metrics = {"remote_result_ready": True}
+    db.commit()
     run_id = scope.run.id
     ssh = tmp_path / "ssh"
     ssh.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(30)\n")
@@ -180,13 +193,15 @@ def test_remote_inference_timeout_rolls_back_and_can_finalize_on_retry(
             work_root=tmp_path / "work",
         )
     assert not db.in_transaction()
-    assert scope.run.status == "succeeded"
+    assert scope.run.status == "running"
     assert scope.run.diagnostics_artifact_id is None
     inference_result = _runner_result(
         scope,
         {"window-0": {ordinal: ONE_HOT["O"] for ordinal in range(4)}},
     )
+    inference_result["sentence_score_threshold"] = threshold
     run = _finalize(db, object_storage, tmp_path, scope, inference_result)
+    assert run.status == "succeeded"
     assert run.diagnostics_artifact_id is not None
 
 

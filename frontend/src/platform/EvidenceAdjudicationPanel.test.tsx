@@ -30,6 +30,7 @@ async function openPanel() {
   render(<EvidenceAdjudicationPanel projectId={1} documents={[]} assignments={[assignment]} allowSoloGold />);
   await user.click(screen.getByRole("button", { name: "Load comparison" }));
   await screen.findByText("Sentences 0-2");
+  await user.selectOptions(screen.getByLabelText("Gold boundary"), "custom");
   return user;
 }
 
@@ -37,6 +38,19 @@ it("identifies opaque pinned-version IDs without presenting them as version numb
   render(<EvidenceAdjudicationPanel projectId={1} documents={[]} assignments={[assignment]} allowSoloGold />);
   expect(screen.getByRole("option").textContent).toMatch(/target ID\s*101.*guideline ID\s*301/);
   expect(screen.getByRole("option").textContent).not.toContain("v101");
+});
+
+it("retains labels for a solo custom block after deselecting its source", async () => {
+  const result = await api.getEvidenceAdjudication();
+  api.getEvidenceAdjudication.mockResolvedValue({ ...result, blocks: [{ ...result.blocks[0], labels: ["support"] }] });
+  const user = await openPanel();
+  await user.click(screen.getByLabelText("Use evidence block 4"));
+  await user.click(screen.getByLabelText("Use evidence block 4"));
+  expect(screen.getByRole<HTMLInputElement>("textbox", { name: "Gold labels" }).value).toBe("support");
+  await user.type(screen.getByLabelText("Start sentence ordinal"), "0");
+  await user.type(screen.getByLabelText("End sentence ordinal"), "2");
+  await user.click(screen.getByRole("button", { name: "Create gold block" }));
+  await waitFor(() => expect(api.adjudicateEvidence).toHaveBeenCalledWith(1, 41, expect.objectContaining({ strategy: "custom", source_annotation_ids: [], labels: ["support"] })));
 });
 
 it("rejects blank boundaries instead of treating them as sentence zero", async () => {

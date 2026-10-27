@@ -7,6 +7,7 @@ from al_medlit.inference import router as inference_router
 from al_medlit.model_artifacts import service
 from al_medlit.model_artifacts.models import BaseModelAsset, BaseModelAssetState
 from al_medlit.model_artifacts.schemas import ArtifactPackageReferenceCreate
+from al_medlit.training.model_types import catalog
 from al_medlit.training.models import ModelCheckpoint
 from al_medlit.workspace.models import Workspace, WorkspaceMember
 
@@ -129,6 +130,19 @@ def test_inference_enforces_selected_checkpoint_package_policy(
     def execute(*args, **kwargs):
         raise HTTPException(status_code=418, detail="Restricted checkpoint reached compute")
 
+    get_descriptor = catalog.get_builtin_model_descriptor
+
+    def ready_descriptor(key):
+        descriptor = get_descriptor(key)
+        return descriptor.model_copy(
+            update={
+                "availability": descriptor.availability.model_copy(
+                    update={"missing_dependencies": ()}
+                ),
+            }
+        )
+
+    monkeypatch.setattr(catalog, "get_builtin_model_descriptor", ready_descriptor)
     monkeypatch.setattr(inference_router, "execute_backend_inference", execute)
     path = (
         f"/api/projects/{scope.project.id}/inference/runs"

@@ -570,6 +570,12 @@ class HuggingFaceSpanTrainer(_HuggingFaceTaskTrainer):
                 text,
                 row_index,
             )
+            while start_char < end_char and text[start_char].isspace():
+                start_char += 1
+            while end_char > start_char and text[end_char - 1].isspace():
+                end_char -= 1
+            if start_char == end_char:
+                raise ValidationError(f"Training row {row_index} span contains only whitespace")
             encoded = tokenizer(
                 text,
                 truncation=True,

@@ -7,12 +7,13 @@ from sqlalchemy.orm import Session
 
 from al_medlit.auth.dependencies import get_current_user
 from al_medlit.auth.models import User
-from al_medlit.auth.tenancy import assert_project_member
+from al_medlit.auth.tenancy import assert_project_member, lock_project_member_for_mutation
 from al_medlit.core.database import get_db
 from al_medlit.core.storage import ObjectStorage, get_object_storage
 from al_medlit.export import service
 from al_medlit.export.registry import export_formats
 from al_medlit.export.schemas import ExportCreate, ExportFormatRead
+from al_medlit.lineage.models import CorpusSnapshotDocument
 from al_medlit.lineage.schemas import ExportArtifactRead
 from al_medlit.workspace.capability_dependencies import enforce_capability
 
@@ -54,7 +55,9 @@ def create_export(
     db: Session = Depends(get_db),
     storage: ObjectStorage = Depends(get_object_storage),
 ):
-    assert_project_member(db, current_user, project_id, min_role="manager")
+    lock_project_member_for_mutation(
+        db, current_user, project_id, min_role="manager", lock_workspace=True
+    )
     enforce_capability(db, project_id=project_id, key="export")
     return service.create_export(
         db,
@@ -98,6 +101,11 @@ def download_export(
     export = service.get_export(db, export_id)
     assert_project_member(db, current_user, export.project_id, min_role="trainer")
     enforce_capability(db, project_id=export.project_id, key="export")
+    if db.query(CorpusSnapshotDocument.id).filter(
+        CorpusSnapshotDocument.snapshot_id == export.corpus_snapshot_id,
+        CorpusSnapshotDocument.split == "test",
+    ).first() is not None:
+        assert_project_member(db, current_user, export.project_id, min_role="manager")
     service.verify_export(storage, export)
     return StreamingResponse(
         storage.iter_bytes(export.artifact.storage_key),

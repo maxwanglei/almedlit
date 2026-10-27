@@ -76,6 +76,7 @@ export default function SourceDatasetSetup({ projectId, projectName, data, curre
   const [message, setMessage] = useState<string | null>(restored?.version && !datasetVersionId ? null : restored?.message ?? null);
   const continuationRef = useRef<HTMLDivElement>(null);
   const [focusContinuation, setFocusContinuation] = useState(false);
+  const roundCreationAttempt = useRef<{ datasetVersionId: number; taskVersionId: number; id: string } | null>(null);
   const savedRoundId = useRef<number | null>(resumeAnnotation ? restored?.roundId ?? null : null);
   const savedRoundTaskVersionId = useRef(resumeAnnotation ? restored?.roundTaskVersionId ?? restored?.taskVersion?.id : undefined);
   const savedRoundDatasetVersionId = useRef(resumeAnnotation ? restored?.roundDatasetVersionId ?? restored?.version?.id : undefined);
@@ -252,11 +253,22 @@ export default function SourceDatasetSetup({ projectId, projectName, data, curre
           await request(`/rounds/${savedRoundId.current}/transition?project_id=${projectId}`, { method: "POST", body: JSON.stringify({ status: "open" }) });
           requireCurrentSession();
         } else if (savedRound.status !== "open") {
-          throw new Error("The saved annotation round is no longer open. Refresh the project before starting another round.");
+          roundCreationAttempt.current = null;
+          savedRoundId.current = null;
+          savedRoundTaskVersionId.current = undefined;
+          savedRoundDatasetVersionId.current = undefined;
+          saveDraft(sessionGeneration, projectId, { name, documentIds, taskName, labels, datasetId: savedDatasetId.current, version, taskDefinitionId: savedTaskDefinitionId.current, taskVersion: task, selectedTaskId: task.id, taskMode });
         }
-        if (mounted.current) onNavigate(`/my-work/rounds/${savedRoundId.current}?view=annotate`); return;
+        if (savedRoundId.current !== null) {
+          if (mounted.current) onNavigate(`/my-work/rounds/${savedRoundId.current}?view=annotate`);
+          return;
+        }
+      }
+      if (roundCreationAttempt.current?.datasetVersionId !== version.id || roundCreationAttempt.current.taskVersionId !== task.id) {
+        roundCreationAttempt.current = { datasetVersionId: version.id, taskVersionId: task.id, id: crypto.randomUUID() };
       }
       const round = await createRound(projectId, {
+        creationIntentId: roundCreationAttempt.current.id,
         name: [...`${name} · ${data.taskDefinitions.find((item) => item.id === task.task_definition_id)?.name ?? taskName.trim()}`].slice(0, 255).join(""), datasetVersionId: version.id, taskVersionId: task.id,
         cycleId: null, splitMapId: null, guidelineRevisionId: null, feedbackSetVersionId: null,
         assistancePolicy: "blind", reannotationMode: "unassigned", selectionStrategy: "all", selectionLimit: version.item_count,

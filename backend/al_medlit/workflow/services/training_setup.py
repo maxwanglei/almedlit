@@ -437,6 +437,7 @@ def create_storage_policy(
     db: Session, data: schemas.StoragePolicyCreate, actor: User
 ) -> models.StoragePolicy:
     project = _project(db, data.project_id)
+    db.query(Project.id).filter(Project.id == data.project_id).with_for_update().one()
     if data.backend != settings.storage_backend:
         raise ValidationError("Storage policy backend does not match the configured object store")
     if data.backend == "local" and settings.deployment_profile != "laptop":

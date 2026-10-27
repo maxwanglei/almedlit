@@ -1,3 +1,6 @@
+from uuid import uuid4
+
+
 def _create_project(client, name: str) -> dict:
     response = client.post(
         "/api/projects",
@@ -17,7 +20,7 @@ def _create_document(client, project_id: int, text: str) -> dict:
         "/api/documents",
         json={
             "project_id": project_id,
-            "external_id": "PMID:test-flow",
+            "external_id": f"PMID:test-flow-{uuid4().hex}",
             "title": "API flow document",
             "text": text,
             "source": "manual",
@@ -724,8 +727,13 @@ def test_task_assignments_and_progress(client):
         f"/api/projects/{project['id']}/assignments/{assignment['id']}",
         json={"status": "submitted"},
     )
-    assert update_response.status_code == 200
-    assert update_response.json()["status"] == "submitted"
+    assert update_response.status_code == 422
+    submitted = client.post(
+        f"/api/projects/{project['id']}/documents/{document['id']}/submissions",
+        json={"assignment_id": assignment["id"], "annotator_id": "curator1"},
+        headers={"Authorization": f"Bearer {client._token_for('curator1')}"},
+    )
+    assert submitted.status_code == 200, submitted.text
 
     reopen_response = client.patch(
         f"/api/projects/{project['id']}/assignments/{assignment['id']}",
@@ -1364,8 +1372,8 @@ def test_create_document_rejects_missing_project(client):
             "metadata_": {},
         },
     )
-    assert response.status_code == 422
-    assert "Project 9999 not found" in response.json()["detail"]
+    assert response.status_code == 404
+    assert "Project not found" in response.json()["detail"]
 
 
 def test_create_guideline_version_rejects_missing_project(client):
@@ -1379,8 +1387,8 @@ def test_create_guideline_version_rejects_missing_project(client):
             "status": "active",
         },
     )
-    assert response.status_code == 422
-    assert "Project 9999 not found" in response.json()["detail"]
+    assert response.status_code == 404
+    assert "Project not found" in response.json()["detail"]
 
 
 def test_annotation_create_rejects_invalid_spans(client):

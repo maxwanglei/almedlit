@@ -21,6 +21,9 @@ from al_medlit.corpus.segmentation import segment_sentences
 
 class Document(Base, IntPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "documents"
+    __table_args__ = (
+        UniqueConstraint("project_id", "external_id", name="uq_documents_project_external_id"),
+    )
 
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), index=True)
     external_id: Mapped[str | None] = mapped_column(String(255), index=True, nullable=True)

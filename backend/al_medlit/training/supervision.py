@@ -20,9 +20,10 @@ from al_medlit.core.config import settings
 
 logger = logging.getLogger(__name__)
 _DATABASE_TIMEOUT_SECONDS = 10.0
+_compute_accelerator_slot: int | None = None
 
 
-def _acquire_process_accelerator_slot() -> None:
+def _acquire_process_accelerator_slot(*, parent_fd: int | None = None) -> int | None:
     from al_medlit.training.runtime_profiles import RUNTIME_PROFILES
 
     descriptor = RUNTIME_PROFILES.get(os.environ.get("AL_MEDLIT_RUNTIME_PROFILE", ""))
@@ -35,11 +36,20 @@ def _acquire_process_accelerator_slot() -> None:
     root.mkdir(parents=True, exist_ok=True)
     slot = os.open(root / ".accelerator.lock", os.O_CREAT | os.O_WRONLY, 0o600)
     try:
-        fcntl.flock(slot, fcntl.LOCK_EX)
+        while True:
+            try:
+                fcntl.flock(slot, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if parent_fd is not None:
+                    if select.select([parent_fd], [], [], 0.1)[0] and not os.read(parent_fd, 1):
+                        raise RuntimeError("task_supervisor_lost") from None
+                else:
+                    time.sleep(0.1)
     except BaseException:
         os.close(slot)
         raise
-    # The descriptor stays open until process exit, including CUDA teardown.
+    return slot
 
 
 @dataclass(frozen=True)
@@ -127,7 +137,8 @@ def _watch_process(
                     succeeded, value = pending.get_nowait()
                 except queue.Empty:
                     if now >= heartbeat_deadline:
-                        return _ProcessOutcome("worker_lease_check_timed_out", pending is not None)
+                        logger.warning("Training lease check is still pending")
+                        heartbeat_deadline = now + database_timeout_seconds
                 else:
                     pending = None
                     if not succeeded:
@@ -173,6 +184,19 @@ def _session_operation(operation):
 
 
 def supervise_training_run(training_run_id: int, *, parent_fd: int) -> int:
+    slot = _acquire_process_accelerator_slot(parent_fd=parent_fd)
+    try:
+        return _supervise_training_run(
+            training_run_id, parent_fd=parent_fd, accelerator_slot=slot,
+        )
+    finally:
+        if slot is not None:
+            os.close(slot)
+
+
+def _supervise_training_run(
+    training_run_id: int, *, parent_fd: int, accelerator_slot: int | None = None,
+) -> int:
     from al_medlit.training.run_execution import (
         _claim_training_run,
         _mark_failed,
@@ -191,7 +215,6 @@ def supervise_training_run(training_run_id: int, *, parent_fd: int) -> int:
 
     if not _database_result(lambda: _session_operation(claim)):
         return training_run_id
-    database_busy = False
     process = None
     try:
         process = subprocess.Popen(
@@ -202,9 +225,11 @@ def supervise_training_run(training_run_id: int, *, parent_fd: int) -> int:
                 "compute",
                 str(training_run_id),
                 token,
+                *([] if accelerator_slot is None else [str(accelerator_slot)]),
             ],
             stdin=subprocess.DEVNULL,
             start_new_session=True,
+            pass_fds=(() if accelerator_slot is None else (accelerator_slot,)),
         )
         outcome = _watch_process(
             process,
@@ -216,20 +241,18 @@ def supervise_training_run(training_run_id: int, *, parent_fd: int) -> int:
             poll_seconds=settings.training_supervisor_poll_seconds,
             grace_seconds=settings.training_termination_grace_seconds,
         )
-        database_busy = outcome.database_operation_pending
         if outcome.reason != "completed":
             raise RuntimeError(outcome.reason)
     except Exception as exc:
         failure = exc
-        if not database_busy:
-            try:
-                _database_result(
-                    lambda: _session_operation(
-                        lambda db: _mark_failed(db, training_run_id, failure, execution_token=token)
-                    )
+        try:
+            _database_result(
+                lambda: _session_operation(
+                    lambda db: _mark_failed(db, training_run_id, failure, execution_token=token)
                 )
-            except Exception:
-                logger.exception("Could not persist training run %s failure", training_run_id)
+            )
+        except Exception:
+            logger.exception("Could not persist training run %s failure", training_run_id)
         raise
     finally:
         if process is not None and process.poll() is None:
@@ -265,7 +288,13 @@ def main() -> None:
         signal.signal(signal.SIGTERM, stop)
         supervise_training_run(int(run_id), parent_fd=sys.stdin.fileno())
     elif mode == "compute":
-        _acquire_process_accelerator_slot()
+        global _compute_accelerator_slot
+
+        _compute_accelerator_slot = (
+            int(arguments[1]) if len(arguments) > 1 else _acquire_process_accelerator_slot()
+        )
+        if _compute_accelerator_slot is not None:
+            os.fstat(_compute_accelerator_slot)
         from al_medlit.core.database import SessionLocal, register_models
         from al_medlit.core.storage import get_object_storage
         from al_medlit.training.run_execution import execute_training_run

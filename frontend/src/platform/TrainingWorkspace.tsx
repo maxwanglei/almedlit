@@ -71,6 +71,7 @@ export interface TrainingWorkspaceProps {
   canCreateTrainingProject: boolean;
   canCreateTask: boolean;
   canProvisionRuntimes: boolean;
+  canCancelAnyRun?: boolean;
   onNavigate: (path: string, mode?: "push" | "replace") => void;
   onProjectCreated?: (project: Project) => void | Promise<void>;
 }
@@ -253,6 +254,7 @@ function TrainingRuns({
   projects,
   initialProjectId,
   currentUserId,
+  canCancelAnyRun = false,
   onNavigate,
 }: TrainingWorkspaceProps): React.ReactElement {
   const [filters, setFilters] = useState<WorkspaceTrainingFilters>({
@@ -260,6 +262,8 @@ function TrainingRuns({
     limit: 50,
   });
   const appliedFilters = useRef(filters);
+  const currentFilters = useRef(filters);
+  currentFilters.current = filters;
   const [page, setPage] = useState<WorkspaceTrainingRunPage>({
     items: [],
     next_cursor: null,
@@ -269,6 +273,9 @@ function TrainingRuns({
   const [runToCancel, setRunToCancel] = useState<WorkspaceTrainingRun | null>(null);
   const [error, setError] = useState<string | null>(null);
   const loadRequestIdRef = useRef(0);
+  const projectsRef = useRef(projects);
+  projectsRef.current = projects;
+  const filterWorkspaceRef = useRef(workspaceId);
 
   const load = useCallback(
     async (
@@ -282,7 +289,7 @@ function TrainingRuns({
         const result = await listWorkspaceTrainingRuns(
           workspaceId,
           nextFilters,
-          projects,
+          projectsRef.current,
         );
         if (requestId !== loadRequestIdRef.current) return;
         appliedFilters.current = nextFilters;
@@ -300,20 +307,24 @@ function TrainingRuns({
         }
       }
     },
-    [projects, workspaceId],
+    [workspaceId],
   );
 
   useEffect(() => {
-    setFilters({
+    const nextFilters: WorkspaceTrainingFilters = {
+      ...(filterWorkspaceRef.current === workspaceId ? currentFilters.current : {}),
       projectId: initialProjectId ?? undefined,
+      cursor: undefined,
       limit: 50,
-    });
+    };
+    filterWorkspaceRef.current = workspaceId;
+    setFilters(nextFilters);
     setPage({
       items: [],
       next_cursor: null,
     });
     void load(
-      { projectId: initialProjectId ?? undefined, limit: 50 },
+      nextFilters,
       false,
     );
     return () => {
@@ -468,7 +479,7 @@ function TrainingRuns({
               <tbody>
                 {historyRuns.map((run) => {
                   const cancellable =
-                    run.created_by_user_id === currentUserId &&
+                    (canCancelAnyRun || run.created_by_user_id === currentUserId) &&
                     ["queued", "running"].includes(run.status);
                   const baseModel = baseModelLineage(run.base_model);
                   return (
@@ -1201,6 +1212,7 @@ function TrainingData({
       {savedMessage ? <p role="status">{savedMessage}</p> : null}
       {builderOpen && projectId && loadedProjectId === projectId ? <TrainingDatasetBuilder key={`${workspaceId}:${projectId}:${initialTrainingDatasetVersionId ?? "new"}:${initialDatasetVersionId ?? initialDatasetId ?? "all"}:${initialTaskVersionId ?? "task"}`}
         projectId={projectId} data={data} initialDatasetId={initialDatasetId}
+        canUseRoundAnnotations={canCreateTask}
         initialDatasetVersionId={initialDatasetVersionId} initialTaskVersionId={initialTaskVersionId} initialLabelSetVersionId={initialLabelSetVersionId}
         parent={data.trainingDatasets.find((version) => version.id === initialTrainingDatasetVersionId)}
         onImport={() => setDialog("dataset")} onDefineTask={canCreateTask ? () => setDialog("task") : undefined}
@@ -1858,6 +1870,7 @@ function TrainingRunDetail({
   projects,
   runId,
   currentUserId,
+  canCancelAnyRun = false,
   onNavigate,
 }: TrainingWorkspaceProps): React.ReactElement {
   const [run, setRun] = useState<WorkspaceTrainingRun | null>(null);
@@ -1981,7 +1994,7 @@ function TrainingRunDetail({
   }
 
   const cancellable =
-    run.created_by_user_id === currentUserId &&
+    (canCancelAnyRun || run.created_by_user_id === currentUserId) &&
     ["queued", "running"].includes(run.status);
   const baseModel = baseModelLineage(run.base_model);
   return (

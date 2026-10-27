@@ -255,6 +255,21 @@ def list_round_submissions(
     )
 
 
+@router.patch("/rounds/{round_id}/annotators", response_model=schemas.AnnotationRoundRead)
+def update_round_annotators(
+    round_id: int,
+    payload: schemas.AnnotationRoundAssigneesUpdate,
+    project_id: int = Query(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _write(
+        db, current_user, project_id, module="annotate",
+        related_user_ids=payload.annotator_user_ids,
+    )
+    return service.update_annotation_round_assignees(db, project_id, round_id, payload)
+
+
 @router.post("/rounds/{round_id}/transition", response_model=schemas.AnnotationRoundRead)
 def transition_round(
     round_id: int,

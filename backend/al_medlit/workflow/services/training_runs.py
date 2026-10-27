@@ -113,6 +113,8 @@ def create_training_run(
             "checkpoint execution is available"
         )
     launch_hash = _canonical_hash(data.model_dump(exclude={"idempotency_key"}))
+    project = _project(db, data.project_id)
+    artifact_quota.lock_workspace_artifact_quota(db, workspace_id=project.workspace_id)
     existing = (
         db.query(models.TrainingRun)
         .filter(
@@ -156,6 +158,16 @@ def create_training_run(
         data.project_id,
         "Training recipe",
     )
+    if "test" in data.evaluation_plan.get(
+        "splits", data.evaluation_plan.get("protected_splits", []),
+    ):
+        from al_medlit.training.evaluators import evaluator_plugins
+
+        if evaluator_plugins.find_for_recipe(recipe_definition.key) is None:
+            raise ValidationError(
+                f"No trusted protected-test evaluator is registered for recipe "
+                f"'{recipe_definition.key}'"
+            )
     environment = _scoped(
         db,
         models.ExecutionEnvironment,

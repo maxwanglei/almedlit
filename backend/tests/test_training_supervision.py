@@ -43,7 +43,7 @@ def assert_resource_released(path):
         ("cancel", "worker_lease_lost"),
         ("deadline", "execution_deadline_exceeded"),
         ("parent_eof", "task_supervisor_lost"),
-        ("database_stall", "worker_lease_check_timed_out"),
+        ("database_stall", "worker_lease_renewal_expired"),
     ],
 )
 def test_watchdog_releases_child_and_grandchild_resource(tmp_path, stop, expected):
@@ -74,6 +74,7 @@ def test_watchdog_releases_child_and_grandchild_resource(tmp_path, stop, expecte
             poll_seconds=0.02,
             grace_seconds=0.1,
             database_timeout_seconds=0.2,
+            lease_failure_timeout_seconds=0.4,
         )
         assert outcome.reason == expected
         assert process.poll() is not None
@@ -86,6 +87,74 @@ def test_watchdog_releases_child_and_grandchild_resource(tmp_path, stop, expecte
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=5)
+
+
+def test_database_stall_recovers_within_worker_lease_grace(tmp_path):
+    read_fd, write_fd = os.pipe()
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(0.5)"],
+        stdin=subprocess.DEVNULL, start_new_session=True,
+    )
+    calls = []
+
+    def heartbeat():
+        calls.append(True)
+        if len(calls) == 1:
+            time.sleep(0.2)
+        return True
+
+    try:
+        outcome = _watch_process(
+            process, parent_fd=read_fd, heartbeat=heartbeat,
+            max_runtime_seconds=5, poll_seconds=0.01, grace_seconds=0.1,
+            database_timeout_seconds=0.05, lease_failure_timeout_seconds=2,
+        )
+        assert outcome.reason == "completed"
+        assert len(calls) > 1
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+
+def test_compute_inherits_accelerator_slot_after_supervisor_exit(tmp_path):
+    resource = tmp_path / "accelerator.lock"
+    child_pid_path = tmp_path / "child.pid"
+    launcher = tmp_path / "supervisor.py"
+    launcher.write_text(
+        "import fcntl, os, pathlib, subprocess, sys, time\n"
+        "from al_medlit.training import supervision\n"
+        "slot = os.open(sys.argv[1], os.O_CREAT | os.O_WRONLY, 0o600)\n"
+        "fcntl.flock(slot, fcntl.LOCK_EX)\n"
+        "real_popen = subprocess.Popen\n"
+        "def start_compute(_args, **kwargs):\n"
+        "    child = real_popen([sys.executable, '-c', 'import time; time.sleep(30)'], **kwargs)\n"
+        "    pathlib.Path(sys.argv[2]).write_text(str(child.pid))\n"
+        "    return child\n"
+        "supervision.subprocess.Popen = start_compute\n"
+        "supervision._database_result = lambda _operation: True\n"
+        "supervision._watch_process = lambda *args, **kwargs: os._exit(0)\n"
+        "supervision._supervise_training_run(1, parent_fd=0, accelerator_slot=slot)\n"
+    )
+    owner = subprocess.Popen(
+        [sys.executable, str(launcher), str(resource), str(child_pid_path)],
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).parents[1])},
+    )
+    child_pid = None
+    try:
+        assert owner.wait(timeout=15) == 0
+        child_pid = int(child_pid_path.read_text())
+        with resource.open("a") as handle:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        if child_pid is not None:
+            os.kill(child_pid, signal.SIGTERM)
+        if owner.poll() is None:
+            owner.kill()
+            owner.wait(timeout=5)
 
 
 def test_task_cli_closes_compute_on_cancellation_and_process_shutdown(tmp_path):
@@ -223,3 +292,36 @@ def test_transient_lease_error_retries_without_killing_compute(tmp_path):
         if process.poll() is None:
             os.killpg(process.pid, signal.SIGKILL)
             process.wait(timeout=5)
+
+
+def test_compute_reuses_inherited_accelerator_slot_without_waiting(tmp_path):
+    from test_accelerator_admission import COMPUTE_ENTRY, _stop, _wait
+
+    attempts = tmp_path / "shared-attempts"
+    attempts.mkdir()
+    resource = attempts / ".accelerator.lock"
+    slot = os.open(resource, os.O_CREAT | os.O_WRONLY, 0o600)
+    fcntl.flock(slot, fcntl.LOCK_EX)
+    marker = tmp_path / "inherited-compute"
+    process = subprocess.Popen(
+        [sys.executable, "-c", COMPUTE_ENTRY, "compute", "1", str(marker), str(slot)],
+        env={
+            **os.environ,
+            "PYTHONPATH": str(Path(__file__).parents[1]),
+            "AL_MEDLIT_RUNTIME_PROFILE": "peft-accelerator",
+            "AL_MEDLIT_LOCAL_ATTEMPT_ROOT": str(attempts),
+        },
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True, pass_fds=(slot,),
+    )
+    try:
+        _wait(marker, process)
+        os.close(slot)
+        slot = None
+        with resource.open("a") as probe:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        if slot is not None:
+            os.close(slot)
+        _stop(process)

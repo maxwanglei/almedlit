@@ -353,7 +353,7 @@ def execute_torch_training(
     optimizer = torch.optim.AdamW(parameters, lr=config["learning_rate"])
     accumulation = config["gradient_accumulation_steps"]
     precision = config.get("mixed_precision", "none")
-    autocast_enabled = precision != "none" and device.type in {"cpu", "cuda"}
+    autocast_enabled = precision != "none" and device.type in {"cpu", "cuda", "mps", "npu"}
     autocast_dtype = torch.float16 if precision == "fp16" else torch.bfloat16
     scaler = (
         torch.amp.GradScaler(device.type)
@@ -381,6 +381,8 @@ def execute_torch_training(
             )
             with context:
                 loss = model(**batch).loss / group_size
+            if not math.isfinite(float(loss.detach().cpu())):
+                raise ValidationError("Training produced a non-finite loss")
             if scaler is None:
                 loss.backward()
             else:
@@ -404,7 +406,15 @@ def execute_torch_training(
         with torch.no_grad():
             for batch in validation_loader:
                 batch = _move_to_device(batch, device)
-                evaluation_losses.append(float(model(**batch).loss.detach().cpu()))
+                with torch.autocast(
+                    device_type=device.type,
+                    dtype=autocast_dtype,
+                    enabled=autocast_enabled,
+                ):
+                    evaluation_loss = float(model(**batch).loss.detach().cpu())
+                if not math.isfinite(evaluation_loss):
+                    raise ValidationError("Validation produced a non-finite loss")
+                evaluation_losses.append(evaluation_loss)
         metrics["validation_loss"] = (
             sum(evaluation_losses) / len(evaluation_losses)
             if evaluation_losses

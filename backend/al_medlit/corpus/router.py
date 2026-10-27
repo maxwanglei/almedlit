@@ -8,6 +8,7 @@ from al_medlit.auth.tenancy import (
     assert_global_manager_scope,
     assert_project_member,
     assert_project_member_if_exists,
+    lock_project_member_for_mutation,
     require_assigned_document_access,
 )
 from al_medlit.core.database import get_db
@@ -33,6 +34,9 @@ def create_document(
     db: Session = Depends(get_db),
 ):
     assert_project_member_if_exists(db, current_user, payload.project_id, min_role="manager")
+    lock_project_member_for_mutation(
+        db, current_user, payload.project_id, min_role="manager", lock_workspace=True
+    )
     document = service.create_document(db, payload)
     project_service.ensure_personal_project_self_assignments(
         db,
@@ -121,6 +125,10 @@ def rebuild_document_structure(
     db: Session = Depends(get_db),
 ):
     assert_document_member(db, current_user, document_id, min_role="manager")
+    document = service.get_document(db, document_id)
+    lock_project_member_for_mutation(
+        db, current_user, document.project_id, min_role="manager", lock_workspace=True
+    )
     structure_version = service.rebuild_document_structure(
         db,
         document_id,
@@ -153,6 +161,10 @@ def activate_document_structure(
     db: Session = Depends(get_db),
 ):
     assert_document_member(db, current_user, document_id, min_role="manager")
+    document = service.get_document(db, document_id)
+    lock_project_member_for_mutation(
+        db, current_user, document.project_id, min_role="manager", lock_workspace=True
+    )
     structure_version = service.activate_document_structure(
         db,
         document_id,

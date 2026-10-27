@@ -210,10 +210,6 @@ def draft_guideline_atom(
         .first()
     )
     if existing_atom is not None:
-        if manager_id is not None and existing_atom.approved_by is None:
-            existing_atom.approved_by = manager_id
-            db.commit()
-            db.refresh(existing_atom)
         return existing_atom
 
     atom = GuidelineAtom(
@@ -234,7 +230,7 @@ def draft_guideline_atom(
             "calibration",
         ],
         status="pending",
-        approved_by=manager_id,
+        approved_by=None,
     )
     db.add(atom)
     db.commit()
@@ -243,12 +239,18 @@ def draft_guideline_atom(
 
 
 def approve_guideline_atom(db: Session, atom_id: int, approved_by: str) -> GuidelineAtom:
-    atom = db.get(GuidelineAtom, atom_id)
+    atom = (
+        db.query(GuidelineAtom).filter(GuidelineAtom.id == atom_id)
+        .populate_existing().with_for_update().first()
+    )
     if atom is None:
         raise ValueError("GuidelineAtom not found")
 
-    atom.status = "accepted"
-    atom.approved_by = approved_by
+    if atom.status == "rejected":
+        raise ConflictError("Rejected guideline atoms cannot be approved")
+    if atom.status != "accepted":
+        atom.status = "accepted"
+        atom.approved_by = approved_by
 
     # When a guideline atom is accepted, create a default micro-question and training action.
     _ensure_default_micro_question_template(db, atom)
@@ -383,8 +385,8 @@ def _ensure_default_micro_question_template(
         error_type=error_type,
         target_annotation_type=atom.task_type,
         question_text=question_text,
-        answer_options=[],
-        status="active",
+        answer_options=["Yes", "No", "Unsure"] if error_type == "evidence_error" else [],
+        status="active" if error_type == "evidence_error" else "draft",
     )
     db.add(template)
     return template

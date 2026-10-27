@@ -27,11 +27,13 @@ export default function ModelScoringPanel({
   data,
   onCreate,
   onRefresh,
+  onCreateRound,
 }: {
   projectId: number;
   data: PlatformProjectData;
   onCreate: () => void;
   onRefresh: () => Promise<void>;
+  onCreateRound?: (feedbackSetId: number) => void;
 }): React.ReactElement {
   const [runs, setRuns] = useState<FeedbackRun[]>(() =>
     data.feedbackRuns.filter((run) => run.producer_type === "registered_model"),
@@ -185,12 +187,8 @@ export default function ModelScoringPanel({
                     <td data-label="Candidates">{feedbackSet?.candidate_count ?? "—"}</td>
                     <td data-label="Result">
                       {feedbackSet ? (
-                        <a
-                          className="platform-text-action"
-                          href={`/projects/${projectId}/rounds?feedbackSetId=${feedbackSet.id}`}
-                        >
-                          Feedback set v{feedbackSet.version_number}
-                        </a>
+                        <Button label={`Create round from feedback set v${feedbackSet.version_number}`} variant="ghost" size="sm"
+                          isDisabled={!onCreateRound} onClick={() => onCreateRound?.(feedbackSet.id)} />
                       ) : "—"}
                     </td>
                     <td data-label="Details">

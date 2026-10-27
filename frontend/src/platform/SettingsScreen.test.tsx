@@ -25,6 +25,12 @@ const data: PlatformProjectData = {
 
 afterEach(cleanup);
 
+it("hides training defaults when the project training module is disabled", () => {
+  render(<SettingsScreen project={project} data={{ ...data, projectModules: { ...data.projectModules, effective: ["data", "annotate"] } }} busy={false} onUpdateProject={vi.fn()} onUpdateModules={vi.fn()} />);
+  expect(screen.queryByRole("heading", { name: "Training defaults" })).toBeNull();
+  expect(screen.queryByLabelText("Default runtime")).toBeNull();
+});
+
 it("counts visible modules and retains saved hidden choices after confirmation", async () => {
   const user = userEvent.setup();
   const onUpdateModules = vi.fn().mockResolvedValue(undefined);

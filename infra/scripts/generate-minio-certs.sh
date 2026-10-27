@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+umask 077
 
 cert_dir=${1:?certificate directory is required}
 ca_cert="$cert_dir/CAs/ca.crt"
@@ -12,7 +13,14 @@ generated_marker="$cert_dir/.al-medlit-generated"
 if [ -f "$ca_cert" ] && [ -f "$server_cert" ] && [ -f "$server_key" ]; then
     if openssl x509 -checkend 2592000 -noout -in "$ca_cert" >/dev/null 2>&1 \
         && openssl x509 -checkend 2592000 -noout -in "$server_cert" >/dev/null 2>&1 \
-        && openssl verify -CAfile "$ca_cert" "$server_cert" >/dev/null 2>&1; then
+        && openssl verify -CAfile "$ca_cert" "$server_cert" >/dev/null 2>&1 \
+        && [ "$(openssl x509 -in "$server_cert" -pubkey -noout)" = \
+             "$(openssl pkey -in "$server_key" -pubout 2>/dev/null)" ]; then
+        if [ -n "${MINIO_CERT_OWNER:-}" ]; then
+            chown "$MINIO_CERT_OWNER" "$server_key"
+        fi
+        chmod 755 "$cert_dir" "$cert_dir/CAs"
+        chmod 600 "$server_key"
         exit 0
     fi
 fi
@@ -87,9 +95,15 @@ openssl x509 -req \
     -extfile "$temporary_dir/server.conf" >/dev/null 2>&1
 
 mkdir -p "$cert_dir/CAs"
+chmod 755 "$cert_dir" "$cert_dir/CAs"
 : >"$generated_marker"
 cp "$temporary_dir/ca.crt" "$ca_cert"
 cat "$temporary_dir/server.crt" "$temporary_dir/ca.crt" >"$server_cert"
-cp "$temporary_dir/private.key" "$server_key"
+cp "$temporary_dir/private.key" "$cert_dir/.private.key.new"
+chmod 600 "$cert_dir/.private.key.new"
+if [ -n "${MINIO_CERT_OWNER:-}" ]; then
+    chown "$MINIO_CERT_OWNER" "$cert_dir/.private.key.new"
+fi
+mv -f "$cert_dir/.private.key.new" "$server_key"
 chmod 644 "$ca_cert" "$server_cert"
 chmod 600 "$server_key" "$generated_marker"

@@ -6,11 +6,12 @@ import json
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
-from fastapi.responses import Response
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from al_medlit.auth.dependencies import get_current_user
 from al_medlit.auth.models import User
+from al_medlit.auth.tenancy import assert_project_member
 from al_medlit.core.database import get_db
 from al_medlit.core.exceptions import ConflictError
 from al_medlit.project.models import Project
@@ -140,7 +141,12 @@ def prediction_results(
     run = service.get_prediction_run(db, project_id, run_id)
     output = service._output(db, run)
     return {
-        "items": service.result_rows(db, run, offset=offset, limit=limit),
+        "items": service.result_rows(
+            db, run, offset=offset, limit=limit,
+            include_protected=assert_project_member(
+                db, current_user, project_id
+            ).role in {"manager", "admin"},
+        ),
         "total": output.candidate_count,
         "offset": offset,
         "limit": limit,
@@ -167,21 +173,32 @@ def download_predictions(
 ):
     _authorize(db, current_user, project_id)
     run = service.get_prediction_run(db, project_id, run_id)
-    rows = service.result_rows(db, run)
-    if format == "jsonl":
-        content = "".join(
-            json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n" for row in rows
-        )
-        content_type = "application/x-ndjson"
-    else:
+    output = service._output(db, run)
+    include_protected = assert_project_member(
+        db, current_user, project_id
+    ).role in {"manager", "admin"}
+
+    def chunks():
         buffer = io.StringIO(newline="")
         writer = csv.DictWriter(buffer, fieldnames=list(schemas.PredictionResult.model_fields))
-        writer.writeheader()
-        writer.writerows({key: _csv_cell(value) for key, value in row.items()} for row in rows)
-        content, content_type = buffer.getvalue(), "text/csv"
-    return Response(
-        content,
-        media_type=content_type,
+        if format == "csv":
+            writer.writeheader()
+            yield buffer.getvalue()
+        for offset in range(0, output.candidate_count, 200):
+            for row in service.result_rows(
+                db, run, offset=offset, limit=200, include_protected=include_protected
+            ):
+                if format == "jsonl":
+                    yield json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n"
+                else:
+                    buffer.seek(0)
+                    buffer.truncate(0)
+                    writer.writerow({key: _csv_cell(value) for key, value in row.items()})
+                    yield buffer.getvalue()
+
+    return StreamingResponse(
+        chunks(),
+        media_type="application/x-ndjson" if format == "jsonl" else "text/csv",
         headers={
             "Content-Disposition": f'attachment; filename="predictions-{run.id}.{format}"',
             "Cache-Control": "no-store",

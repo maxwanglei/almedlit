@@ -956,7 +956,12 @@ def test_protected_test_evaluation_runs_after_training_and_is_immutable(db, clie
     )
     assert candidate_package.package_kind == "model_candidate"
     assert candidate_package.deployable is False
-    assert candidate_package.retention.retention_class == "candidate"
+    assert (
+        candidate_package.retention.retention_class
+        == checkpoint_package.retention.retention_class
+    )
+    assert candidate_package.retention.pinned is False
+    assert candidate_package.retention.expires_at == checkpoint_package.retention.expires_at
     assert checkpoint_package.metadata_["protected_test_gate"] == {
         "required": True,
         "status": "succeeded",
@@ -1001,63 +1006,20 @@ def test_protected_test_evaluation_runs_after_training_and_is_immutable(db, clie
     db.rollback()
 
 
-def test_requested_test_evaluation_marks_unsupported_recipe_without_metrics(db):
-    storage = MemoryObjectStorage()
-    scope = _training_run_fixture(
-        db,
-        storage=storage,
-        suffix="unsupported-evaluation",
-        recipe_key="transformer_sequence_classification",
-        plugin_key="huggingface_sequence",
-        environment_class="transformer-cpu",
-        with_base_model=True,
-        evaluation_plan={"splits": ["test"], "metrics": ["accuracy"]},
-    )
-    trainer = FakeTrainer(
-        key="huggingface_sequence",
-        recipe_key="transformer_sequence_classification",
-        runtime_class="transformer-cpu",
-        output_name="model.safetensors",
-    )
-    trainers = TrainerPluginRegistry()
-    trainers.register(trainer)
-
-    completed = execute_training_run(
-        db,
-        storage,
-        training_run_id=scope.run.id,
-        trainer_registry=trainers,
-        evaluator_registry=EvaluatorPluginRegistry(),
-    )
-
-    assert completed.status == "succeeded"
-    [evaluation] = service.list_training_run_evaluations(
-        db,
-        scope.project.id,
-        completed.id,
-    )
-    assert evaluation.status == "unsupported"
-    assert evaluation.metrics == {}
-    assert evaluation.artifact_package_id is None
-    assert evaluation.evaluator_key is None
-    assert "No trusted protected-test evaluator" in evaluation.status_reason
-    assert completed.runtime_snapshot["protected_test_evaluation"]["status"] == (
-        "unsupported"
-    )
-    model_version = db.get(models.ModelVersion, completed.output_model_version_id)
-    assert model_version.metrics == {"accuracy": 0.75}
-    checkpoint_package = db.get(
-        ArtifactPackage,
-        model_version.checkpoint_package_id,
-    )
-    assert checkpoint_package.deployable is False
-    assert checkpoint_package.package_kind == "model_candidate"
-    assert checkpoint_package.metadata_["protected_test_gate"] == {
-        "required": True,
-        "status": "unsupported",
-        "evaluator_key": None,
-        "evaluator_version": None,
-    }
+def test_unsupported_protected_evaluation_is_rejected_before_launch(db):
+    with pytest.raises(ValidationError, match="No trusted protected-test evaluator"):
+        _training_run_fixture(
+            db,
+            storage=MemoryObjectStorage(),
+            suffix="unsupported-evaluation",
+            recipe_key="transformer_sequence_classification",
+            plugin_key="huggingface_sequence",
+            environment_class="transformer-cpu",
+            with_base_model=True,
+            evaluation_plan={"splits": ["test"], "metrics": ["accuracy"]},
+        )
+    assert db.query(models.TrainingRun).count() == 0
+    assert db.query(models.ModelVersion).count() == 0
 
 
 def test_evaluator_failure_leaves_only_a_non_deployable_candidate(db):
@@ -1129,7 +1091,7 @@ def test_evaluator_failure_leaves_only_a_non_deployable_candidate(db):
         ArtifactStorageReservation,
         scope.run.artifact_reservation_id,
     )
-    assert reservation.status == "committed"
+    assert reservation.status == "released"
     assert reservation.artifact_package_id == candidate.id
 
 
@@ -1929,7 +1891,7 @@ def test_feedback_scoring_heartbeat_and_reconciliation(db):
     queued.updated_at = now - timedelta(minutes=6)
     db.commit()
     reconciled = reconcile_feedback_scoring_runs(db, now=now)
-    assert reconciled["redispatch_ids"] == [feedback_run.id]
+    assert reconciled["redispatch_ids"] == []
 
     from al_medlit.workflow.services.feedback_scoring import _claim_feedback_scoring_run
 

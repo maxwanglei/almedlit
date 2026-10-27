@@ -5,6 +5,7 @@ from al_medlit.auth.dependencies import get_current_user
 from al_medlit.auth.models import User
 from al_medlit.auth.tenancy import (
     assert_project_member_if_exists,
+    lock_project_member_for_mutation,
     require_guideline_access,
 )
 from al_medlit.core.database import get_db
@@ -26,6 +27,9 @@ def create_guideline_version(
         current_user,
         payload.project_id,
         min_role="manager",
+    )
+    lock_project_member_for_mutation(
+        db, current_user, payload.project_id, min_role="manager", lock_workspace=True
     )
     payload.author_id = current_user.username
     guideline = service.create_guideline_version(db, payload)

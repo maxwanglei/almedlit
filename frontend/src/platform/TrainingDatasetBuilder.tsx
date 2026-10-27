@@ -12,6 +12,7 @@ export interface TrainingDatasetBuilderProps {
   initialDatasetVersionId?: number | null; initialTaskVersionId?: number | null; initialLabelSetVersionId?: number | null;
   parent?: TrainingDatasetVersion; onImport: () => void; onDefineTask?: () => void;
   onCreated: (version: TrainingDatasetVersion) => Promise<void>; onCancel: () => void;
+  canUseRoundAnnotations?: boolean;
 }
 
 export function inheritedTrainingSource(source: TrainingSource): TrainingSource {
@@ -29,7 +30,7 @@ function taskInputMapping(data: PlatformProjectData, taskId: number): Record<str
   return Object.fromEntries((fields.length ? fields : ["text"]).map((field) => [field, field]));
 }
 
-export default function TrainingDatasetBuilder({ projectId, data, initialDatasetId, initialDatasetVersionId, initialTaskVersionId, initialLabelSetVersionId, parent, onImport, onDefineTask, onCreated, onCancel }: TrainingDatasetBuilderProps): React.ReactElement {
+export default function TrainingDatasetBuilder({ projectId, data, initialDatasetId, initialDatasetVersionId, initialTaskVersionId, initialLabelSetVersionId, parent, onImport, onDefineTask, onCreated, onCancel, canUseRoundAnnotations = true }: TrainingDatasetBuilderProps): React.ReactElement {
   const storageKey = `al-medlit:training-preparation:${projectId}:${parent?.id ?? "new"}:${initialDatasetVersionId ?? initialDatasetId ?? "all"}`;
   const restored = useMemo(() => {
     try { return JSON.parse(sessionStorage.getItem(storageKey) ?? "null") as { draft?: TrainingPreparationDraft; preview?: TrainingPreview; attempt?: { signature: string; key: string }; startChoice?: "annotations" | "external" | "combine"; saved?: TrainingDatasetVersion } | null; } catch { return null; }
@@ -50,15 +51,15 @@ export default function TrainingDatasetBuilder({ projectId, data, initialDataset
       !initialDatasetId || sourceVersions.some((version) => version.id === id && version.dataset_id === initialDatasetId);
     const layer = data.labelSets.filter((item) => item.task_version_id === selectedTaskId && eligibleVersion(item.dataset_version_id) && item.source_kind !== "imported" && item.composition_policy !== "exclude")
       .sort((a, b) => b.id - a.id)[0];
-    const round = data.rounds.filter((item) => item.task_version_id === selectedTaskId && eligibleVersion(item.dataset_version_id) && item.status === "closed")
-      .sort((a, b) => b.id - a.id)[0];
+    const round = canUseRoundAnnotations ? data.rounds.filter((item) => item.task_version_id === selectedTaskId && eligibleVersion(item.dataset_version_id) && (item.status === "open" || item.status === "closed"))
+      .sort((a, b) => b.id - a.id)[0] : undefined;
     return layer ? [{ dataset_version_id: layer.dataset_version_id, input_mapping: mapping, label_set_version_id: layer.id }] :
       round ? [{ dataset_version_id: round.dataset_version_id, input_mapping: mapping, annotation_round_id: round.id }] : [];
   }
   const [sources, setSources] = useState<TrainingSource[]>(() => {
-    if (restored?.draft?.sources) return restored.draft.sources;
+    if (restored?.draft?.sources) return restored.draft.sources.filter((source) => canUseRoundAnnotations || !source.annotation_round_id);
     const inherited = parent?.preparation_manifest?.sources;
-    if (Array.isArray(inherited) && inherited.length) return (inherited as TrainingSource[]).map(inheritedTrainingSource);
+    if (Array.isArray(inherited) && inherited.length) return (inherited as TrainingSource[]).map(inheritedTrainingSource).filter((source) => canUseRoundAnnotations || !source.annotation_round_id);
     const layer = data.labelSets.find((item) => item.id === initialLabelSetVersionId && item.dataset_version_id === initialVersion && item.task_version_id === initialTask && item.composition_policy !== "exclude");
     if (layer) return [{ dataset_version_id: initialVersion, input_mapping: taskInputMapping(data, initialTask), label_set_version_id: layer.id }];
     const annotations = annotationSource(initialTask, initialVersion);
@@ -168,7 +169,7 @@ export default function TrainingDatasetBuilder({ projectId, data, initialDataset
       <label><span>Task</span><NativeSelect required aria-invalid={showValidation && !taskId ? true : undefined} aria-describedby={showValidation && !taskId ? "training-data-task-error" : undefined} value={taskId} disabled={busy || Boolean(parent)} onChange={(event) => { const id = Number(event.target.value); setTaskId(id); setSources((current) => startChoice === "annotations" ? annotationSource(id) : current.map((source) => ({ dataset_version_id: source.dataset_version_id, input_mapping: taskInputMapping(data, id), label_field: importedLabelField(source.dataset_version_id) }))); }}>
         <option value={0}>Select a task</option>{data.taskVersions.map((item) => <option key={item.id} value={item.id}>{data.taskDefinitions.find((definition) => definition.id === item.task_definition_id)?.name ?? item.task_kind} · v{item.version_number}</option>)}
       </NativeSelect>{showValidation && !taskId ? <small id="training-data-task-error" aria-hidden="true">Choose a task.</small> : null}</label>
-      {startChoice === "annotations" && !sources.length ? <p role="status">No submitted project annotations are available for this task. Annotate a source dataset first, or choose external labeled data.</p> : null}
+      {startChoice === "annotations" && !sources.length ? <p role="status">{canUseRoundAnnotations ? "No submitted project annotations are available for this task. Annotate a source dataset first, or choose external labeled data." : "No published annotation labels are available for this task. Ask a manager to publish a label set, or choose external labeled data."}</p> : null}
       {sources.map((source, index) => <fieldset className="platform-fieldset" key={index} disabled={busy}>
         <legend>Source {index + 1}</legend>
         <label><span>Source dataset version</span><NativeSelect required aria-invalid={showValidation && !source.dataset_version_id ? true : undefined} aria-describedby={showValidation && !source.dataset_version_id ? `training-data-source-${index}-error` : undefined} value={source.dataset_version_id} onChange={(event) => updateSource(index, { dataset_version_id: Number(event.target.value), label_field: importedLabelField(Number(event.target.value)), label_set_version_id: undefined, annotation_round_id: undefined, submission_ids: undefined, split_map_id: undefined })}>
@@ -178,7 +179,7 @@ export default function TrainingDatasetBuilder({ projectId, data, initialDataset
         <label><span>Labels from</span><NativeSelect value={source.annotation_round_id ? `round:${source.annotation_round_id}` : source.label_set_version_id ? `layer:${source.label_set_version_id}` : "field"} onChange={(event) => labelChoice(index, event.target.value)}>
           <option value="field">A field in the imported dataset</option>
           {data.labelSets.filter((layer) => layer.dataset_version_id === source.dataset_version_id && layer.task_version_id === taskId && layer.composition_policy !== "exclude").map((layer) => <option key={`layer:${layer.id}`} value={`layer:${layer.id}`}>{layer.name} · v{layer.version_number} · {layer.source_kind}</option>)}
-          {data.rounds.filter((round) => round.dataset_version_id === source.dataset_version_id && round.task_version_id === taskId && (round.status === "open" || round.status === "closed")).map((round) => <option key={`round:${round.id}`} value={`round:${round.id}`}>Submitted annotations: {round.name}</option>)}
+          {canUseRoundAnnotations ? data.rounds.filter((round) => round.dataset_version_id === source.dataset_version_id && round.task_version_id === taskId && (round.status === "open" || round.status === "closed")).map((round) => <option key={`round:${round.id}`} value={`round:${round.id}`}>Submitted annotations: {round.name}</option>) : null}
         </NativeSelect></label>
         {source.label_field !== undefined ? <label><span>Label field</span><NativeInput required aria-invalid={showValidation && !source.label_field.trim() ? true : undefined} aria-describedby={showValidation && !source.label_field.trim() ? `training-data-label-${index}-error` : undefined} value={source.label_field} onChange={(event) => updateSource(index, { label_field: event.target.value })} />{showValidation && !source.label_field.trim() ? <small id={`training-data-label-${index}-error`} aria-hidden="true">Enter the field containing labels.</small> : null}</label> : null}
         {source.annotation_round_id ? <p>Only finalized submissions enter the snapshot. You can continue annotating this source after creating the training dataset.</p> : null}

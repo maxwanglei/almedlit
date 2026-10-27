@@ -11,3 +11,8 @@ object_store
 *.db
 .env
 .env.*
+infra/certs/
+**/*.key
+**/*.pem
+**/id_*
+.audit/

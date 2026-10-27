@@ -462,6 +462,8 @@ def test_cancel_before_candidate_publication_prevents_a_late_candidate(db):
     )
     trainers = TrainerPluginRegistry()
     trainers.register(trainer)
+    evaluators = EvaluatorPluginRegistry()
+    evaluators.register(FakeEvaluator(recipe_key="tfidf_logistic_regression", trainer=trainer))
 
     with pytest.raises(
         ConflictError,
@@ -472,7 +474,7 @@ def test_cancel_before_candidate_publication_prevents_a_late_candidate(db):
             storage,
             training_run_id=scope.run.id,
             trainer_registry=trainers,
-            evaluator_registry=EvaluatorPluginRegistry(),
+            evaluator_registry=evaluators,
         )
 
     assert db.get(models.TrainingRun, scope.run.id).status == "cancelled"

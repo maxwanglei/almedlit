@@ -450,31 +450,14 @@ def _dataset_item_is_in_protected_group(
     db: Session,
     dataset_item: models.DatasetItem,
 ) -> bool:
-    stable_keys = {dataset_item.stable_key}
-    if dataset_item.group_key is not None:
-        stable_keys.update(
-            stable_key
-            for (stable_key,) in db.query(models.DatasetItem.stable_key)
-            .filter(
-                models.DatasetItem.dataset_version_id == dataset_item.dataset_version_id,
-                models.DatasetItem.group_key == dataset_item.group_key,
-            )
-            .all()
-        )
-    split_maps = (
-        db.query(models.SplitMap)
-        .filter(
-            models.SplitMap.project_id == dataset_item.project_id,
-            models.SplitMap.dataset_version_id == dataset_item.dataset_version_id,
-        )
-        .all()
-    )
+    from .holdouts import protected_dataset_item_ids
+
+    task_ids = [task_id for (task_id,) in db.query(models.TaskVersion.id).filter(
+        models.TaskVersion.project_id == dataset_item.project_id
+    ).all()]
     return any(
-        any(
-            split_map.assignments.get(stable_key) in set(split_map.protected_splits)
-            for stable_key in stable_keys
-        )
-        for split_map in split_maps
+        dataset_item.id in protected_dataset_item_ids(db, [dataset_item], task_id)
+        for task_id in task_ids
     )
 
 
@@ -573,6 +556,9 @@ def resolve_review_case(
     data: schemas.ReviewCaseResolve,
 ) -> models.ReviewCase:
     review_case = _scoped(db, models.ReviewCase, review_case_id, project_id, "Review case")
+    review_case = db.query(models.ReviewCase).filter(
+        models.ReviewCase.id == review_case.id
+    ).populate_existing().with_for_update().one()
     if review_case.status == "resolved":
         raise ConflictError("Review case is already resolved")
     review_case.status = "resolved"

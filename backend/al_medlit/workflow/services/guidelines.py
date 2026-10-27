@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from al_medlit.auth.models import User
 from al_medlit.core.exceptions import (
     ConflictError,
+    NotFoundError,
     ValidationError,
 )
 from al_medlit.workflow import models, schemas
@@ -105,18 +106,15 @@ def create_guideline_revision(
         )
         if parent.guideline_id != guideline.id:
             raise ValidationError("Parent revision must belong to the same guideline")
-    proposals = [
-        _scoped(
-            db,
-            models.GuidelineChangeProposal,
-            proposal_id,
-            data.project_id,
-            "Guideline proposal",
-        )
-        for proposal_id in data.source_proposal_ids
-    ]
+    proposals = db.query(models.GuidelineChangeProposal).filter(
+        models.GuidelineChangeProposal.id.in_(data.source_proposal_ids),
+        models.GuidelineChangeProposal.project_id == data.project_id,
+    ).order_by(models.GuidelineChangeProposal.id).populate_existing().with_for_update().all()
+    if len(proposals) != len(set(data.source_proposal_ids)):
+        raise NotFoundError("Guideline proposal not found in project")
     if any(
         proposal.guideline_id != guideline.id or proposal.status != "accepted"
+        or proposal.resulting_revision_id is not None
         for proposal in proposals
     ):
         raise ValidationError("Source proposals must be accepted proposals for this guideline")
@@ -292,6 +290,9 @@ def review_guideline_proposal(
         project_id,
         "Guideline proposal",
     )
+    proposal = db.query(models.GuidelineChangeProposal).filter(
+        models.GuidelineChangeProposal.id == proposal.id
+    ).populate_existing().with_for_update().one()
     if proposal.status != "pending":
         raise ConflictError("Guideline proposal was already reviewed")
     proposal.status = data.decision

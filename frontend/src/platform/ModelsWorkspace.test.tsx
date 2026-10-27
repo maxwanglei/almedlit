@@ -348,6 +348,21 @@ it("loads the next models page with applied filters while edits remain unapplied
     { projectId: undefined, limit: 50, cursor: 81 }, [project]));
 });
 
+it("preserves registry filters through project store updates and project changes", async () => {
+  const user = userEvent.setup();
+  mocks.listWorkspaceModels.mockResolvedValue({ items: [modelSummary], next_cursor: 81 });
+  const props = { workspaceId: 5, projects: [project], view: "registry", onNavigate: vi.fn() } satisfies Parameters<typeof ModelsWorkspace>[0];
+  const mounted = render(<ModelsWorkspace {...props} />);
+  await screen.findByText("Relevance baseline");
+  await user.selectOptions(screen.getByLabelText("Lifecycle status"), "archived");
+  mounted.rerender(<ModelsWorkspace {...props} projects={[project]} />);
+  expect(screen.getByRole<HTMLSelectElement>("combobox", { name: "Lifecycle status" }).value).toBe("archived");
+  expect(mocks.listWorkspaceModels).toHaveBeenCalledOnce();
+  expect(screen.getByRole("button", { name: "Load more" })).toBeTruthy();
+  mounted.rerender(<ModelsWorkspace {...props} initialProjectId={7} />);
+  await waitFor(() => expect(mocks.listWorkspaceModels).toHaveBeenLastCalledWith(5, expect.objectContaining({ projectId: 7, status: "archived" }), [project]));
+});
+
 it.each(["identity", "versions"])("does not report missing model data after a failed %s request", async (failedRequest) => {
   mocks.findWorkspaceModel.mockReset();
   mocks.loadPlatformProject.mockReset();

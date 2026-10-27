@@ -51,6 +51,17 @@ describe("ModuleSwitcher", () => {
     expect(container.innerHTML).toBe("");
   });
 
+  it("releases the mobile drawer before opening workspace management", async () => {
+    const onManage = vi.fn();
+    render(<ModuleSwitcher presentation="mobile" modules={modules} currentModuleId="my-work" onNavigate={vi.fn()} workspaceSwitcher={<button onClick={onManage}>Add workspace</button>} />);
+    fireEvent.click(screen.getByRole("button", { name: "Open navigation menu" }));
+    expect(document.body.style.overflow).toBe("hidden");
+    fireEvent.click(screen.getByRole("button", { name: "Add workspace" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Navigation" })).toBeNull());
+    expect(document.body.style.overflow).toBe("");
+    expect(onManage).toHaveBeenCalledOnce();
+  });
+
   it("renders an accessible mobile drawer with distinct destination and workspace groups", async () => {
     const onNavigate = vi.fn();
     render(

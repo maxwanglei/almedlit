@@ -63,6 +63,15 @@ afterEach(() => {
 });
 
 describe("ModelScoringPanel", () => {
+  it("opens a round with the selected feedback set without a page reload", () => {
+    const onCreateRound = vi.fn();
+    const data = projectData({ ...feedbackRun("completed"), output_feedback_set_version_id: 73 });
+    data.feedbackSets = [{ id: 73, project_id: 7, feedback_run_id: 91, dataset_version_id: 22, task_version_id: 12, version_number: 1, output_schema: {}, candidate_count: 2, content_hash: "feedback", artifact_package_id: null }];
+    render(<ModelScoringPanel projectId={7} data={data} onCreate={vi.fn()} onRefresh={vi.fn()} onCreateRound={onCreateRound} />);
+    fireEvent.click(screen.getByRole("button", { name: "Create round from feedback set v1" }));
+    expect(onCreateRound).toHaveBeenCalledExactlyOnceWith(73);
+    expect(screen.queryByRole("link", { name: /Feedback set/ })).toBeNull();
+  });
   it("shows the domain dataset version number instead of the database ID", () => {
     const data = projectData(feedbackRun("failed"));
     data.datasetVersions = [{

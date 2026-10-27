@@ -4,6 +4,42 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 
+class InferenceComputeProfileCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    backend: Literal["local", "ssh_slurm"] = "local"
+    config: dict = Field(default_factory=dict)
+
+
+class InferenceComputeProfileRead(BaseModel):
+    id: int
+    project_id: int
+    name: str
+    backend: str
+    status: str
+
+    model_config = {"from_attributes": True}
+
+
+class InferenceCheckpointCreate(BaseModel):
+    artifact_package_id: int
+    training_mode: Literal["conditioned", "per_target"]
+    target_version_ids: list[int] = Field(min_length=1)
+    max_context_tokens: int = Field(ge=128, le=1_048_576)
+
+
+class InferenceCheckpointRead(BaseModel):
+    id: int
+    project_id: int
+    package_id: int | None
+    model_type: str
+    training_mode: str
+    trained_target_version_ids: list[int]
+    max_context_tokens: int
+    readiness: str
+
+    model_config = {"from_attributes": True}
+
+
 class InferenceWindowConfig(BaseModel):
     max_tokens: int = Field(default=4096, ge=128)
     overlap_tokens: int = Field(default=512, ge=0)

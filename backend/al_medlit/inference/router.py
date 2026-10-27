@@ -19,6 +19,10 @@ from al_medlit.inference.execution import execute_inference_run as execute_backe
 from al_medlit.inference.models import EvidenceCandidatePrediction, InferenceWindow
 from al_medlit.inference.schemas import (
     EvidenceCandidatePredictionRead,
+    InferenceCheckpointCreate,
+    InferenceCheckpointRead,
+    InferenceComputeProfileCreate,
+    InferenceComputeProfileRead,
     InferenceRunCreate,
     InferenceRunRead,
     InferenceRunSummaryRead,
@@ -28,10 +32,76 @@ from al_medlit.inference.schemas import (
 )
 from al_medlit.model_artifacts.service import artifact_package_access_restrictions
 from al_medlit.training.compute_profiles import get_compute_profile
-from al_medlit.training.models import ModelCheckpoint
+from al_medlit.training.models import ComputeProfile, ModelCheckpoint
 from al_medlit.workspace.capability_dependencies import enforce_capability
 
 router = APIRouter(tags=["inference"])
+
+
+@router.post(
+    "/projects/{project_id}/inference/compute-profiles",
+    response_model=InferenceComputeProfileRead,
+)
+def create_inference_compute_profile(
+    project_id: int,
+    payload: InferenceComputeProfileCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    lock_project_member_for_mutation(db, current_user, project_id, min_role="manager")
+    enforce_capability(db, project_id=project_id, key="inference")
+    if payload.backend == "ssh_slurm":
+        enforce_capability(db, project_id=project_id, key="hpc_training")
+    return service.create_inference_compute_profile(
+        db, project_id=project_id, data=payload, actor_user_id=current_user.id,
+    )
+
+
+@router.get(
+    "/projects/{project_id}/inference/compute-profiles",
+    response_model=list[InferenceComputeProfileRead],
+)
+def list_inference_compute_profiles(
+    project_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    assert_project_member(db, current_user, project_id, min_role="manager")
+    enforce_capability(db, project_id=project_id, key="inference")
+    return db.query(ComputeProfile).filter(
+        ComputeProfile.project_id == project_id,
+    ).order_by(ComputeProfile.id).all()
+
+
+@router.post(
+    "/projects/{project_id}/inference/checkpoints",
+    response_model=InferenceCheckpointRead,
+)
+def register_inference_checkpoint(
+    project_id: int,
+    payload: InferenceCheckpointCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    lock_project_member_for_mutation(db, current_user, project_id, min_role="manager")
+    enforce_capability(db, project_id=project_id, key="inference")
+    return service.register_inference_checkpoint(db, project_id=project_id, data=payload)
+
+
+@router.get(
+    "/projects/{project_id}/inference/checkpoints",
+    response_model=list[InferenceCheckpointRead],
+)
+def list_inference_checkpoints(
+    project_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    assert_project_member(db, current_user, project_id, min_role="manager")
+    enforce_capability(db, project_id=project_id, key="inference")
+    return db.query(ModelCheckpoint).filter(
+        ModelCheckpoint.project_id == project_id,
+    ).order_by(ModelCheckpoint.id).all()
 
 
 def _can_view_operational_run_fields(user: User, role: str) -> bool:
@@ -288,6 +358,7 @@ def get_prediction(
         project_id=prediction.project_id,
         document_id=prediction.document_id,
     )
+    service.assert_candidate_visible(db, current_user, member, prediction)
     assignment = assert_task_assigned(
         db,
         current_user,
@@ -327,6 +398,7 @@ def review_prediction(
         document_id=prediction.document_id,
         lock_assignment=False,
     )
+    service.assert_candidate_visible(db, current_user, member, prediction)
     assignment = assert_task_assigned(
         db,
         current_user,

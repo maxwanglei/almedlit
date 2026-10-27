@@ -569,6 +569,7 @@ class FeedbackCandidateRead(FeedbackCandidateCreate, ReadModel):
 
 
 class AnnotationRoundCreate(InputModel):
+    request_key: str | None = Field(default=None, min_length=1, max_length=120)
     project_id: int
     name: str = Field(min_length=1, max_length=255)
     dataset_version_id: int
@@ -642,6 +643,11 @@ class RoundWorkContextRead(InputModel):
 
 class AnnotationRoundTransition(InputModel):
     status: Literal["open", "closed", "cancelled"]
+
+
+class AnnotationRoundAssigneesUpdate(InputModel):
+    annotator_user_ids: list[int] = Field(default_factory=list)
+    open_to_all_annotators: bool = False
 
 
 class RoundItemCreate(InputModel):

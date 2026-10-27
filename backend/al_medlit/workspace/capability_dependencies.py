@@ -3,6 +3,9 @@ from collections.abc import Callable
 from fastapi import Depends, Query
 from sqlalchemy.orm import Session
 
+from al_medlit.auth.dependencies import get_current_user
+from al_medlit.auth.models import User
+from al_medlit.auth.tenancy import assert_project_member
 from al_medlit.core.database import get_db
 from al_medlit.core.exceptions import ForbiddenError, NotFoundError
 from al_medlit.project.models import Project
@@ -29,7 +32,9 @@ def require_capability(key: str) -> Callable[..., None]:
     def _dependency(
         project_id: int = Query(...),
         db: Session = Depends(get_db),
+        user: User = Depends(get_current_user),
     ) -> None:
+        assert_project_member(db, user, project_id)
         enforce_capability(db, project_id=project_id, key=key)
 
     return _dependency

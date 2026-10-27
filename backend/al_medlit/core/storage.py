@@ -9,6 +9,7 @@ import io
 import os
 import tempfile
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -98,13 +99,15 @@ class LocalObjectStorage:
         return path
 
     def list_objects(self, prefix: str) -> Iterator[StorageInventoryObject]:
-        directory = self._path(prefix)
+        candidate = self._path(prefix)
+        directory = candidate if not prefix or prefix.endswith("/") else candidate.parent
         if not directory.is_dir():
             return
         for path in directory.rglob("*"):
-            if path.is_file() and not path.is_symlink():
+            key = path.relative_to(self.root.resolve()).as_posix()
+            if key.startswith(prefix) and path.is_file() and not path.is_symlink():
                 yield StorageInventoryObject(
-                    key=path.relative_to(self.root.resolve()).as_posix(),
+                    key=key,
                     last_modified=datetime.fromtimestamp(path.stat().st_mtime, UTC),
                 )
 
@@ -300,8 +303,9 @@ class MinioObjectStorage:
             secure=secure,
             http_client=http_client,
         )
-        if not self.client.bucket_exists(bucket):
-            self.client.make_bucket(bucket)
+        with _minio_errors():
+            if not self.client.bucket_exists(bucket):
+                self.client.make_bucket(bucket)
 
     def _server_side_encryption(self):
         if self.encryption_mode == "none":
@@ -352,14 +356,15 @@ class MinioObjectStorage:
         server_side_encryption = self._server_side_encryption()
         if server_side_encryption is not None:
             kwargs["sse"] = server_side_encryption
-        self.client.put_object(
-            self.bucket,
-            key,
-            hashing_stream,
-            length=object_length,
-            content_type=content_type,
-            **kwargs,
-        )
+        with _minio_errors():
+            self.client.put_object(
+                self.bucket,
+                key,
+                hashing_stream,
+                length=object_length,
+                content_type=content_type,
+                **kwargs,
+            )
         if length is not None and hashing_stream.size_bytes != length:
             self.delete(key)
             raise ObjectStorageError(
@@ -385,13 +390,14 @@ class MinioObjectStorage:
             raise ObjectStorageError("chunk_size must be positive")
         try:
             response = self.client.get_object(self.bucket, key)
-        except S3Error as exc:
-            if exc.code == "NoSuchKey":
+        except (S3Error, _minio_http_error()) as exc:
+            if isinstance(exc, S3Error) and exc.code == "NoSuchKey":
                 raise ObjectNotFoundError(f"Object not found: {key!r}") from exc
             raise ObjectStorageError(str(exc)) from exc
         try:
-            while chunk := response.read(chunk_size):
-                yield chunk
+            with _minio_errors():
+                while chunk := response.read(chunk_size):
+                    yield chunk
         finally:
             response.close()
             response.release_conn()
@@ -441,12 +447,31 @@ class MinioObjectStorage:
         )
 
     def delete(self, key: str) -> None:
-        self.client.remove_object(self.bucket, key)
+        with _minio_errors():
+            self.client.remove_object(self.bucket, key)
 
     def list_objects(self, prefix: str) -> Iterator[StorageInventoryObject]:
-        for item in self.client.list_objects(self.bucket, prefix=prefix, recursive=True):
-            if item.last_modified is not None:
-                yield StorageInventoryObject(item.object_name, item.last_modified)
+        with _minio_errors():
+            for item in self.client.list_objects(self.bucket, prefix=prefix, recursive=True):
+                if item.last_modified is not None:
+                    yield StorageInventoryObject(item.object_name, item.last_modified)
+
+
+def _minio_http_error():
+    from urllib3.exceptions import HTTPError
+
+    return HTTPError
+
+
+@contextmanager
+def _minio_errors():
+    from minio.error import S3Error
+    from urllib3.exceptions import HTTPError
+
+    try:
+        yield
+    except (S3Error, HTTPError) as exc:
+        raise ObjectStorageError(str(exc)) from exc
 
 
 class _HashingReader:

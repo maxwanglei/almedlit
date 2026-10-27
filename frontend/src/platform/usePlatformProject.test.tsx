@@ -363,7 +363,7 @@ describe("usePlatformProject load scope", () => {
     mocks.createRound.mockImplementation(async (_id: number, _draft: RoundDraft, onCreated?: (round: { id: number }) => void) => { onCreated?.({ id: 71 }); throw new Error("Opening failed"); });
     const { result } = renderHook(() => usePlatformProject(7, 5, true, "rounds"));
     await waitFor(() => expect(result.current.loading).toBe(false));
-    const draft: RoundDraft = { name: "Recover me", datasetVersionId: 2, taskVersionId: 3, cycleId: null, splitMapId: null, guidelineRevisionId: null, feedbackSetVersionId: null, assistancePolicy: "blind", reannotationMode: "full_dataset", selectionStrategy: "all", selectionLimit: 1, annotatorUserIds: [7], openToAllAnnotators: false, reason: "" };
+    const draft: RoundDraft = { creationIntentId: crypto.randomUUID(), name: "Recover me", datasetVersionId: 2, taskVersionId: 3, cycleId: null, splitMapId: null, guidelineRevisionId: null, feedbackSetVersionId: null, assistancePolicy: "blind", reannotationMode: "full_dataset", selectionStrategy: "all", selectionLimit: 1, annotatorUserIds: [7], openToAllAnnotators: false, reason: "" };
     await act(async () => { await expect(result.current.addRound(draft)).rejects.toThrow("Opening failed"); });
     expect(mocks.loadPlatformProject).toHaveBeenCalledTimes(2);
     expect(result.current.error).toBe("Opening failed");
@@ -382,7 +382,7 @@ describe("usePlatformProject load scope", () => {
       usePlatformProject(7, 5, true, "rounds", roles),
     );
     await waitFor(() => expect(result.current.loading).toBe(false));
-    const draft: RoundDraft = {
+    const draft: RoundDraft = { creationIntentId: crypto.randomUUID(),
       name: "Round 2",
       datasetVersionId: 2,
       taskVersionId: 3,
@@ -401,11 +401,51 @@ describe("usePlatformProject load scope", () => {
 
     await act(() => result.current.addRound(draft));
 
-    expect(mocks.createRound).toHaveBeenCalledWith(7, draft, expect.any(Function));
+    expect(mocks.createRound).toHaveBeenCalledWith(7, draft, expect.any(Function), expect.objectContaining({ selectionRunId: null, selectionSetVersionId: null }));
     expect(mocks.loadPlatformProject).toHaveBeenCalledTimes(2);
     expect(mocks.loadPlatformProject).toHaveBeenLastCalledWith(7, "rounds", 5, roles);
     expect(result.current.busy).toBe(false);
     expect(result.current.error).toBeNull();
+  });
+
+  it.each(["open", "closed", "cancelled"])("allows a new matching round after the saved draft becomes %s", async (status) => {
+    mocks.createRound.mockImplementationOnce(async (_id: number, _draft: RoundDraft, onCreated?: (round: { id: number }) => void) => { onCreated?.({ id: 71 }); throw new Error("Opening failed"); });
+    const { result } = renderHook(() => usePlatformProject(7, 5, true, "rounds"));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const draft: RoundDraft = { creationIntentId: crypto.randomUUID(), name: "New round", datasetVersionId: 2, taskVersionId: 3, cycleId: null, splitMapId: null, guidelineRevisionId: null, feedbackSetVersionId: null, assistancePolicy: "blind", reannotationMode: "full_dataset", selectionStrategy: "all", selectionLimit: 1, annotatorUserIds: [7], openToAllAnnotators: false, reason: "" };
+    await act(async () => { await expect(result.current.addRound(draft)).rejects.toThrow("Opening failed"); });
+    mocks.getAnnotationRound.mockResolvedValue({ id: 71, status });
+    mocks.createRound.mockResolvedValueOnce({ id: 72, status: "open" });
+    await act(() => result.current.addRound({ ...draft, creationIntentId: crypto.randomUUID() }));
+    expect(mocks.createRound).toHaveBeenCalledTimes(2);
+    expect(mocks.transitionRound).not.toHaveBeenCalled();
+  });
+
+  it("treats a lost opening response as success when the same intent is already open", async () => {
+    mocks.createRound.mockImplementationOnce(async (_id: number, _draft: RoundDraft, onCreated?: (round: { id: number }) => void) => { onCreated?.({ id: 71 }); throw new Error("Response lost"); });
+    const { result } = renderHook(() => usePlatformProject(7, 5, true, "rounds"));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const draft: RoundDraft = { creationIntentId: crypto.randomUUID(), name: "Retry opening", datasetVersionId: 2, taskVersionId: 3, cycleId: null, splitMapId: null, guidelineRevisionId: null, feedbackSetVersionId: null, assistancePolicy: "blind", reannotationMode: "full_dataset", selectionStrategy: "all", selectionLimit: 1, annotatorUserIds: [7], openToAllAnnotators: false, reason: "" };
+    await act(async () => { await expect(result.current.addRound(draft)).rejects.toThrow("Response lost"); });
+    mocks.getAnnotationRound.mockResolvedValue({ id: 71, status: "open" });
+    await act(() => result.current.addRound({ ...draft }));
+    expect(mocks.createRound).toHaveBeenCalledOnce();
+    expect(mocks.transitionRound).not.toHaveBeenCalled();
+    expect(result.current.error).toBeNull();
+  });
+
+  it.each(["closed", "cancelled"])("requires a fresh form after the same intent becomes %s", async (status) => {
+    mocks.createRound.mockImplementationOnce(async (_id: number, _draft: RoundDraft, onCreated?: (round: { id: number }) => void) => { onCreated?.({ id: 71 }); throw new Error("Opening failed"); });
+    const { result } = renderHook(() => usePlatformProject(7, 5, true, "rounds"));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const draft: RoundDraft = { creationIntentId: crypto.randomUUID(), name: "Terminal attempt", datasetVersionId: 2, taskVersionId: 3, cycleId: null, splitMapId: null, guidelineRevisionId: null, feedbackSetVersionId: null, assistancePolicy: "blind", reannotationMode: "full_dataset", selectionStrategy: "all", selectionLimit: 1, annotatorUserIds: [7], openToAllAnnotators: false, reason: "" };
+    await act(async () => { await expect(result.current.addRound(draft)).rejects.toThrow("Opening failed"); });
+    mocks.getAnnotationRound.mockResolvedValue({ id: 71, status });
+    await act(async () => { await expect(result.current.addRound(draft)).rejects.toThrow("Open a new round form"); });
+    expect(mocks.createRound).toHaveBeenCalledOnce();
+    mocks.createRound.mockResolvedValueOnce({ id: 72, status: "open" });
+    await act(() => result.current.addRound({ ...draft, creationIntentId: crypto.randomUUID() }));
+    expect(mocks.createRound).toHaveBeenCalledTimes(2);
   });
 });
 

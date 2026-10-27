@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import UTC, datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from sqlalchemy.orm import Session
 
@@ -29,7 +30,13 @@ from al_medlit.inference.decoder import (
     decode_evidence_blocks,
 )
 from al_medlit.inference.models import EvidenceCandidatePrediction, InferenceRun, InferenceWindow
-from al_medlit.inference.scores import label_probabilities, synthetic_logits
+from al_medlit.inference.scores import (
+    SENTENCE_SCORER_MODEL_TYPES,
+    checkpoint_sentence_score_threshold,
+    label_probabilities,
+    sentence_score_probabilities,
+    synthetic_logits,
+)
 from al_medlit.lineage.service import add_lineage_edge, register_stored_artifact
 from al_medlit.project.models import Project
 from al_medlit.training.compute.base import ComputeBackend, ComputeBackendError, JobBundle
@@ -106,6 +113,30 @@ def _materialize_base_model_package(storage, asset, destination: Path) -> Path:
     )
 
 
+def _verified_sentence_score_threshold(storage, checkpoint, directory: Path) -> float | None:
+    manifest = checkpoint.manifest
+    model_type = manifest.get("model_type")
+    if manifest.get("synthetic_mode") or model_type not in SENTENCE_SCORER_MODEL_TYPES:
+        return None
+    if _uses_direct_checkpoint_package(checkpoint):
+        checkpoint_root = _materialize_artifact_package(
+            storage, checkpoint.package, directory / "threshold-checkpoint", label="Checkpoint",
+        )
+    else:
+        downloaded_path = directory / "threshold-checkpoint.zip"
+        downloaded = storage.download_file(checkpoint.artifact.storage_key, downloaded_path)
+        if (
+            downloaded.checksum_sha256 != checkpoint.artifact.content_hash
+            or downloaded.size_bytes != checkpoint.artifact.size_bytes
+        ):
+            raise ConflictError("Checkpoint object does not match its immutable checksum")
+        checkpoint_root = _extract_checkpoint(downloaded_path, directory / "threshold-checkpoint")
+    try:
+        return checkpoint_sentence_score_threshold(checkpoint_root, model_type=model_type)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ConflictError("Checkpoint sentence scorer metadata is invalid") from exc
+
+
 def _uses_direct_checkpoint_package(checkpoint) -> bool:
     package = checkpoint.package
     if package is None or package.package_format == "legacy_zip":
@@ -166,7 +197,16 @@ def execute_local_inference(
     if not claimed:
         return run
     try:
-        return _execute_claimed_local_inference(db, storage, run=run, work_root=work_root)
+        scratch_root = (
+            Path(work_root) if work_root is not None else Path(settings.local_attempt_root)
+        )
+        scratch_root.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(
+            prefix=f"al-medlit-inference-{run_id}-", dir=scratch_root,
+        ) as temporary:
+            return _execute_claimed_local_inference(
+                db, storage, run=run, work_root=temporary,
+            )
     except Exception as exc:
         _mark_failed(db, run_id, exc)
         raise
@@ -332,6 +372,8 @@ def _execute_claimed_local_inference(
         db,
         run_id=run.id,
         token_counter=token_counter,
+        commit=False,
+        persist=False,
     )
 
     windows_by_scope: dict[tuple[int, int, int], list[InferenceWindow]] = defaultdict(list)
@@ -382,19 +424,14 @@ def _execute_claimed_local_inference(
                     ],
                 )
                 if predictor.produces_sentence_scores:
-                    inside = False
-                    labels = []
-                    for score in values:
-                        positive = float(score) >= predictor.config.sentence_score_threshold
-                        labels.append(
-                            "B" if positive and not inside else ("I" if positive else "O")
-                        )
-                        inside = positive
+                    probabilities = sentence_score_probabilities(
+                        values, threshold=predictor.config.sentence_score_threshold,
+                    )
                 else:
-                    labels = [str(value) for value in values]
+                    probabilities = [label_probabilities(str(value)) for value in values]
                 window_logits.append(
                     {
-                        sentence.ordinal: label_probabilities(labels[index])
+                        sentence.ordinal: probabilities[index]
                         for index, sentence in enumerate(selected_sentences)
                     }
                 )
@@ -535,11 +572,16 @@ def _execute_claimed_local_inference(
                 block_threshold=float(run.decoder_config["block_threshold"]),
                 allow_cross_section=bool(run.decoder_config["allow_cross_section"]),
                 merge_adjacent=bool(run.decoder_config["merge_adjacent"]),
+                sentence_score_threshold=(
+                    predictor.config.sentence_score_threshold
+                    if conventional and not synthetic_mode and predictor.produces_sentence_scores
+                    else None
+                ),
             ),
         )
         decoded_by_scope[(document_id, structure_version_id, target_version_id)] = (
             result,
-            [window.id for window in scope_windows],
+            scope_windows,
         )
         diagnostics_scopes.append(
             {
@@ -560,6 +602,15 @@ def _execute_claimed_local_inference(
             }
         )
 
+    run = service.lock_inference_run(db, run.id)
+    if run.status != "running":
+        db.rollback()
+        return run
+    db.add_all([window for window in windows if window.id is None])
+    db.flush()
+    for scope in diagnostics_scopes:
+        key = (scope["document_id"], scope["structure_version_id"], scope["target_version_id"])
+        scope["window_ids"] = [window.id for window in windows_by_scope[key]]
     diagnostics_artifact_id = run.diagnostics_artifact_id
     if diagnostics_artifact_id is None:
         diagnostics_artifact_id = service.store_inference_diagnostics(
@@ -577,11 +628,12 @@ def _execute_claimed_local_inference(
                 "scopes": diagnostics_scopes,
             },
             actor_user_id=run.created_by_user_id,
+            commit=False,
         )
 
     for (document_id, structure_version_id, target_version_id), (
         result,
-        window_ids,
+        scope_windows,
     ) in decoded_by_scope.items():
         service.persist_decoder_result(
             db,
@@ -590,20 +642,17 @@ def _execute_claimed_local_inference(
             structure_version_id=structure_version_id,
             target_version_id=target_version_id,
             result=result,
-            source_window_ids=window_ids,
+            source_window_ids=[window.id for window in scope_windows],
             diagnostics_artifact_id=diagnostics_artifact_id,
+            commit=False,
         )
 
+    db.flush()
     candidate_count = (
         db.query(EvidenceCandidatePrediction)
         .filter(EvidenceCandidatePrediction.run_id == run.id)
         .count()
     )
-    run = service.lock_inference_run(db, run.id)
-    if run.status != "running":
-        # A cancel committed mid-run; its verdict stands over the completion.
-        db.rollback()
-        return run
     run.status = "succeeded"
     run.completed_at = datetime.now(UTC)
     run.metrics = {
@@ -724,6 +773,10 @@ def build_inference_bundle(
             }
         )
         checkpoint_input_files.append(checkpoint_path.name)
+
+    checkpoint_metadata["sentence_score_threshold"] = _verified_sentence_score_threshold(
+        storage, run.checkpoint, directory,
+    )
 
     base_model = None
     base_asset = None
@@ -939,8 +992,10 @@ def finalize_remote_inference(
 ) -> InferenceRun:
     try:
         run = service.lock_inference_run(db, run_id)
-        if run.status != "succeeded":
-            raise ConflictError("Only a succeeded inference run can be finalized")
+        if run.status != "succeeded" and not (
+            run.status == "running" and run.metrics.get("remote_result_ready")
+        ):
+            raise ConflictError("Remote inference outputs are not ready to finalize")
         if (
             run.diagnostics_artifact_id is not None
             and run.metrics.get("inference_log_artifact_id") is not None
@@ -986,6 +1041,14 @@ def _finalize_locked_remote_inference(
     ):
         raise ConflictError("Remote logits do not match the selected checkpoint")
     score_kind = _window_score_kind(run.checkpoint.manifest)
+
+    sentence_score_threshold = _verified_sentence_score_threshold(
+        storage, run.checkpoint, output_root.parent,
+    )
+    if sentence_score_threshold is not None and inference_result.get(
+        "sentence_score_threshold"
+    ) != sentence_score_threshold:
+        raise ConflictError("Remote sentence scorer threshold does not match the checkpoint")
 
     rows_by_scope = defaultdict(list)
     for row in inference_result["windows"]:
@@ -1049,6 +1112,7 @@ def _finalize_locked_remote_inference(
                 block_threshold=float(run.decoder_config["block_threshold"]),
                 allow_cross_section=bool(run.decoder_config["allow_cross_section"]),
                 merge_adjacent=bool(run.decoder_config["merge_adjacent"]),
+                sentence_score_threshold=sentence_score_threshold,
             ),
         )
         decoded_by_scope[(document_id, structure_version_id, target_version_id)] = (
@@ -1112,6 +1176,8 @@ def _finalize_locked_remote_inference(
         "decoder_version": DECODER_VERSION,
         "score_kind": score_kind,
     }
+    run.status = "succeeded"
+    run.completed_at = datetime.now(UTC)
     db.commit()
     db.refresh(run)
     return run
@@ -1159,7 +1225,9 @@ def execute_inference_run(
             run_id=run.id,
             backend=selected_backend,
         )
-    if run.status == "succeeded":
+    if run.status == "succeeded" or (
+        run.status == "running" and run.metrics.get("remote_result_ready")
+    ):
         return finalize_remote_inference(
             db,
             storage,

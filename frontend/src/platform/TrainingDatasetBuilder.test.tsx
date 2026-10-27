@@ -22,6 +22,21 @@ const preview: TrainingPreview = { ready: true, issues: [], source_counts: [{ da
 beforeEach(() => { vi.clearAllMocks(); sessionStorage.clear(); mocks.preview.mockResolvedValue(preview); });
 afterEach(cleanup);
 describe("TrainingDatasetBuilder", () => {
+  it("uses submitted annotations from an open round", async () => {
+    const user = userEvent.setup();
+    render(<TrainingDatasetBuilder projectId={7} data={{ ...data, rounds: [{ ...completedRound(9, 11), status: "open" }] }} onImport={vi.fn()} onCreated={async () => undefined} onCancel={vi.fn()} />);
+    await user.click(screen.getByLabelText("Use project annotations"));
+    expect(screen.getByRole<HTMLSelectElement>("combobox", { name: "Labels from" }).value).toBe("round:9");
+  });
+  it("asks trainers for published labels instead of selecting an unauthorized round", async () => {
+    const user = userEvent.setup();
+    render(<TrainingDatasetBuilder projectId={7} data={{ ...data, rounds: [completedRound(9, 11)] }} canUseRoundAnnotations={false} onImport={vi.fn()} onCreated={async () => undefined} onCancel={vi.fn()} />);
+    await user.click(screen.getByLabelText("Use project annotations"));
+    expect(screen.getByText(/Ask a manager to publish a label set/)).toBeTruthy();
+    expect(screen.queryByRole("option", { name: /Submitted annotations/ })).toBeNull();
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Preview training dataset" }).disabled).toBe(true);
+    expect(mocks.preview).not.toHaveBeenCalled();
+  });
   it("maps the selected task's fields and preserves the reviewed preview on a retry", async () => {
     const user = userEvent.setup(); mocks.prepare.mockRejectedValueOnce(new Error("Try again")).mockResolvedValue({ training_dataset_version: { id: 33, name: "Prepared", version_number: 1 } });
     render(<TrainingDatasetBuilder projectId={7} data={data} onImport={vi.fn()} onCreated={async () => undefined} onCancel={vi.fn()} />);

@@ -906,8 +906,8 @@ export function getInvitePreview(token: string): Promise<InvitePreview> {
 export async function acceptInvite(
   token: string,
   payload: InviteAcceptPayload = {},
-): Promise<void> {
-  await request<{ authenticated: boolean }>(
+): Promise<{ authenticated: boolean; workspace_id: number }> {
+  const accepted = await request<{ authenticated: boolean; workspace_id: number }>(
     "/invites/accept",
     {
       method: "POST",
@@ -919,6 +919,7 @@ export async function acceptInvite(
   );
   if (payload.username && payload.password) publishSessionChange(true);
   else publishMembershipChange();
+  return accepted;
 }
 
 export function listWorkspaceJoinRequests(

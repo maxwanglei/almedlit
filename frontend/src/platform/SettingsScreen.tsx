@@ -285,7 +285,7 @@ export default function SettingsScreen({
         </dl>
       </PlatformSection>
 
-      <PlatformSection
+      {data.projectModules.effective.includes("train") ? <PlatformSection
         title="Training defaults"
         description="These defaults prefill project-linked workflows; a Trainer may still choose another available runtime or policy."
       >
@@ -338,7 +338,7 @@ export default function SettingsScreen({
             />
           </div>
         </div>
-      </PlatformSection>
+      </PlatformSection> : null}
       <ConfirmDialog
         open={moduleToDisable !== null}
         title="Disable project module?"

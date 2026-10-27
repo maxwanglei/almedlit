@@ -1,8 +1,8 @@
 from collections.abc import Generator
 
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Session, SessionTransaction, sessionmaker
 
 from al_medlit.core.config import settings
 
@@ -11,10 +11,14 @@ class Base(DeclarativeBase):
     pass
 
 
-# PostgreSQL is the production target. SQLite is only used in the unit-test
-# fixture (tests/conftest.py), which builds its own engine — so we don't need
-# SQLite-specific connect_args here.
-engine = create_engine(settings.database_url, echo=settings.echo_sql)
+engine = create_engine(settings.database_url, echo=settings.echo_sql, pool_pre_ping=True)
+
+if engine.dialect.name == "sqlite":
+    @event.listens_for(engine, "connect")
+    def _enable_sqlite_foreign_keys(connection, _record) -> None:
+        cursor = connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
@@ -25,6 +29,17 @@ def get_db() -> Generator[Session, None, None]:
         yield db
     finally:
         db.close()
+
+
+def begin_savepoint(db: Session) -> SessionTransaction:
+    """Create a savepoint that participates in the caller's outer transaction."""
+    connection = db.connection()
+    if (
+        connection.dialect.name == "sqlite"
+        and not connection.connection.driver_connection.in_transaction
+    ):
+        connection.exec_driver_sql("BEGIN")
+    return db.begin_nested()
 
 
 def register_models() -> None:

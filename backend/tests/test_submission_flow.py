@@ -204,9 +204,10 @@ def test_new_versions_allow_a_fresh_assignment_round_and_scoped_snapshot(
         headers=alice_headers,
     ).json()
     assert first_annotation["guideline_version_id"] == first_guideline["id"]
-    finalized = client.patch(
-        f"{assignment_url}/{first_assignment['id']}",
-        json={"status": "submitted"},
+    finalized = client.post(
+        f"/api/projects/{project['id']}/documents/{document['id']}/submissions",
+        json={"assignment_id": first_assignment["id"], "annotator_id": "alice"},
+        headers=alice_headers,
     )
     assert finalized.status_code == 200, finalized.text
 
@@ -306,9 +307,10 @@ def test_open_assignment_keeps_its_version_pin_until_the_round_is_finalized(
     assert premature_round.status_code == 409
     assert "current assignment round" in premature_round.json()["detail"]
 
-    finalized = client.patch(
-        f"{assignment_url}/{ctx['assignment']['id']}",
-        json={"status": "submitted"},
+    finalized = client.post(
+        f"/api/projects/{ctx['project']['id']}/documents/{ctx['document']['id']}/submissions",
+        json={"assignment_id": ctx["assignment"]["id"], "annotator_id": "alice"},
+        headers=alice_headers,
     )
     assert finalized.status_code == 200, finalized.text
     next_round = client.post(

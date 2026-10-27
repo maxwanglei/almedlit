@@ -58,7 +58,9 @@ def annotation_progress(
                 models.RoundAnnotationDecision.project_id == project_id,
                 models.RoundItem.project_id == project_id,
                 models.DatasetItem.project_id == project_id,
-                models.RoundAnnotationDecision.decision_kind.in_(("annotation", "correction")),
+                models.RoundAnnotationDecision.decision_kind.in_(
+                    ("annotation", "correction", "adjudication")
+                ),
             )
             .all()
         )

@@ -76,3 +76,9 @@ model_types.register_builtin_descriptors()
 register_builtin_conventional_model_types(model_types)
 register_builtin_neural_model_types(model_types)
 register_builtin_peft_model_types(model_types)
+
+from al_medlit.training.model_types.evidence_block_sentence_tagger.plugin import (  # noqa: E402
+    register_builtin_model_type,
+)
+
+register_builtin_model_type(model_types)

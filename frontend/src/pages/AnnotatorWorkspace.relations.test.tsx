@@ -166,7 +166,8 @@ interface ScopeCommit {
   pickerVisible: boolean;
 }
 
-function Harness({ initialDocumentId = 1, onCommit = () => undefined, busy = false, constrained = false, allowReverse = false }: {
+function Harness({ initialDocumentId = 1, onCommit = () => undefined, busy = false, constrained = false, allowReverse = false, overlapping = false }: {
+  overlapping?: boolean;
   allowReverse?: boolean;
   busy?: boolean;
   constrained?: boolean;
@@ -177,6 +178,9 @@ function Harness({ initialDocumentId = 1, onCommit = () => undefined, busy = fal
   const [annotations, setAnnotations] = useState<Annotation[]>(constrained ? [
     ...initialAnnotations.map((item) => item.id === 102 ? { ...item, label: "Drug" } : item),
     { ...initialAnnotations[0], id: 301, annotation_type: "relation", label: "Associated", start_offset: null, end_offset: null, text_span: null, head_annotation_id: 101, tail_annotation_id: 102 },
+  ] : overlapping ? [
+    ...initialAnnotations, span(103, 1, 0, 10),
+    { ...initialAnnotations[0], id: 301, annotation_type: "relation", label: "Associated", start_offset: null, end_offset: null, text_span: null, head_annotation_id: 103, tail_annotation_id: 102 },
   ] : initialAnnotations);
   const workspaceTasks = constrained ? [entityTask, { ...relationTask, settings: { relation_constraints: { Associated: { head: allowReverse ? ["Disease", "Drug"] : ["Disease"], tail: allowReverse ? ["Disease", "Drug"] : ["Drug"] } } } }] : tasks;
   const documentItem = documents.find((item) => item.id === documentId)!;
@@ -309,6 +313,20 @@ it("keeps content-relative relation arcs stable without rendering on scroll", ()
   fireEvent.scroll(reader, { target: { scrollTop: 200 } });
   expect(onCommit).not.toHaveBeenCalled();
   expect(container.querySelector(".aw-arc-hit")!.getAttribute("d")).toBe(path);
+});
+
+it("selects nested outer spans and keeps their relation arcs after another segment changes", () => {
+  const { container } = render(<Harness overlapping />);
+  expect(container.querySelectorAll(".aw-arc-hit")).toHaveLength(1);
+  const outer = screen.getAllByRole("button", { name: "Select Disease annotation 103" })[0];
+  if (!outer) throw new Error("The outer annotation must be selectable");
+  fireEvent.click(outer);
+  fireEvent.click(screen.getByRole("menuitem", { name: "Start relation from here" }));
+  expect(screen.getByText(/Linking from/)).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Select Disease annotation 102" }));
+  expect(screen.getByRole("menu", { name: "Relation labels" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Refresh without source" }));
+  expect(container.querySelectorAll(".aw-arc-hit")).toHaveLength(1);
 });
 
 it("does not offer a direction swap that violates endpoint constraints", async () => {

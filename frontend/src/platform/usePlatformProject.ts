@@ -13,6 +13,7 @@ import {
   type FeedbackScoringDraft,
   type PlatformLoadScope,
   type RoundDraft,
+  type RoundCreationProgress,
   type TaskDraft,
 } from "./api";
 import { useResourceCreation } from "./useResourceCreation";
@@ -53,7 +54,7 @@ export function usePlatformProject(
   } | null>(null);
   const loadRequestIdRef = useRef(0);
   const mutationRequestIdRef = useRef(0);
-  const roundCreation = useRef<{ contextKey: string; requestKey: string; roundId: number } | null>(null);
+  const roundCreation = useRef<{ contextKey: string; intentId: string; draftKey: string; progress: RoundCreationProgress } | null>(null);
   const rolesKey = effectiveRoles?.join(",") ?? "";
   const contextKey = `${enabled}:${workspaceId ?? "none"}:${projectId ?? "none"}:${scope}:${rolesKey}`;
   const loading = enabled && projectId !== null && workspaceId !== null &&
@@ -200,18 +201,28 @@ export function usePlatformProject(
     reload,
     addDataset: (draft) => mutate(() => resourceCreation.createDataset(draft)),
     addRound: (draft) => mutate(async (id) => {
-      const requestKey = JSON.stringify(draft);
-      const previous = roundCreation.current;
+      const draftKey = JSON.stringify(draft);
+      let attempt = roundCreation.current;
+      if (attempt?.contextKey !== contextKey || attempt.intentId !== draft.creationIntentId || attempt.draftKey !== draftKey) {
+        attempt = { contextKey, intentId: draft.creationIntentId, draftKey, progress: { selectionRunId: null, selectionSetVersionId: null, roundId: null } };
+        roundCreation.current = attempt;
+      }
       try {
-        if (previous?.contextKey === contextKey && previous.requestKey === requestKey) {
-          const saved = await getAnnotationRound(previous.roundId);
-          if (saved.status === "draft") await transitionRound(id, saved.id, "open");
-          else if (saved.status !== "open") throw new Error("This saved round is no longer a draft. Review it in Team & Rounds.");
-        } else {
-          await createRound(id, draft, (round) => {
-            roundCreation.current = { contextKey, requestKey, roundId: round.id };
-          });
+        if (attempt.progress.roundId !== null) {
+          const saved = await getAnnotationRound(attempt.progress.roundId);
+          if (saved.status === "draft") {
+            await transitionRound(id, saved.id, "open");
+            roundCreation.current = null;
+            return;
+          }
+          if (saved.status === "open") {
+            roundCreation.current = null;
+            return;
+          }
+          throw new Error("This round creation attempt is already closed or cancelled. Open a new round form to create another round.");
         }
+        const progress = attempt.progress;
+        await createRound(id, draft, (round) => { progress.roundId = round.id; }, progress);
         roundCreation.current = null;
       } catch (caught) {
         if (roundCreation.current?.contextKey === contextKey) await reload();

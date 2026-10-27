@@ -220,7 +220,6 @@ def _resolve_user_for_assignment(
 
     if not user.is_active:
         raise ValidationError("Assignee user must be active")
-
     if project.workspace_id is None:
         raise ValidationError("Project is not assigned to a workspace")
     member = (
@@ -521,7 +520,12 @@ def read_projects(db: Session, projects: Iterable[Project]) -> list[ProjectRead]
 
 
 def update_project(db: Session, project_id: int, data: ProjectUpdate) -> Project:
-    project = _get_required_project(db, project_id)
+    project = (
+        db.query(Project).filter(Project.id == project_id)
+        .populate_existing().with_for_update().first()
+    )
+    if project is None:
+        raise NotFoundError("Project not found")
     updates = data.model_dump(exclude_unset=True)
 
     if updates.get("name") is None and "name" in updates:
@@ -847,8 +851,9 @@ def ensure_personal_project_self_assignments(
     workspace = workspace_service.require_workspace(db, project.workspace_id)
     if workspace.kind != "individual":
         return []
-    if not user.is_active:
-        raise ValidationError("Assignee user must be active")
+    user = db.get(User, workspace.created_by)
+    if user is None or not user.is_active:
+        return []
     if workspace_service.get_member(db, workspace.id, user.id) is None:
         raise ValidationError("Assignee must be a member of the project workspace")
     project = (
@@ -944,6 +949,25 @@ def ensure_personal_project_self_assignments(
             active_targets_by_task[target.task_id].append(target)
             if target.active_version_id is not None:
                 logical_target_by_version[target.active_version_id] = target.id
+
+    for assignment in db.query(TaskAssignment).filter(
+        TaskAssignment.project_id == project_id,
+        TaskAssignment.assignee_user_id == user.id,
+        TaskAssignment.task_id.in_(evidence_task_ids),
+        TaskAssignment.document_id.in_(document_id_values),
+        TaskAssignment.status == "assigned",
+        TaskAssignment.target_version_id.is_not(None),
+    ).all():
+        logical_id = _logical_target_id_for_version(db, assignment.target_version_id)
+        active_ids = {
+            target.active_version_id
+            for target in active_targets_by_task[assignment.task_id]
+        }
+        if assignment.target_version_id not in active_ids and not (
+            _assignment_has_persisted_work(db, assignment)
+        ):
+            assignment.status = "withdrawn"
+            open_rounds.discard((assignment.task_id, assignment.document_id, logical_id))
 
     active_guideline = guideline_service.get_active_guideline(db, project_id)
     for task in tasks:
@@ -1170,6 +1194,10 @@ def update_task_assignment(
         # prevents API updates from reopening or moving it into another state.
         "withdrawn": 4,
     }
+    if next_status in {"submitted", "adjudication_ready", "adjudicated", "completed"} and (
+        assignment.status not in final_status_order
+    ):
+        raise ValidationError("Finalize task work through its submission workflow")
     if assignment.status in final_status_order and next_status is not None:
         if (assignment.status == "withdrawn" and next_status != "withdrawn") or (
             assignment.status != "withdrawn" and next_status == "withdrawn"

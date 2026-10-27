@@ -103,6 +103,16 @@ def _validate_relation_targets(
             "Referenced annotations must belong to the same project and document: "
             f"{mismatched_list}"
         )
+    if any(
+        target is not None
+        and target.source == "human"
+        and target.status != "gold"
+        and target.annotator_user_id != values.get("annotator_user_id")
+        for target in targets.values()
+    ):
+        raise annotation_types.AnnotationValidationError(
+            "Referenced annotations must belong to the same annotator"
+        )
     version_mismatched = [
         field
         for field, target in targets.items()
@@ -518,6 +528,7 @@ def update_annotation(
         )
     merged_values = {
         "project_id": annotation.project_id,
+        "annotator_user_id": annotation.annotator_user_id,
         "document_id": annotation.document_id,
         "annotation_type": annotation.annotation_type,
         "label": annotation.label,

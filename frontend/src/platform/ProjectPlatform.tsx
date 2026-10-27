@@ -200,7 +200,11 @@ export default function ProjectPlatform({
           projectTasks={project.tasks}
           onOpenDocumentTask={openDocumentTask}
           data={data}
-          onCreateRound={() => onDialogChange("round")}
+          onCreateRound={(feedbackSetId) => {
+            if (feedbackSetId) onNavigate(`/projects/${project.id}/rounds?feedbackSetId=${feedbackSetId}`);
+            else if (params.has("feedbackSetId")) onNavigate(`/projects/${project.id}/rounds`);
+            onDialogChange("round");
+          }}
           onCreateTask={() => onDialogChange("task")}
           onSetupTask={canManageAnnotation ? setupTask : undefined}
           onOpenRound={onOpenRound}
@@ -224,7 +228,11 @@ export default function ProjectPlatform({
         <AnnotateScreen
           view="rounds"
           data={data}
-          onCreateRound={() => onDialogChange("round")}
+          onCreateRound={(feedbackSetId) => {
+            if (feedbackSetId) onNavigate(`/projects/${project.id}/rounds?feedbackSetId=${feedbackSetId}`);
+            else if (params.has("feedbackSetId")) onNavigate(`/projects/${project.id}/rounds`);
+            onDialogChange("round");
+          }}
           onCreateTask={() => onDialogChange("task")}
           onOpenRound={onOpenRound}
           currentUserId={currentUserId}

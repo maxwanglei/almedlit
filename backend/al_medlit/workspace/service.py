@@ -388,6 +388,27 @@ def remove_member(
         assignment.metadata_ = metadata
         assignment.status = "withdrawn"
 
+    from al_medlit.administration.service import (
+        _unassign_user_annotation_rounds,
+    )
+    from al_medlit.workflow.models import AnnotationRound, ReviewCase
+
+    project_ids = db.query(Project.id).filter(Project.workspace_id == workspace_id)
+    round_ids = [round_id for (round_id,) in db.query(AnnotationRound.id).filter(
+        AnnotationRound.project_id.in_(project_ids),
+        AnnotationRound.status.in_(("draft", "open")),
+    ).all()]
+    _unassign_user_annotation_rounds(
+        db, annotation_round_ids=round_ids, user_id=user_id,
+        actor_user_id=actor_user_id, now=datetime.now(UTC),
+    )
+    for case in db.query(ReviewCase).filter(
+        ReviewCase.project_id.in_(project_ids),
+        ReviewCase.assigned_to_user_id == user_id,
+        ReviewCase.status != "resolved",
+    ).order_by(ReviewCase.id).with_for_update().all():
+        case.assigned_to_user_id = None
+
     removed_role = member.role
     db.delete(member)
     _record_admin_event(
@@ -680,6 +701,8 @@ def accept_invite(
             accepting_user.id,
             role=locked_invite.role,
         )
+    elif ROLE_RANK[locked_invite.role] > ROLE_RANK[member.role]:
+        member.role = locked_invite.role
     locked_invite.accepted_at = datetime.now(UTC)
     locked_invite.accepted_by = accepting_user.id
     _record_admin_event(

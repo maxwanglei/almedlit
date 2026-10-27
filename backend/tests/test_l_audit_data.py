@@ -212,7 +212,7 @@ def test_new_version_of_task_keeps_prepared_holdouts(client, db):
     assert protected_dataset_item_ids(db, items, second.json()["id"]) == expected
 
 
-def test_source_progress_excludes_cancelled_and_adjudication_and_scopes_task(
+def test_source_progress_excludes_cancelled_counts_adjudication_and_scopes_task(
     db, workflow_scope, workflow_data
 ):
     from sqlalchemy import update
@@ -236,7 +236,7 @@ def test_source_progress_excludes_cancelled_and_adjudication_and_scopes_task(
         .values(decision_kind="adjudication")
     )
     db.commit()
-    assert annotation_progress(db, scope.project.id)[0]["submitted"] == 0
+    assert annotation_progress(db, scope.project.id)[0]["submitted"] == 1
     db.execute(
         update(models.RoundAnnotationDecision)
         .where(models.RoundAnnotationDecision.id == decision.id)
@@ -274,7 +274,7 @@ def test_co_learning_uses_authenticated_actor_and_bounds_legacy_fields(client):
     url = f"/api/co-learning/error-guideline/patterns/{pattern.json()['id']}/draft-guideline-atom"
     atom = client.post(url, json={"manager_id": "someone-else"})
     assert atom.status_code == 200, atom.text
-    assert atom.json()["approved_by"] == actor
+    assert atom.json()["approved_by"] is None
     approved = client.post(
         f"/api/co-learning/error-guideline/guideline-atoms/{atom.json()['id']}/approve",
         json={"approved_by": "spoofed"},

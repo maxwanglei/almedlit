@@ -3,7 +3,11 @@ from typing import Self
 
 from pydantic import BaseModel, Field, model_validator
 
-from al_medlit.auth.schemas import ActionTokenRequest, validate_public_password
+from al_medlit.auth.schemas import ActionTokenRequest, SessionResponse, validate_public_password
+
+
+class InviteAcceptanceResponse(SessionResponse):
+    workspace_id: int
 
 
 class WorkspaceCreate(BaseModel):

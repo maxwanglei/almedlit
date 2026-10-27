@@ -914,7 +914,7 @@ def test_merge_split_and_adjudication_gold_is_read_only(client, db):
     )
 
 
-def test_team_adjudication_requires_two_matching_reviewed_annotators(client):
+def test_team_adjudication_requires_two_matching_reviewed_annotators(client, db):
     ctx = _setup_evidence_project(client, "evidence-team-adjudication")
     project_id = ctx["project"]["id"]
     document_id = ctx["document"]["id"]
@@ -981,11 +981,8 @@ def test_team_adjudication_requires_two_matching_reviewed_annotators(client):
         f"/api/projects/{project_id}/assignments"
     ).json()
     for assignment in assignments:
-        finalized = client.patch(
-            f"/api/projects/{project_id}/assignments/{assignment['id']}",
-            json={"status": "submitted"},
-        )
-        assert finalized.status_code == 200, finalized.text
+        db.get(TaskAssignment, assignment["id"]).status = "submitted"
+    db.commit()
 
     adjudication_url = (
         f"/api/projects/{project_id}/documents/{document_id}/evidence-adjudication"
@@ -1120,9 +1117,9 @@ def _setup_reviewed_adjudication_labels(client):
             headers={"Authorization": f"Bearer {client._token_for(username)}"},
         )
         assert reviewed.status_code == 200, reviewed.text
-        finalized = client.patch(
-            f"/api/projects/{project_id}/assignments/{assignment.json()['id']}",
-            json={"status": "submitted"},
+        finalized = client.post(
+            f"/api/projects/{project_id}/documents/{document_id}/submissions",
+            json={"assignment_id": assignment.json()["id"], "annotator_id": username},
         )
         assert finalized.status_code == 200, finalized.text
     return ctx, {
@@ -1453,12 +1450,25 @@ def test_evidence_iaa_scores_only_shared_reviewed_coverage(client, db):
             "markdown": "Replacement guidance.",
         },
     ).json()
+    unsubmitted = iaa_service.compute_iaa(
+        db, project_id=ctx["project"]["id"], annotation_type="evidence_block",
+        document_id=ctx["document"]["id"], target_version_id=ctx["version"]["id"],
+        structure_version_id=ctx["structure"]["structure_version"]["id"],
+        guideline_version_id=ctx["guideline"]["id"],
+    )
+    assert unsubmitted.status == "insufficient_annotators"
     for assignment in db.query(TaskAssignment).filter(
         TaskAssignment.project_id == ctx["project"]["id"],
         TaskAssignment.target_version_id == ctx["version"]["id"],
-    ):
-        assignment.guideline_version_id = replacement_guideline["id"]
-    db.commit()
+    ).all():
+        assert assignment.guideline_version_id == ctx["guideline"]["id"]
+        submitted = client.post(
+            f"/api/projects/{ctx['project']['id']}/documents/{ctx['document']['id']}/submissions",
+            json={"assignment_id": assignment.id, "annotator_id": assignment.annotator_id},
+        )
+        assert submitted.status_code == 200, submitted.text
+    assert replacement_guideline["id"] != ctx["guideline"]["id"]
+
 
     report = iaa_service.compute_iaa(
         db,
@@ -1573,11 +1583,8 @@ def test_submitted_evidence_assignment_and_foreign_evidence_are_read_only(
         headers=alice_headers,
     ).json()
     command_key = spanning["evidence_block"]["last_command_group_key"]
-    submitted = client.patch(
-        f"/api/projects/{ctx['project']['id']}/assignments/{assignment['id']}",
-        json={"status": "submitted"},
-    )
-    assert submitted.status_code == 200, submitted.text
+    db.get(TaskAssignment, assignment["id"]).status = "submitted"
+    db.commit()
 
     evidence_payload = _block_payload(ctx, 0, 1)["evidence_block"]
     mutation_responses = [

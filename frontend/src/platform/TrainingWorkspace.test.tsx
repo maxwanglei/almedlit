@@ -1017,6 +1017,27 @@ it("loads the next runs page with the applied filters while edits remain unappli
   await waitFor(() => expect(mocks.listWorkspaceTrainingRuns).toHaveBeenLastCalledWith(5,
     { projectId: undefined, limit: 50, cursor: 151 }, baseProps.projects));
 });
+
+it("preserves run filters and pagination through project store updates", async () => {
+  const user = userEvent.setup();
+  mocks.listWorkspaceTrainingRuns.mockResolvedValue({ items: [workspaceRun(151, 7, "Baseline")], next_cursor: 151 });
+  const mounted = render(<TrainingWorkspace {...baseProps} view="runs" />);
+  await screen.findByText("Baseline");
+  await user.selectOptions(screen.getByLabelText("Status"), "failed");
+  mounted.rerender(<TrainingWorkspace {...baseProps} projects={[...baseProps.projects]} view="runs" />);
+  expect(screen.getByRole<HTMLSelectElement>("combobox", { name: "Status" }).value).toBe("failed");
+  expect(mocks.listWorkspaceTrainingRuns).toHaveBeenCalledOnce();
+  expect(screen.getByRole("button", { name: "Load more" })).toBeTruthy();
+  mounted.rerender(<TrainingWorkspace {...baseProps} view="runs" initialProjectId={7} />);
+  await waitFor(() => expect(mocks.listWorkspaceTrainingRuns).toHaveBeenLastCalledWith(5, expect.objectContaining({ projectId: 7, status: "failed" }), baseProps.projects));
+});
+
+it("offers cancellation of another creator's active run to an authorized manager", async () => {
+  mocks.listWorkspaceTrainingRuns.mockResolvedValue({ items: [{ ...workspaceRun(151, 7, "Other creator"), created_by_user_id: 99, status: "running" }], next_cursor: null });
+  render(<TrainingWorkspace {...baseProps} view="runs" canCancelAnyRun />);
+  await screen.findByText("Other creator");
+  expect(screen.getByRole("button", { name: "Cancel" })).toBeTruthy();
+});
 it("navigates the data project picker with a fresh project URL", async () => {
   const user = userEvent.setup();
   const nextProject = { ...otherProject, workspace_id: 5 };

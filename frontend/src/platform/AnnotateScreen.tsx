@@ -31,7 +31,7 @@ export default function AnnotateScreen({
 }: {
   view: "tasks" | "rounds";
   data: PlatformProjectData;
-  onCreateRound: () => void;
+  onCreateRound: (feedbackSetId?: number) => void;
   onCreateTask: () => void;
   projectTasks?: ProjectTask[];
   onOpenDocumentTask?: (task: ProjectTask) => void;
@@ -247,6 +247,7 @@ export default function AnnotateScreen({
           data={data}
           onCreate={onCreateScore}
           onRefresh={onRefresh}
+          onCreateRound={canManage ? onCreateRound : undefined}
         />
       ) : null}
     </div>

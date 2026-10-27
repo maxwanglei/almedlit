@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from al_medlit.auth.dependencies import get_current_user
 from al_medlit.auth.models import User
+from al_medlit.auth.tenancy import assert_project_member
 from al_medlit.core.database import get_db
 from al_medlit.core.exceptions import ForbiddenError
 from al_medlit.training.recipe_contracts import RecipeConfigurationValidation
@@ -249,10 +250,27 @@ def create_training_run(
     )
     training_run = service.create_training_run(db, payload, current_user)
     if training_run.status == "queued":
-        enqueue_training_run(
-            training_run.id,
-            environment_class=training_run.runtime_snapshot["environment_class"],
-        )
+        try:
+            enqueue_training_run(
+                training_run.id,
+                environment_class=training_run.runtime_snapshot["environment_class"],
+            )
+        except Exception as exc:
+            db.rollback()
+            training_run = service.lock_training_run_for_mutation(db, training_run.id)
+            if training_run.status == "queued":
+                training_run = service.transition_training_run(
+                    db,
+                    training_run.project_id,
+                    training_run.id,
+                    schemas.TrainingRunTransition(
+                        status="failed",
+                        failure_code="broker_dispatch_failed",
+                        failure_reason=str(exc)[:4000] or "Training dispatch failed",
+                    ),
+                )
+            else:
+                db.rollback()
     return training_run
 
 
@@ -356,8 +374,13 @@ def transition_training_run(
         project_id,
         training_run_id,
     )
-    if training_run.created_by_user_id != current_user.id and not current_user.is_superuser:
-        raise ForbiddenError("Users may cancel only their own training runs")
+    member = assert_project_member(db, current_user, project_id)
+    if (
+        training_run.created_by_user_id != current_user.id
+        and not current_user.is_superuser
+        and member.role not in {"manager", "admin"}
+    ):
+        raise ForbiddenError("Trainers may cancel only their own training runs")
     return service.transition_training_run(
         db,
         project_id,

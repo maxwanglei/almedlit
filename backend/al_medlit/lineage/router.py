@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from al_medlit.auth.dependencies import get_current_user
 from al_medlit.auth.models import User
-from al_medlit.auth.tenancy import assert_project_member
+from al_medlit.auth.tenancy import assert_project_member, lock_project_member_for_mutation
 from al_medlit.core.database import get_db
 from al_medlit.core.exceptions import NotFoundError
 from al_medlit.core.storage import ObjectStorage, get_object_storage
@@ -32,7 +32,9 @@ def create_corpus_snapshot(
     db: Session = Depends(get_db),
     storage: ObjectStorage = Depends(get_object_storage),
 ):
-    assert_project_member(db, current_user, project_id, min_role="manager")
+    lock_project_member_for_mutation(
+        db, current_user, project_id, min_role="manager", lock_workspace=True
+    )
     enforce_capability(db, project_id=project_id, key="lineage")
     return service.freeze_corpus_snapshot(
         db,
@@ -87,7 +89,9 @@ def create_annotation_set(
     db: Session = Depends(get_db),
     storage: ObjectStorage = Depends(get_object_storage),
 ):
-    assert_project_member(db, current_user, project_id, min_role="manager")
+    lock_project_member_for_mutation(
+        db, current_user, project_id, min_role="manager", lock_workspace=True
+    )
     enforce_capability(db, project_id=project_id, key="lineage")
     return service.freeze_annotation_set(
         db,

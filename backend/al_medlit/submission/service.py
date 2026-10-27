@@ -205,6 +205,14 @@ def create_submission(
             candidate.status in OPEN_ASSIGNMENT_STATUSES for candidate in actor_assignments
         ):
             raise ConflictError("All task assignments for this document are finalized")
+        mutable_assignments = [
+            candidate for candidate in actor_assignments
+            if candidate.status in OPEN_ASSIGNMENT_STATUSES
+        ]
+        if len(mutable_assignments) > 1:
+            raise ValidationError("assignment_id is required when multiple tasks are open")
+        if mutable_assignments:
+            assignment = mutable_assignments[0]
 
     snapshot = build_snapshot(
         db,

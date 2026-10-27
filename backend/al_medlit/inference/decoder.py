@@ -71,10 +71,16 @@ class DecoderConfig:
     block_threshold: float = 0.5
     allow_cross_section: bool = False
     merge_adjacent: bool = False
+    sentence_score_threshold: float | None = None
 
     def __post_init__(self) -> None:
         if not 0 <= self.block_threshold <= 1:
             raise DecoderError("block_threshold must be between zero and one")
+        if (
+            self.sentence_score_threshold is not None
+            and not 0 <= self.sentence_score_threshold <= 1
+        ):
+            raise DecoderError("sentence_score_threshold must be between zero and one")
 
 
 def aggregate_window_logits(
@@ -130,19 +136,27 @@ def decode_evidence_blocks(
     decoded_sentences: list[DecodedSentence] = []
     previous_label: Literal["O", "B", "I"] = "O"
     previous_section: tuple[str, ...] | None = None
+    previous_ordinal: int | None = None
     for sentence in ordered:
         aggregated = aggregated_logits.get(sentence.ordinal)
         if aggregated is None:
             raise DecoderError(f"Missing aggregated logits for sentence {sentence.ordinal}")
         raw_index = max(range(3), key=lambda index: aggregated.probabilities[index])
         raw_label = LABELS[raw_index]
-        section_break = (
-            previous_section is not None and sentence.section_path != previous_section
-        )
+        section_break = previous_section is not None and sentence.section_path != previous_section
         effective_previous = (
-            "O" if section_break and not selected_config.allow_cross_section else previous_label
+            "O"
+            if (
+                (section_break and not selected_config.allow_cross_section)
+                or (previous_ordinal is not None and sentence.ordinal != previous_ordinal + 1)
+            )
+            else previous_label
         )
-        decoded_label = "B" if raw_label == "I" and effective_previous == "O" else raw_label
+        if selected_config.sentence_score_threshold is not None:
+            positive = sum(aggregated.probabilities[1:]) >= selected_config.sentence_score_threshold
+            decoded_label = ("I" if effective_previous != "O" else "B") if positive else "O"
+        else:
+            decoded_label = "B" if raw_label == "I" and effective_previous == "O" else raw_label
         decoded_sentences.append(
             DecodedSentence(
                 id=sentence.id,
@@ -156,6 +170,7 @@ def decode_evidence_blocks(
         )
         previous_label = decoded_label
         previous_section = sentence.section_path
+        previous_ordinal = sentence.ordinal
 
     index_by_ordinal = {item.ordinal: index for index, item in enumerate(ordered)}
     decoded_by_ordinal = {item.ordinal: item for item in decoded_sentences}
@@ -165,13 +180,17 @@ def decode_evidence_blocks(
         if decoded.decoded_label == "O":
             if active:
                 candidates.append(
-                    _make_block(active, ordered, index_by_ordinal, decoded_by_ordinal)
+                    _make_block(
+                        active, ordered, index_by_ordinal, decoded_by_ordinal, selected_config
+                    )
                 )
                 active = []
         elif decoded.decoded_label == "B":
             if active:
                 candidates.append(
-                    _make_block(active, ordered, index_by_ordinal, decoded_by_ordinal)
+                    _make_block(
+                        active, ordered, index_by_ordinal, decoded_by_ordinal, selected_config
+                    )
                 )
             active = [decoded]
         else:
@@ -180,10 +199,17 @@ def decode_evidence_blocks(
             else:
                 active.append(decoded)
     if active:
-        candidates.append(_make_block(active, ordered, index_by_ordinal, decoded_by_ordinal))
+        candidates.append(
+            _make_block(active, ordered, index_by_ordinal, decoded_by_ordinal, selected_config)
+        )
 
     if selected_config.merge_adjacent:
-        candidates = _merge_adjacent_blocks(candidates)
+        candidates = _merge_adjacent_blocks(
+            candidates,
+            sections={item.ordinal: item.section_path for item in ordered}
+            if not selected_config.allow_cross_section
+            else None,
+        )
     emitted = tuple(
         block for block in candidates if block.confidence >= selected_config.block_threshold
     )
@@ -202,19 +228,27 @@ def _make_block(
     source_sentences: Sequence[SentenceDecodingInput],
     index_by_ordinal: Mapping[int, int],
     decoded_by_ordinal: Mapping[int, DecodedSentence],
+    config: DecoderConfig,
 ) -> DecodedBlock:
     first = active[0]
     last = active[-1]
     first_source = source_sentences[index_by_ordinal[first.ordinal]]
     last_source = source_sentences[index_by_ordinal[last.ordinal]]
     class_probabilities = [
-        _decoded_probability(sentence, "B" if index == 0 else "I")
+        sum(sentence.probabilities[1:])
+        if config.sentence_score_threshold is not None
+        else _decoded_probability(sentence, "B" if index == 0 else "I")
         for index, sentence in enumerate(active)
     ]
     next_index = index_by_ordinal[last.ordinal] + 1
     if next_index < len(source_sentences):
         next_ordinal = source_sentences[next_index].ordinal
-        end_confidence = 1.0 - decoded_by_ordinal[next_ordinal].probabilities[2]
+        next_probabilities = decoded_by_ordinal[next_ordinal].probabilities
+        end_confidence = 1.0 - (
+            sum(next_probabilities[1:])
+            if config.sentence_score_threshold is not None
+            else next_probabilities[2]
+        )
     else:
         end_confidence = 1.0
     return DecodedBlock(
@@ -225,7 +259,7 @@ def _make_block(
         start_char=first_source.start_char,
         end_char=last_source.end_char,
         confidence=sum(class_probabilities) / len(class_probabilities),
-        start_confidence=_decoded_probability(first, "B"),
+        start_confidence=class_probabilities[0],
         end_confidence=end_confidence,
         uncertainty=sum(item.entropy for item in active) / len(active),
         sentence_ordinals=tuple(item.ordinal for item in active),
@@ -243,13 +277,20 @@ def _decoded_probability(
     return sentence.probabilities[1 if label == "B" else 2]
 
 
-def _merge_adjacent_blocks(blocks: Sequence[DecodedBlock]) -> list[DecodedBlock]:
+def _merge_adjacent_blocks(
+    blocks: Sequence[DecodedBlock],
+    *,
+    sections: dict[int, tuple[str, ...]] | None = None,
+) -> list[DecodedBlock]:
     if not blocks:
         return []
     merged = [blocks[0]]
     for block in blocks[1:]:
         previous = merged[-1]
-        if previous.end_ordinal + 1 != block.start_ordinal:
+        if previous.end_ordinal + 1 != block.start_ordinal or (
+            sections is not None
+            and sections[previous.end_ordinal] != sections[block.start_ordinal]
+        ):
             merged.append(block)
             continue
         previous_length = len(previous.sentence_ordinals)

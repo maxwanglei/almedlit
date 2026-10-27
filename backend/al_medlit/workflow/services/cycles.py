@@ -201,7 +201,19 @@ def transition_learning_cycle(
         )
         if (
             output_training_dataset.task_version_id != cycle.task_version_id
-            or output_training_dataset.dataset_version_id != cycle.source_dataset_version_id
+            or (
+                output_training_dataset.dataset_version_id != cycle.source_dataset_version_id
+                and not (
+                    (output_training_dataset.preparation_manifest or {}).get("kind")
+                    == "training_preparation_v1"
+                    and any(
+                        source.get("dataset_version_id") == cycle.source_dataset_version_id
+                        for source in (
+                            output_training_dataset.preparation_manifest.get("sources", [])
+                        )
+                    )
+                )
+            )
         ):
             raise ValidationError(
                 "Cycle output training data must use the pinned task and dataset versions"

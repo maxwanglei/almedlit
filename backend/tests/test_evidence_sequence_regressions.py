@@ -11,6 +11,7 @@ from test_evidence_windowing import _sentences, _target
 from test_inference_window_limits import _inference_bundle
 
 from al_medlit.inference.decoder import (
+    DecoderConfig,
     SentenceDecodingInput,
     aggregate_window_logits,
     decode_evidence_blocks,
@@ -67,7 +68,11 @@ def test_binary_inference_preserves_block_across_windows(
     runner.run_inference_job(path)
     windows = json.loads((tmp_path / "outputs/inference-result.json").read_text())["windows"]
     assert len(windows) > 1
-    assert {int(k) for w in windows for k, v in w["logits"].items() if v == [0, 1, 0]} == {0}
+    assert {
+        int(k) for w in windows for k, values in w["logits"].items() if values[1] > 0
+    } == {0}
+    assert all(sum(values[1:]) == pytest.approx(0.9)
+               for w in windows for values in w["logits"].values())
     aggregated = aggregate_window_logits(
         [{int(key): value for key, value in window["logits"].items()} for window in windows],
         score_kind="probabilities",
@@ -78,6 +83,7 @@ def test_binary_inference_preserves_block_across_windows(
             for i in range(8)
         ],
         aggregated,
+        DecoderConfig(sentence_score_threshold=predictor.config.sentence_score_threshold),
     )
     assert [(block.start_ordinal, block.end_ordinal) for block in decoded.blocks] == [(0, 7)]
 

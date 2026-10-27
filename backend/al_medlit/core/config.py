@@ -1,3 +1,4 @@
+import os
 import tempfile
 from pathlib import Path
 from typing import Literal
@@ -129,15 +130,15 @@ class Settings(BaseSettings):
             )
 
     def validate_bootstrap_admin_password(self, *, require_configured: bool = False) -> None:
-        password = self.bootstrap_admin_password.strip()
-        if not password:
+        password = self.bootstrap_admin_password
+        if not password.strip():
             if require_configured:
                 raise RuntimeError(
                     "AL_MEDLIT_BOOTSTRAP_ADMIN_PASSWORD must be set before creating "
                     "the bootstrap admin"
                 )
             return
-        if password in FORBIDDEN_BOOTSTRAP_ADMIN_PASSWORDS:
+        if password.strip() in FORBIDDEN_BOOTSTRAP_ADMIN_PASSWORDS:
             raise RuntimeError(
                 "AL_MEDLIT_BOOTSTRAP_ADMIN_PASSWORD must not use a known default value"
             )
@@ -162,6 +163,11 @@ class Settings(BaseSettings):
         self.validate_storage_transport()
 
         if self.storage_backend == "minio":
+            root_password = os.environ.get("MINIO_ROOT_PASSWORD")
+            if root_password is not None:
+                if root_password.strip().lower() in FORBIDDEN_DEPLOYMENT_SECRETS:
+                    raise RuntimeError("MINIO_ROOT_PASSWORD must not use a placeholder value")
+                _validate_deployment_password(root_password, "MINIO_ROOT_PASSWORD")
             secret = self.storage_secret_key.strip()
             if secret.lower() in FORBIDDEN_DEPLOYMENT_SECRETS:
                 raise RuntimeError(

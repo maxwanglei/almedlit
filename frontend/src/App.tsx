@@ -429,6 +429,7 @@ function Application(): React.ReactElement {
   const sessionGenerationRef = useRef(0);
   const pendingWorkspaceSwitchRef = useRef(false);
   const requestedWorkspaceRef = useRef<{ userId: number; workspaceId: number } | null>(null);
+  const acceptedInviteWorkspaceRef = useRef<number | null>(null);
   const pathname = normalizePathname(location.pathname);
   const inviteToken = inviteTokenFromPath(location.pathname, location.hash);
   const accountActionToken = accountActionTokenFromPath(location.pathname, location.hash);
@@ -817,8 +818,8 @@ function Application(): React.ReactElement {
         }
         const selectedMembership = preferredMembership(
           me.memberships,
-          requestedWorkspaceRef.current?.userId === me.user.id
-            ? requestedWorkspaceRef.current.workspaceId : readPreferredWorkspaceId(me.user.id),
+          acceptedInviteWorkspaceRef.current ?? (requestedWorkspaceRef.current?.userId === me.user.id
+            ? requestedWorkspaceRef.current.workspaceId : readPreferredWorkspaceId(me.user.id)),
         );
         const workspaceId = selectedMembership?.workspace_id ?? null;
         let effectiveCapabilities: string[] = [];
@@ -843,6 +844,7 @@ function Application(): React.ReactElement {
         setCaps(effectiveCapabilities);
         setBlockedCaps(blockedCapabilities);
         requestedWorkspaceRef.current = null;
+        acceptedInviteWorkspaceRef.current = null;
         if (
           pendingWorkspaceSwitchRef.current ||
           isEntryPath(window.location.pathname)
@@ -1512,7 +1514,11 @@ function Application(): React.ReactElement {
       <AcceptInvitePage
         token={inviteToken}
         signedIn={authed && sessionReady}
-        onAccepted={() => {
+        onAccepted={(workspaceId) => {
+          acceptedInviteWorkspaceRef.current = workspaceId;
+          pendingWorkspaceSwitchRef.current = true;
+          setSessionReady(false);
+          setSessionRetryAttempt((attempt) => attempt + 1);
           setJustRegistered(false);
           setOnboarded(true);
           navigatePath("/", "replace");
@@ -1802,6 +1808,7 @@ function Application(): React.ReactElement {
                 busy={platform.busy}
                 currentUserId={currentUserId}
                 isPersonalWorkspace={activeWorkspaceIsIndividual}
+                initialFeedbackSetVersionId={positiveInteger(routeSearch.get("feedbackSetId") ?? undefined)}
                 onClose={() => setPlatformDialog(null)}
                 onCreateDataset={platform.addDataset}
                 onCreateRound={platform.addRound}
@@ -1850,6 +1857,7 @@ function Application(): React.ReactElement {
         canCreateTrainingProject={canPerform(access, "projects:create")}
         canCreateTask={canPerform(access, "tasks:manage")}
         canProvisionRuntimes={canPerform(access, "runtime:provision")}
+        canCancelAnyRun={access.isSuperuser || access.effectiveRoles.some((role) => role === "manager" || role === "admin")}
         onNavigate={navigatePath}
         onProjectCreated={(project) => {
           replaceProject(project);
@@ -2050,7 +2058,7 @@ function Application(): React.ReactElement {
             navigatePath("/projects");
             return;
           }
-          navigatePath(`/projects/${selectedProjectId}/${tab}`);
+          navigatePath(`/projects/${selectedProjectId}/${tab === "documents" ? "data" : tab}`);
         }}
         onOpenRound={(nextRoundId) =>
           navigatePath(`/my-work/rounds/${nextRoundId}?view=annotate`)

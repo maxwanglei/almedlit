@@ -201,3 +201,18 @@ def test_minio_sse_kms_requires_and_applies_the_configured_key(monkeypatch):
 
     assert storage.encryption_key_id == "models-key"
     assert type(storage.client.put_kwargs["sse"]).__name__ == "SseKMS"
+
+
+@pytest.mark.parametrize(
+    ("prefix", "expected"),
+    [
+        ("models", {"models/checkpoint", "models-backup/checkpoint"}),
+        ("models/", {"models/checkpoint"}),
+        ("", {"models/checkpoint", "models-backup/checkpoint", "other/model"}),
+    ],
+)
+def test_inventory_matches_object_key_prefix_when_directory_exists(tmp_path, prefix, expected):
+    storage = LocalObjectStorage(tmp_path / "objects")
+    for key in ["models/checkpoint", "models-backup/checkpoint", "other/model"]:
+        storage.put_bytes(key, b"model")
+    assert {item.key for item in storage.list_objects(prefix)} == expected

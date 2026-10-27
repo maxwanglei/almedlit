@@ -286,7 +286,25 @@ class EvidenceBlockWindowBuilder:
                 fitting_blocks.append(block)
         report.block_length_distribution = dict(block_lengths)
 
-        ranges = self._base_ranges(materialized, usable_tokens)
+        excluded_ordinals = {
+            sentence.ordinal
+            for sentence in materialized
+            if any(
+                block.id in excluded_block_ids
+                and block.start_ordinal <= sentence.ordinal <= block.end_ordinal
+                for block in gold_blocks
+            )
+        }
+        ranges = []
+        for start, end in self._base_ranges(materialized, usable_tokens):
+            segment_start = start
+            for index in range(start, end):
+                if materialized[index].ordinal in excluded_ordinals:
+                    if segment_start < index:
+                        ranges.append((segment_start, index))
+                    segment_start = index + 1
+            if segment_start < end:
+                ranges.append((segment_start, end))
         range_records: list[tuple[int, int, int | None]] = [
             (start, end, None) for start, end in ranges
         ]
@@ -297,9 +315,15 @@ class EvidenceBlockWindowBuilder:
                 for start, end, _ in range_records
             ):
                 continue
-            range_records.append(
-                (*self._supplemental_range(materialized, block, usable_tokens), block.id)
-            )
+            start, end = self._supplemental_range(materialized, block, usable_tokens)
+            for index in range(start, end):
+                if materialized[index].ordinal in excluded_ordinals:
+                    if materialized[index].ordinal < block.start_ordinal:
+                        start = index + 1
+                    else:
+                        end = index
+                        break
+            range_records.append((start, end, block.id))
 
         deduplicated: dict[tuple[int, int], int | None] = {}
         for start, end, supplemental_id in range_records:

@@ -34,7 +34,10 @@ from al_medlit.model_artifacts.router import router as model_artifact_router
 from al_medlit.project.router import router as project_router
 from al_medlit.storage_reclaim.maintenance import run_reclaim_loop
 from al_medlit.submission.router import router as submission_router
-from al_medlit.training.maintenance import run_training_reconciliation_loop
+from al_medlit.training.maintenance import (
+    run_eager_scheduled_maintenance,
+    run_training_reconciliation_loop,
+)
 from al_medlit.workflow.router import router as workflow_router
 from al_medlit.workspace import router as workspace_routes
 
@@ -49,6 +52,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         [
             asyncio.create_task(run_reclaim_loop()),
             asyncio.create_task(run_training_reconciliation_loop()),
+            asyncio.create_task(run_eager_scheduled_maintenance()),
         ]
         if settings.celery_task_always_eager
         else []

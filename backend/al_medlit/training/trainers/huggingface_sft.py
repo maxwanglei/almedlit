@@ -241,6 +241,8 @@ class _HuggingFaceSftTrainer:
                 add_special_tokens=True,
                 truncation=False,
             )["input_ids"]
+            if prompt_ids and prompt_ids[-1] == tokenizer.eos_token_id:
+                prompt_ids = prompt_ids[:-1]
             completion_ids = tokenizer(
                 completion,
                 add_special_tokens=False,

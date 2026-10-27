@@ -144,7 +144,7 @@ def test_window_score_kind_follows_producer_dispatch(manifest, score_kind):
 def test_finalize_decodes_one_hot_labels_without_softmax(db, object_storage, tmp_path):
     scope = _inference_scope(
         db,
-        checkpoint_manifest={"model_type": "evidence_svm"},
+        checkpoint_manifest={"model_type": "evidence_crf"},
         decoder_config={**DECODER_CONFIG, "block_threshold": 0.9},
         with_window=False,
     )
@@ -476,3 +476,164 @@ def test_remote_cancellation_uses_the_scheduler_backend(db, monkeypatch):
     assert cancelled_jobs == ["slurm:123"]
     assert run.status == "cancelled"
     assert run.completed_at is not None
+
+
+def _sentence_scorer_checkpoint(tmp_path, storage, *, model_type, threshold):
+    archive = tmp_path / "sentence-scorer.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr(
+            "checkpoint/al-medlit-conventional.json",
+            json.dumps(
+                {
+                    "schema_version": conventional.MODEL_SCHEMA_VERSION,
+                    "model_type": model_type,
+                    "config": {"sentence_score_threshold": threshold},
+                }
+            ),
+        )
+    return storage.put_file("checkpoints/sentence-scorer.zip", archive)
+
+
+@pytest.mark.parametrize("model_type", ["evidence_svm", "evidence_random_forest"])
+@pytest.mark.parametrize(
+    ("score", "threshold", "positive"),
+    [
+        (0.7, 0.8, False),
+        (0.4, 0.3, True),
+        (0.5, 0.5, True),
+    ],
+)
+def test_local_sentence_scorer_respects_verified_predictor_threshold(
+    db,
+    object_storage,
+    tmp_path,
+    monkeypatch,
+    model_type,
+    score,
+    threshold,
+    positive,
+):
+    predictor = SimpleNamespace(
+        produces_sentence_scores=True,
+        config=SimpleNamespace(sentence_score_threshold=threshold),
+    )
+    monkeypatch.setattr(conventional, "load_conventional_model", lambda root: predictor)
+    monkeypatch.setattr(conventional, "actual_token_count", lambda model, text: len(text.split()))
+    monkeypatch.setattr(conventional, "predict_window", lambda model, **kwargs: [score, 0, 0, 0])
+    scope = _inference_scope(
+        db,
+        checkpoint_manifest={"model_type": model_type},
+        checkpoint_object=_sentence_scorer_checkpoint(
+            tmp_path,
+            object_storage,
+            model_type=model_type,
+            threshold=threshold,
+        ),
+        window_config=WINDOW_CONFIG,
+        decoder_config={**DECODER_CONFIG, "block_threshold": 0},
+        run_status="queued",
+        with_window=False,
+    )
+    run = execution.execute_local_inference(
+        db,
+        object_storage,
+        run_id=scope.run.id,
+        work_root=tmp_path / "work",
+    )
+    candidates = _candidates(db, run.id)
+    assert _spans(candidates) == ([(0, 0)] if positive else [])
+    if positive:
+        assert candidates[0].block_confidence == pytest.approx(score)
+        assert candidates[0].uncertainty > 0
+
+
+@pytest.mark.parametrize("model_type", ["evidence_svm", "evidence_random_forest"])
+def test_remote_sentence_scorer_pins_metadata_and_preserves_probability(
+    db,
+    object_storage,
+    tmp_path,
+    monkeypatch,
+    model_type,
+):
+    from al_medlit.training.runner import run_inference_job
+
+    scope = _inference_scope(
+        db,
+        checkpoint_manifest={"model_type": model_type},
+        checkpoint_object=_sentence_scorer_checkpoint(
+            tmp_path,
+            object_storage,
+            model_type=model_type,
+            threshold=0.3,
+        ),
+        window_config=WINDOW_CONFIG,
+        decoder_config={**DECODER_CONFIG, "block_threshold": 0},
+        with_window=False,
+    )
+    bundle = execution.build_inference_bundle(
+        db,
+        object_storage,
+        run_id=scope.run.id,
+        backend=SimpleNamespace(render_sbatch_script=lambda bundle: "#!/bin/sh\n"),
+        work_root=tmp_path / "work",
+    )
+    job_path = bundle.local_bundle_path / "job.json"
+    assert json.loads(job_path.read_text())["checkpoint"]["sentence_score_threshold"] == 0.3
+    predictor = SimpleNamespace(
+        produces_sentence_scores=True,
+        config=SimpleNamespace(sentence_score_threshold=0.3),
+    )
+    monkeypatch.setattr(conventional, "load_conventional_model", lambda root: predictor)
+    monkeypatch.setattr(conventional, "actual_token_count", lambda model, text: len(text.split()))
+    monkeypatch.setattr(
+        conventional, "predict_window", lambda model, **kwargs: [0.4, 0.2, 0.1, 0.1]
+    )
+    run_inference_job(job_path)
+    inference_result = json.loads(
+        (bundle.local_bundle_path / "outputs/inference-result.json").read_text(),
+    )
+    assert inference_result["sentence_score_threshold"] == 0.3
+    run = _finalize(db, object_storage, tmp_path, scope, inference_result)
+    candidates = _candidates(db, run.id)
+    assert _spans(candidates) == [(0, 0)]
+    assert candidates[0].block_confidence == pytest.approx(0.4)
+    assert candidates[0].boundary_confidence["end"] == pytest.approx(0.8)
+    assert candidates[0].uncertainty > 0
+
+
+@pytest.mark.parametrize("reported_threshold", [None, 0.5])
+def test_remote_sentence_scorer_rejects_unverified_threshold(
+    db,
+    object_storage,
+    tmp_path,
+    reported_threshold,
+):
+    from al_medlit.core.exceptions import ConflictError
+
+    scope = _inference_scope(
+        db,
+        checkpoint_manifest={"model_type": "evidence_svm"},
+        checkpoint_object=_sentence_scorer_checkpoint(
+            tmp_path,
+            object_storage,
+            model_type="evidence_svm",
+            threshold=0.8,
+        ),
+        decoder_config={**DECODER_CONFIG, "block_threshold": 0},
+        with_window=False,
+    )
+    result = _runner_result(
+        scope,
+        {
+            "window-0": {
+                0: [0.3, 0.7, 0],
+                1: [0.9, 0.1, 0],
+                2: [1, 0, 0],
+                3: [1, 0, 0],
+            }
+        },
+    )
+    result["sentence_score_threshold"] = reported_threshold
+    with pytest.raises(ConflictError, match="threshold does not match"):
+        _finalize(db, object_storage, tmp_path, scope, result)
+    assert not _candidates(db, scope.run.id)

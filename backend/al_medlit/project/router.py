@@ -6,6 +6,7 @@ from al_medlit.auth.models import User
 from al_medlit.auth.tenancy import (
     assert_workspace_member,
     has_assignment_bypass,
+    lock_project_member_for_mutation,
     require_project_access,
 )
 from al_medlit.core.database import get_db
@@ -42,6 +43,11 @@ def create_project(
         workspace_id = workspace_service.ensure_default_workspace(db).id
         payload = payload.model_copy(update={"workspace_id": workspace_id})
     assert_workspace_member(db, current_user, workspace_id, min_role="manager")
+    db.query(User).filter(User.id == current_user.id).populate_existing().with_for_update().one()
+    workspace_service.lock_workspace_for_update(db, workspace_id)
+    workspace_service.require_actor_role_after_workspace_lock(
+        db, workspace_id, actor_user_id=current_user.id, minimum_role="manager"
+    )
     return service.read_projects(db, [service.create_project(db, payload)])[0]
 
 
@@ -118,8 +124,12 @@ def update_project(
     project_id: int,
     payload: ProjectUpdate,
     _member=Depends(require_project_access(min_role="manager")),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    lock_project_member_for_mutation(
+        db, current_user, project_id, min_role="manager", lock_workspace=True
+    )
     return service.read_projects(
         db, [service.update_project(db, project_id, payload)]
     )[0]
@@ -143,6 +153,9 @@ def create_project_task(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    lock_project_member_for_mutation(
+        db, current_user, project_id, min_role="manager", lock_workspace=True
+    )
     task = service.create_project_task(db, project_id, payload)
     service.ensure_personal_project_self_assignments(
         db,
@@ -163,6 +176,9 @@ def update_project_task(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    lock_project_member_for_mutation(
+        db, current_user, project_id, min_role="manager", lock_workspace=True
+    )
     task = service.update_project_task(db, project_id, task_id, payload)
     service.ensure_personal_project_self_assignments(
         db,
@@ -179,8 +195,12 @@ def delete_project_task(
     project_id: int,
     task_id: int,
     _member=Depends(require_project_access(min_role="manager")),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    lock_project_member_for_mutation(
+        db, current_user, project_id, min_role="manager", lock_workspace=True
+    )
     service.delete_project_task(db, project_id, task_id)
 
 
@@ -229,6 +249,9 @@ def create_task_assignment(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    lock_project_member_for_mutation(
+        db, current_user, project_id, min_role="manager", lock_workspace=True
+    )
     return service.create_task_assignment(
         db,
         project_id,
@@ -246,8 +269,12 @@ def update_task_assignment(
     assignment_id: int,
     payload: TaskAssignmentUpdate,
     _member=Depends(require_project_access(min_role="manager")),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    lock_project_member_for_mutation(
+        db, current_user, project_id, min_role="manager", lock_workspace=True
+    )
     return service.update_task_assignment(db, project_id, assignment_id, payload)
 
 
@@ -278,8 +305,12 @@ def delete_task_assignment(
     project_id: int,
     assignment_id: int,
     _member=Depends(require_project_access(min_role="manager")),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    lock_project_member_for_mutation(
+        db, current_user, project_id, min_role="manager", lock_workspace=True
+    )
     service.delete_task_assignment(db, project_id, assignment_id)
 
 

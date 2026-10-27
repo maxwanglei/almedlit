@@ -3,14 +3,18 @@ from datetime import UTC, datetime
 from io import BytesIO
 from uuid import uuid4
 
-from sqlalchemy import and_, or_, select, tuple_
+from sqlalchemy import and_, literal, or_, select, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from al_medlit.annotation.models import Annotation
 from al_medlit.auth.models import User
-from al_medlit.auth.tenancy import resource_access_clause
-from al_medlit.core.exceptions import ConflictError, NotFoundError, ValidationError
+from al_medlit.auth.tenancy import (
+    assert_project_member,
+    has_assignment_bypass,
+    resource_access_clause,
+)
+from al_medlit.core.exceptions import ConflictError, ForbiddenError, NotFoundError, ValidationError
 from al_medlit.core.storage import ObjectStorage
 from al_medlit.corpus.models import Document, DocumentSentence
 from al_medlit.evidence import service as evidence_service
@@ -25,19 +29,25 @@ from al_medlit.inference.models import (
 )
 from al_medlit.inference.schemas import (
     EvidenceCandidatePredictionRead,
+    InferenceCheckpointCreate,
+    InferenceComputeProfileCreate,
     InferenceRunCreate,
     InferenceRunRead,
     InferenceRunSummaryRead,
     PredictionReviewCreate,
     PredictionReviewRead,
 )
-from al_medlit.lineage.models import CorpusSnapshot
+from al_medlit.lineage.models import CorpusSnapshot, CorpusSnapshotDocument
 from al_medlit.lineage.service import (
     add_lineage_edge,
     canonical_json_bytes,
     register_stored_artifact,
 )
-from al_medlit.model_artifacts.models import ArtifactPackageRetention, BaseModelAsset
+from al_medlit.model_artifacts.models import (
+    ArtifactPackage,
+    ArtifactPackageRetention,
+    BaseModelAsset,
+)
 from al_medlit.project.models import Project, ProjectTask, TaskAssignment
 from al_medlit.training.compute.base import ComputeBackend, JobBundle, JobState
 from al_medlit.training.compute_profiles import build_compute_backend
@@ -50,11 +60,129 @@ from al_medlit.training.windowing import (
     WindowBuildError,
     WindowSentenceInput,
 )
+from al_medlit.workspace.models import WorkspaceMember
 
 OPEN_RUN_STATUSES = {"queued", "submitted", "running"}
 TERMINAL_RUN_STATUSES = {"succeeded", "failed", "cancelled"}
 DEFAULT_CANDIDATE_PAGE_SIZE = 100
 MAX_CANDIDATE_PAGE_SIZE = 500
+
+
+def create_inference_compute_profile(
+    db: Session,
+    *,
+    project_id: int,
+    data: InferenceComputeProfileCreate,
+    actor_user_id: int,
+) -> ComputeProfile:
+    from pydantic import ValidationError as SchemaValidationError
+
+    from al_medlit.training.compute.config import SSHSlurmProfileConfig
+
+    if data.backend == "local":
+        if data.config:
+            raise ValidationError("Local inference profiles do not accept infrastructure config")
+        config = {}
+    else:
+        try:
+            config = SSHSlurmProfileConfig.model_validate(data.config).model_dump(mode="json")
+        except SchemaValidationError as exc:
+            raise ValidationError("Invalid SSH/Slurm inference profile configuration") from exc
+    existing = db.query(ComputeProfile).filter(
+        ComputeProfile.project_id == project_id,
+        ComputeProfile.name == data.name,
+    ).one_or_none()
+    if existing is not None:
+        if existing.backend != data.backend or existing.config != config:
+            raise ConflictError("Inference compute profile name already exists with other settings")
+        return existing
+    profile = ComputeProfile(
+        project_id=project_id, name=data.name, backend=data.backend,
+        config=config, created_by_user_id=actor_user_id,
+    )
+    db.add(profile)
+    db.commit()
+    return profile
+
+
+def register_inference_checkpoint(
+    db: Session,
+    *,
+    project_id: int,
+    data: InferenceCheckpointCreate,
+) -> ModelCheckpoint:
+    from al_medlit.training.model_types.catalog import builtin_model_descriptors
+
+    package = db.get(ArtifactPackage, data.artifact_package_id)
+    if package is None or package.project_id != project_id:
+        raise NotFoundError("Model package not found in project")
+    retention = (
+        db.query(ArtifactPackageRetention)
+        .filter(ArtifactPackageRetention.package_id == package.id)
+        .populate_existing().with_for_update().one_or_none()
+    )
+    if (
+        package.readiness != "ready" or not package.deployable
+        or retention is None or retention.archived_at is not None
+        or retention.purged_at is not None
+    ):
+        raise ValidationError("Inference checkpoint requires an available deployable package")
+    descriptor = next(
+        (item for item in builtin_model_descriptors() if item.key == package.model_type), None,
+    )
+    if descriptor is None or descriptor.task_type != "evidence_block_sentence_tagging":
+        raise ValidationError("Model package does not declare a supported evidence model type")
+    contract = package.task_contract
+    if contract.get("task_contract_key", contract.get("key")) != "evidence_blocks":
+        raise ValidationError("Model package does not implement the evidence-block task contract")
+    targets = sorted(set(data.target_version_ids))
+    if len(targets) != len(data.target_version_ids):
+        raise ValidationError("Target versions must be unique")
+    if data.training_mode == "per_target" and len(targets) != 1:
+        raise ValidationError("Per-target checkpoints require exactly one target version")
+    count = db.query(EvidenceTargetVersion).join(EvidenceTargetVersion.target).filter(
+        EvidenceTargetVersion.id.in_(targets),
+        EvidenceTargetVersion.target.has(project_id=project_id),
+    ).count()
+    if count != len(targets):
+        raise ValidationError("Checkpoint targets must belong to this project")
+    metadata = package.metadata_ or {}
+    declared_targets = metadata.get(
+        "trained_target_version_ids", contract.get("target_version_ids"),
+    )
+    if (
+        not isinstance(declared_targets, list)
+        or any(not isinstance(value, int) or isinstance(value, bool) for value in declared_targets)
+        or sorted(declared_targets) != targets
+    ):
+        raise ValidationError("Checkpoint targets must match the immutable package provenance")
+    declared_mode = metadata.get("training_mode", contract.get("training_mode"))
+    if declared_mode != data.training_mode:
+        raise ValidationError("Checkpoint mode must match the immutable package provenance")
+    declared_context = metadata.get("max_context_tokens", contract.get("max_context_tokens"))
+    if (
+        not isinstance(declared_context, int) or isinstance(declared_context, bool)
+        or data.max_context_tokens > declared_context
+    ):
+        raise ValidationError("Checkpoint context exceeds the immutable package contract")
+    existing = db.query(ModelCheckpoint).filter(ModelCheckpoint.package_id == package.id).first()
+    if existing is not None:
+        if (
+            existing.training_mode != data.training_mode
+            or existing.trained_target_version_ids != targets
+            or existing.max_context_tokens != data.max_context_tokens
+        ):
+            raise ConflictError("Package checkpoint already exists with another contract")
+        return existing
+    checkpoint = ModelCheckpoint(
+        project_id=project_id, training_job_id=None, artifact_id=package.lineage_artifact_id,
+        package_id=package.id, model_type=package.model_type, training_mode=data.training_mode,
+        trained_target_version_ids=targets, max_context_tokens=data.max_context_tokens,
+        manifest={**package.manifest, "model_type": package.model_type}, readiness="ready",
+    )
+    db.add(checkpoint)
+    db.commit()
+    return checkpoint
 
 
 def _find_inference_run_by_idempotency_key(
@@ -91,6 +219,17 @@ def launch_inference_run(
     snapshot = db.get(CorpusSnapshot, data.corpus_snapshot_id)
     if snapshot is None or snapshot.project_id != project_id:
         raise NotFoundError("Corpus snapshot not found in project")
+    if actor_user_id is not None:
+        actor = db.get(User, actor_user_id)
+        member = assert_project_member(db, actor, project_id)
+        protected_document = db.query(CorpusSnapshotDocument.id).filter(
+            CorpusSnapshotDocument.document_id.in_(
+                [item.document_id for item in snapshot.documents],
+            ),
+            CorpusSnapshotDocument.split == "test",
+        ).first()
+        if not has_assignment_bypass(actor, member) and protected_document is not None:
+            raise ForbiddenError("Protected test documents cannot be used for item-level inference")
     checkpoint = db.get(ModelCheckpoint, data.checkpoint_id)
     if checkpoint is None or checkpoint.project_id != project_id:
         raise NotFoundError("Model checkpoint not found in project")
@@ -119,6 +258,18 @@ def launch_inference_run(
     profile = db.get(ComputeProfile, data.compute_profile_id)
     if profile is None or profile.project_id != project_id or profile.status != "active":
         raise ValidationError("Compute profile is not active in project")
+    if profile.backend == "local" and not synthetic_smoke:
+        from al_medlit.training.model_types.catalog import get_builtin_model_descriptor
+
+        try:
+            descriptor = get_builtin_model_descriptor(checkpoint.model_type)
+        except KeyError as exc:
+            raise ValidationError("Checkpoint model type has no supported local runtime") from exc
+        if descriptor.availability.missing_dependencies:
+            raise ValidationError(
+                "Install this model's worker runtime before local inference: "
+                + ", ".join(descriptor.capabilities.required_worker_dependencies)
+            )
     if checkpoint.model_type in {"evidence_lora", "evidence_qlora"}:
         resolve_peft_base_model_asset(db, checkpoint)
         if checkpoint.model_type == "evidence_qlora" and not quantization_profile_ready(profile):
@@ -231,6 +382,8 @@ def materialize_inference_windows(
     *,
     run_id: int,
     token_counter,
+    commit: bool = True,
+    persist: bool = True,
 ) -> list[InferenceWindow]:
     run = get_inference_run(db, run_id)
     config = WindowBuilderConfig(
@@ -295,10 +448,13 @@ def materialize_inference_windows(
                 )
                 created.append(model)
                 existing_keys.add(window.id)
+    if not persist:
+        return [*run.windows, *created]
     db.add_all(created)
-    db.commit()
-    for window in created:
-        db.refresh(window)
+    db.flush()
+    db.expire(run, ["windows"])
+    if commit:
+        db.commit()
     return list(run.windows)
 
 
@@ -425,7 +581,11 @@ def store_inference_diagnostics(
 ) -> int:
     run = get_inference_run(db, run_id)
     compressed = gzip.compress(canonical_json_bytes(diagnostics), mtime=0)
-    key = f"projects/{run.project_id}/inference/{run.id}/{uuid4().hex}-diagnostics.json.gz"
+    workspace_id = db.get(Project, run.project_id).workspace_id
+    key = (
+        f"workspaces/{workspace_id}/inference/{run.id}/"
+        f"{uuid4().hex}-diagnostics.json.gz"
+    )
     stored = storage.put_stream(
         key,
         BytesIO(compressed),
@@ -503,6 +663,10 @@ def reconcile_inference_run(
     if run.external_job_id is None or run.status not in OPEN_RUN_STATUSES:
         return run
     _apply_run_state(run, backend.poll(run.external_job_id))
+    if run.status == "succeeded" and run.compute_profile.backend == "ssh_slurm":
+        run.status = "running"
+        run.completed_at = None
+        run.metrics = {**run.metrics, "remote_result_ready": True}
     db.commit()
     db.refresh(run)
     return run
@@ -607,6 +771,14 @@ def list_candidates(
         raise ValidationError("Candidate page offset cannot be negative")
     if status not in {None, "pending", "accepted", "modified", "rejected"}:
         raise ValidationError("Unknown candidate review status")
+    manager = or_(
+        literal(user.is_superuser),
+        select(WorkspaceMember.id).where(
+            WorkspaceMember.workspace_id == Project.workspace_id,
+            WorkspaceMember.user_id == user.id,
+            WorkspaceMember.role.in_(("manager", "admin")),
+        ).correlate(Project).exists(),
+    )
 
     latest_assignment_id = (
         select(TaskAssignment.id)
@@ -623,6 +795,7 @@ def list_candidates(
             ProjectTask.project_id == EvidenceCandidatePrediction.project_id,
             ProjectTask.annotation_type == "evidence_block",
             ProjectTask.enabled.is_(True),
+            TaskAssignment.status != "withdrawn",
         )
         .order_by(TaskAssignment.id.desc())
         .limit(1)
@@ -653,12 +826,15 @@ def list_candidates(
             EvidenceCandidatePrediction,
             latest_assignment_id.label("review_assignment_id"),
             latest_review_action.label("review_action"),
+            manager.label("manager_access"),
         )
         .options(selectinload(EvidenceCandidatePrediction.reviews))
         .join(Project, Project.id == EvidenceCandidatePrediction.project_id)
         .join(Document, Document.id == EvidenceCandidatePrediction.document_id)
+        .join(InferenceRun, InferenceRun.id == EvidenceCandidatePrediction.run_id)
         .filter(
             EvidenceCandidatePrediction.run_id == run_id,
+            InferenceRun.status == "succeeded",
             resource_access_clause(
                 user,
                 workspace_id=Project.workspace_id,
@@ -670,6 +846,12 @@ def list_candidates(
             ),
         )
     )
+    protected_documents = select(CorpusSnapshotDocument.document_id).where(
+        CorpusSnapshotDocument.split == "test",
+    )
+    query = query.filter(or_(
+        manager, ~EvidenceCandidatePrediction.document_id.in_(protected_documents),
+    ))
     if document_id is not None:
         query = query.filter(EvidenceCandidatePrediction.document_id == document_id)
     if target_version_id is not None:
@@ -680,11 +862,14 @@ def list_candidates(
             "modified": "modify",
             "rejected": "reject",
         }.get(status)
-        query = query.filter(
+        own_status = (
             latest_review_action.is_(None)
-            if status == "pending"
-            else latest_review_action == action
+            if status == "pending" else latest_review_action == action
         )
+        query = query.filter(or_(
+            and_(manager, EvidenceCandidatePrediction.status == status),
+            and_(~manager, own_status),
+        ))
     rows = query.order_by(
         EvidenceCandidatePrediction.document_id,
         EvidenceCandidatePrediction.target_version_id,
@@ -698,9 +883,11 @@ def list_candidates(
         "reject": "rejected",
         None: "pending",
     }
-    for candidate, assignment_id, review_action in rows:
+    for candidate, assignment_id, review_action, manager_access in rows:
         candidate._review_assignment_id = assignment_id
-        candidate.review_status = review_statuses[review_action]
+        candidate.review_status = (
+            candidate.status if manager_access else review_statuses[review_action]
+        )
         candidates.append(candidate)
     return candidates
 
@@ -759,11 +946,14 @@ def candidate_read_for_user(
             "_review_assignment_id",
             _REVIEW_ASSIGNMENT_UNSET,
         )
-    set_candidate_review_status(
-        candidate,
-        reviewer_user_id,
-        assignment_id=assignment_id,
-    )
+    if include_all_reviews:
+        candidate.review_status = candidate.status
+    else:
+        set_candidate_review_status(
+            candidate,
+            reviewer_user_id,
+            assignment_id=assignment_id,
+        )
     result = EvidenceCandidatePredictionRead.model_validate(candidate)
     if not include_all_reviews:
         result.reviews = [
@@ -779,6 +969,18 @@ def candidate_read_for_user(
         for review in result.reviews:
             review.revision = 1
     return result
+
+
+def assert_candidate_visible(
+    db: Session, user: User, member, candidate: EvidenceCandidatePrediction,
+) -> None:
+    if candidate.run.status != "succeeded":
+        raise NotFoundError("Evidence prediction is not available")
+    if not has_assignment_bypass(user, member) and db.query(CorpusSnapshotDocument.id).filter(
+        CorpusSnapshotDocument.document_id == candidate.document_id,
+        CorpusSnapshotDocument.split == "test",
+    ).first() is not None:
+        raise ForbiddenError("Protected test predictions are restricted to managers")
 
 
 def review_prediction(

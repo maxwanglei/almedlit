@@ -118,6 +118,8 @@ function ModelRegistry({
     limit: 50,
   });
   const appliedFilters = useRef(filters);
+  const currentFilters = useRef(filters);
+  currentFilters.current = filters;
   const [page, setPage] = useState<WorkspacePage<WorkspaceModel>>({
     items: [],
     next_cursor: null,
@@ -125,6 +127,9 @@ function ModelRegistry({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const loadRequestIdRef = useRef(0);
+  const projectsRef = useRef(projects);
+  projectsRef.current = projects;
+  const filterWorkspaceRef = useRef(workspaceId);
 
   const load = useCallback(
     async (
@@ -138,7 +143,7 @@ function ModelRegistry({
         const result = await listWorkspaceModels(
           workspaceId,
           nextFilters,
-          projects,
+          projectsRef.current,
         );
         if (requestId !== loadRequestIdRef.current) return;
         appliedFilters.current = nextFilters;
@@ -156,14 +161,17 @@ function ModelRegistry({
         }
       }
     },
-    [projects, workspaceId],
+    [workspaceId],
   );
 
   useEffect(() => {
     const initialFilters = {
+      ...(filterWorkspaceRef.current === workspaceId ? currentFilters.current : {}),
       projectId: initialProjectId ?? undefined,
+      cursor: undefined,
       limit: 50,
     };
+    filterWorkspaceRef.current = workspaceId;
     setFilters(initialFilters);
     setPage({ items: [], next_cursor: null });
     void load(initialFilters);

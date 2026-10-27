@@ -219,7 +219,7 @@ def test_legacy_composition_retains_uploaded_test_documents_when_positional_keys
     assert {text: second_by_text[text] for text in held_out} == {text: "test" for text in held_out}
 
 
-def test_legacy_composition_does_not_apply_other_task_holdouts_to_copied_source(client, db):
+def test_legacy_composition_keeps_task_family_holdouts_in_copied_source(client, db):
     project, task = _legacy_context(client)
     original = _records("source", 5)
     first = _source(client, project, "Original task source", original)
@@ -238,10 +238,10 @@ def test_legacy_composition_does_not_apply_other_task_holdouts_to_copied_source(
         client, db, project, response.json(), second, "Different task training",
     )
     assert held_out
-    assert {second_assignments[key] for key in held_out} == {"train"}
+    assert {second_assignments[key] for key in held_out} == {"test"}
 
 
-def test_legacy_composition_does_not_apply_another_tasks_prepared_holdouts(client, db):
+def test_legacy_composition_keeps_prepared_holdouts_in_new_task_version(client, db):
     project, task, source, labels, prepared, payload, source_splits = _prepared_source(client, db)
     response = client.post("/api/tasks/versions", json={
         "project_id": project["id"],
@@ -270,7 +270,7 @@ def test_legacy_composition_does_not_apply_another_tasks_prepared_holdouts(clien
     })
     assert response.status_code == 201, response.text
     other_split = db.get(models.SplitMap, response.json()["split_map_id"])
-    assert {key for key, split in other_split.assignments.items() if split == "test"} != {
+    assert {key for key, split in other_split.assignments.items() if split == "test"} == {
         key for key, split in source_splits.items() if split == "test"
     }
     update = {

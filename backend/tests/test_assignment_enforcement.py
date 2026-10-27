@@ -1347,9 +1347,9 @@ def test_submission_lists_get_and_download_require_ownership_and_current_access(
 
     # Revoking Alice's only enabled assignment to the document immediately
     # removes access even to her previously-created submission snapshot.
-    db.query(TaskAssignment).filter(TaskAssignment.id == fixture.alice_entity_assignment_id).delete(
-        synchronize_session=False
-    )
+    db.query(TaskAssignment).filter(
+        TaskAssignment.id == fixture.alice_entity_assignment_id
+    ).update({TaskAssignment.status: "withdrawn"}, synchronize_session=False)
     db.commit()
 
     revoked_list = client.get(

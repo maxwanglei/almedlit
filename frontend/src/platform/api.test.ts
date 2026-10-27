@@ -27,7 +27,7 @@ import {
   validateTaskDraft,
   verifyExecutionEnvironment,
 } from "./api";
-import type { DatasetDraft, TaskDraft } from "./api";
+import type { DatasetDraft, TaskDraft, RoundDraft, RoundCreationProgress } from "./api";
 import {
   EMPTY_PLATFORM_PROJECT_DATA,
   type PlatformProjectData,
@@ -90,6 +90,19 @@ beforeEach(() => {
 });
 
 describe("platform API orchestration", () => {
+  it("loads parent collections and pinned metadata for quality round rows", async () => {
+    mocks.request.mockImplementation(async (path: string) => {
+      if (path === "/projects/7/modules") return { project_id: 7, selected: ["data", "annotate", "activity"], effective: ["data", "annotate", "activity"], workspace_capabilities: ["annotation"] };
+      if (path === "/datasets?project_id=7") return [{ id: 21 }];
+      if (path === "/datasets/versions?project_id=7&dataset_id=21") return [{ id: 22, version_number: 3 }];
+      if (path === "/workflow-guidelines?project_id=7") return [{ id: 31 }];
+      if (path === "/workflow-guidelines/revisions?project_id=7&guideline_id=31") return [{ id: 32, version_number: 4 }];
+      return [];
+    });
+    const data = await loadPlatformProject(7, "quality", undefined, ["manager"]);
+    expect(data.datasetVersions).toEqual([{ id: 22, version_number: 3 }]);
+    expect(data.guidelineRevisions).toEqual([{ id: 32, version_number: 4 }]);
+  });
   it.each(["overview", "models"] as const)("loads a models-only project's %s without data routes", async (scope) => {
     mocks.request.mockImplementation(async (path: string) => {
       if (path === "/projects/7/modules") return { project_id: 7, selected: ["models"], effective: ["models"], workspace_capabilities: ["inference"] };
@@ -1113,6 +1126,7 @@ describe("platform API orchestration", () => {
     });
 
     await createRound(7, {
+      creationIntentId: crypto.randomUUID(),
       name: "False-negative review",
       datasetVersionId: 22,
       taskVersionId: 12,
@@ -1165,6 +1179,7 @@ describe("platform API orchestration", () => {
 
     for (let index = 0; index < 2; index += 1) {
       await createRound(7, {
+        creationIntentId: crypto.randomUUID(),
         name: `Random round ${index + 1}`,
         datasetVersionId: 22,
         taskVersionId: 12,
@@ -1189,6 +1204,79 @@ describe("platform API orchestration", () => {
     for (const call of selectionRequests) {
       expect(bodyOf(call)).not.toHaveProperty("seed");
     }
+  });
+
+  it("reuses a materialized selection after round creation fails", async () => {
+    let roundCalls = 0;
+    mocks.request.mockImplementation(async (path: string) => {
+      if (path === "/selection-runs") return { id: 61 };
+      if (path === "/projects/7/selection-runs/61/materialize") return { id: 62 };
+      if (path === "/rounds") {
+        if (++roundCalls === 1) throw new Error("Round service unavailable");
+        return { id: 71 };
+      }
+      if (path === "/rounds/71/transition?project_id=7") return { id: 71, status: "open" };
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    const draft = {
+      creationIntentId: crypto.randomUUID(), name: "Retry round", datasetVersionId: 22, taskVersionId: 12, cycleId: null,
+      splitMapId: 41, guidelineRevisionId: null, feedbackSetVersionId: null,
+      assistancePolicy: "blind", reannotationMode: "targeted_subset", selectionStrategy: "random",
+      selectionLimit: 25, annotatorUserIds: [7], openToAllAnnotators: false, reason: "",
+    } satisfies RoundDraft;
+    const progress: RoundCreationProgress = { selectionRunId: null, selectionSetVersionId: null, roundId: null };
+    await expect(createRound(7, draft, undefined, progress)).rejects.toThrow("Round service unavailable");
+    await createRound(7, draft, undefined, progress);
+    expect(mocks.request.mock.calls.filter(([path]) => path === "/selection-runs")).toHaveLength(1);
+    expect(mocks.request.mock.calls.filter(([path]) => path.includes("/materialize"))).toHaveLength(1);
+    expect(mocks.request.mock.calls.filter(([path]) => path === "/rounds")).toHaveLength(2);
+  });
+
+  it("retries a lost round creation response with the same request key", async () => {
+    let roundCalls = 0;
+    mocks.request.mockImplementation(async (path: string) => {
+      if (path === "/rounds") {
+        if (++roundCalls === 1) throw new Error("Creation response lost");
+        return { id: 71, status: "draft" };
+      }
+      if (path === "/rounds/71/transition?project_id=7") return { id: 71, status: "open" };
+      throw new Error(`Unexpected request: ${path}`);
+    });
+    const draft = {
+      creationIntentId: crypto.randomUUID(), name: "Lost response", datasetVersionId: 22, taskVersionId: 12, cycleId: null,
+      splitMapId: null, guidelineRevisionId: null, feedbackSetVersionId: null,
+      assistancePolicy: "blind", reannotationMode: "full_dataset", selectionStrategy: "all",
+      selectionLimit: 25, annotatorUserIds: [7], openToAllAnnotators: false, reason: "",
+    } satisfies RoundDraft;
+    const progress: RoundCreationProgress = { selectionRunId: null, selectionSetVersionId: null, roundId: null };
+    await expect(createRound(7, draft, undefined, progress)).rejects.toThrow("Creation response lost");
+    expect(progress.roundId).toBeNull();
+    await expect(createRound(7, draft, undefined, progress)).resolves.toMatchObject({ id: 71, status: "open" });
+    const creations = mocks.request.mock.calls.filter(([path]) => path === "/rounds");
+    expect(creations).toHaveLength(2);
+    for (const call of creations) expect(bodyOf(call)).toMatchObject({ request_key: draft.creationIntentId });
+  });
+
+  it("accepts a replayed creation whose round is already open", async () => {
+    mocks.request.mockResolvedValue({ id: 71, status: "open" });
+    await expect(createRound(7, {
+      creationIntentId: crypto.randomUUID(), name: "Already opened", datasetVersionId: 22, taskVersionId: 12, cycleId: null,
+      splitMapId: null, guidelineRevisionId: null, feedbackSetVersionId: null,
+      assistancePolicy: "blind", reannotationMode: "full_dataset", selectionStrategy: "all",
+      selectionLimit: 25, annotatorUserIds: [7], openToAllAnnotators: false, reason: "",
+    })).resolves.toMatchObject({ id: 71, status: "open" });
+    expect(mocks.request).toHaveBeenCalledOnce();
+  });
+
+  it.each(["closed", "cancelled"])("requires a new form when replayed creation is %s", async (status) => {
+    mocks.request.mockResolvedValue({ id: 71, status });
+    await expect(createRound(7, {
+      creationIntentId: crypto.randomUUID(), name: "Terminal round", datasetVersionId: 22, taskVersionId: 12, cycleId: null,
+      splitMapId: null, guidelineRevisionId: null, feedbackSetVersionId: null,
+      assistancePolicy: "blind", reannotationMode: "full_dataset", selectionStrategy: "all",
+      selectionLimit: 25, annotatorUserIds: [7], openToAllAnnotators: false, reason: "",
+    })).rejects.toThrow("Open a new round form");
+    expect(mocks.request).toHaveBeenCalledOnce();
   });
 
   it("validates configuration and pins recipe, model, runtime, and storage at launch", async () => {

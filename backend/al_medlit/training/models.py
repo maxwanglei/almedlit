@@ -200,7 +200,9 @@ class ModelCheckpoint(Base, IntPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "model_checkpoints"
 
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), index=True)
-    training_job_id: Mapped[int] = mapped_column(ForeignKey("training_jobs.id"), index=True)
+    training_job_id: Mapped[int | None] = mapped_column(
+        ForeignKey("training_jobs.id"), nullable=True, index=True,
+    )
     artifact_id: Mapped[int] = mapped_column(
         ForeignKey("lineage_artifacts.id"),
         unique=True,

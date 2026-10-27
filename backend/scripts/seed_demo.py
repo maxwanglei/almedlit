@@ -1,9 +1,13 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from al_medlit.annotation.models import Annotation, AnnotationCorrection
 from al_medlit.annotation.schemas import AnnotationCorrectionCreate, AnnotationCreate
 from al_medlit.annotation.service import create_annotation, create_correction
-from al_medlit.co_learning.error_guideline_learning.events import register_event_handlers
+from al_medlit.co_learning.error_guideline_learning.events import (
+    register_event_handlers,
+    reset_event_session_factory,
+    set_event_session_factory,
+)
 from al_medlit.co_learning.error_guideline_learning.models import (
     ErrorPattern,
     GuidelineAtom,
@@ -15,7 +19,7 @@ from al_medlit.co_learning.error_guideline_learning.service import (
     draft_guideline_atom,
     list_error_patterns,
 )
-from al_medlit.core.database import SessionLocal, ensure_schema_ready
+from al_medlit.core.database import engine, ensure_schema_ready
 from al_medlit.corpus.models import Document
 from al_medlit.corpus.schemas import DocumentCreate
 from al_medlit.corpus.service import create_document
@@ -25,12 +29,17 @@ from al_medlit.guideline.service import create_guideline_version
 from al_medlit.project.models import Project
 from al_medlit.project.schemas import ProjectCreate
 from al_medlit.project.service import create_project
+from al_medlit.workspace.service import ensure_default_workspace
 
 DEMO_PROJECT_NAME = "Drug NER Demo"
 
 
 def _find_existing_demo_project(db: Session) -> Project | None:
-    return db.query(Project).filter(Project.name == DEMO_PROJECT_NAME).first()
+    workspace = ensure_default_workspace(db)
+    return db.query(Project).filter(
+        Project.workspace_id == workspace.id,
+        Project.name == DEMO_PROJECT_NAME,
+    ).first()
 
 
 def _missing_demo_seed_components(db: Session, project_id: int) -> list[str]:
@@ -68,10 +77,7 @@ def _missing_demo_seed_components(db: Session, project_id: int) -> list[str]:
     return [name for name, query in component_queries if query.first() is None]
 
 
-def main() -> None:
-    ensure_schema_ready()
-    register_event_handlers()
-    db = SessionLocal()
+def _seed_demo(db: Session) -> None:
     try:
         existing_project = _find_existing_demo_project(db)
         if existing_project is not None:
@@ -225,6 +231,21 @@ def main() -> None:
         print(f"GuidelineAtom ID: {atom.id}")
     finally:
         db.close()
+
+
+def main() -> None:
+    ensure_schema_ready()
+    register_event_handlers()
+    with engine.begin() as connection:
+        if connection.dialect.name == "sqlite":
+            connection.exec_driver_sql("BEGIN")
+        sessions = sessionmaker(bind=connection, join_transaction_mode="create_savepoint")
+        set_event_session_factory(sessions)
+        try:
+            with sessions() as db:
+                _seed_demo(db)
+        finally:
+            reset_event_session_factory()
 
 
 if __name__ == "__main__":

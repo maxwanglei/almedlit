@@ -29,6 +29,7 @@ interface PlatformDialogProps {
   busy: boolean;
   currentUserId?: number | null;
   isPersonalWorkspace?: boolean;
+  initialFeedbackSetVersionId?: number | null;
   taskPurpose?: "annotation" | "training";
   onClose: () => void;
   onCreateDataset: (draft: DatasetDraft) => Promise<void>;
@@ -57,6 +58,7 @@ export default function PlatformDialog({
   busy,
   currentUserId,
   isPersonalWorkspace = false,
+  initialFeedbackSetVersionId,
   taskPurpose = "annotation",
   onClose,
   onCreateDataset,
@@ -126,6 +128,7 @@ export default function PlatformDialog({
           defaultDatasetVersion={defaultDatasetVersion}
           defaultTaskVersion={defaultTaskVersion}
           defaultAnnotatorId={isPersonalWorkspace ? currentUserId : null}
+          initialFeedbackSetVersionId={initialFeedbackSetVersionId}
           onSubmit={(draft) => submit(() => onCreateRound(draft))}
         />
       ) : null}
@@ -549,6 +552,7 @@ function RoundForm({
   defaultDatasetVersion,
   defaultTaskVersion,
   defaultAnnotatorId,
+  initialFeedbackSetVersionId,
   onSubmit,
 }: {
   data: PlatformProjectData;
@@ -556,20 +560,23 @@ function RoundForm({
   defaultDatasetVersion: number;
   defaultTaskVersion: number;
   defaultAnnotatorId?: number | null;
+  initialFeedbackSetVersionId?: number | null;
   onSubmit: (draft: RoundDraft) => Promise<void>;
 }): React.ReactElement {
   const [name, setName] = useState("");
-  const [cycleId, setCycleId] = useState(0);
-  const [taskVersionId, setTaskVersionId] = useState(defaultTaskVersion);
-  const [datasetVersionId, setDatasetVersionId] = useState(data.datasetVersions.find((version) => version.id === defaultDatasetVersion && version.item_count > 0)?.id ?? data.datasetVersions.find((version) => version.item_count > 0)?.id ?? 0);
+  const initialFeedbackSet = data.feedbackSets.find((set) => set.id === initialFeedbackSetVersionId);
+  const [creationIntentId] = useState(() => crypto.randomUUID());
+  const [cycleId, setCycleId] = useState(initialFeedbackSet ? data.feedbackRuns.find((run) => run.id === initialFeedbackSet.feedback_run_id)?.cycle_id ?? 0 : 0);
+  const [taskVersionId, setTaskVersionId] = useState(initialFeedbackSet?.task_version_id ?? defaultTaskVersion);
+  const [datasetVersionId, setDatasetVersionId] = useState(initialFeedbackSet?.dataset_version_id ?? data.datasetVersions.find((version) => version.id === defaultDatasetVersion && version.item_count > 0)?.id ?? data.datasetVersions.find((version) => version.item_count > 0)?.id ?? 0);
   const [guidelineRevisionId, setGuidelineRevisionId] = useState(0);
   const [reannotationMode, setReannotationMode] =
-    useState<RoundDraft["reannotationMode"]>("full_dataset");
+    useState<RoundDraft["reannotationMode"]>(initialFeedbackSet ? "targeted_subset" : "full_dataset");
   const [selectionStrategy, setSelectionStrategy] =
-    useState<RoundDraft["selectionStrategy"]>("random");
-  const [splitMapId, setSplitMapId] = useState(0);
+    useState<RoundDraft["selectionStrategy"]>(initialFeedbackSet ? "uncertainty" : "random");
+  const [splitMapId, setSplitMapId] = useState(initialFeedbackSet ? data.splitMaps.find((split) => split.dataset_version_id === initialFeedbackSet.dataset_version_id)?.id ?? 0 : 0);
   const [selectionLimit, setSelectionLimit] = useState(25);
-  const [feedbackSetVersionId, setFeedbackSetVersionId] = useState(0);
+  const [feedbackSetVersionId, setFeedbackSetVersionId] = useState(initialFeedbackSet?.id ?? 0);
   const [annotatorUserIds, setAnnotatorUserIds] = useState<number[]>(defaultAnnotatorId ? [defaultAnnotatorId] : []);
   const [openToAllAnnotators, setOpenToAllAnnotators] = useState(false);
   const [reason, setReason] = useState("");
@@ -642,6 +649,7 @@ function RoundForm({
       event.preventDefault();
       if (!selectedDataset?.item_count) return;
       void onSubmit({
+        creationIntentId,
         name,
         taskVersionId,
         datasetVersionId,

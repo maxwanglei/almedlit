@@ -147,6 +147,7 @@ def garbage_collect_artifact_blobs_task(
     try:
         unregistered = artifact_service.sweep_unregistered_artifact_objects(
             db, get_object_storage(), workspace_id=workspace_id, limit=limit,
+            commit_batches=True,
         )
         db.commit()
         processed_packages = 0

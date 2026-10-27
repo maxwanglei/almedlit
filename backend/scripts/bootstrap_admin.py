@@ -14,7 +14,7 @@ def bootstrap_admin(db: Session) -> User:
     username = settings.bootstrap_admin_username.strip()
     if not username:
         raise RuntimeError("AL_MEDLIT_BOOTSTRAP_ADMIN_USERNAME must not be blank")
-    password = settings.bootstrap_admin_password.strip()
+    password = settings.bootstrap_admin_password
 
     user = (
         db.query(User)

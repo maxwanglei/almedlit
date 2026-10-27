@@ -263,10 +263,12 @@ class SklearnTfidfTrainer:
             }
         if task_kind == "regression":
             if any(
-                isinstance(target, bool) or not isinstance(target, (int, float))
+                isinstance(target, bool)
+                or not isinstance(target, (int, float))
+                or not math.isfinite(target)
                 for target in all_targets
             ):
-                raise ValidationError("Regression targets must be numeric")
+                raise ValidationError("Regression targets must be finite numbers")
             return {"type": "regression", "value": "number"}
         if any(
             isinstance(target, (list, tuple, dict, set))
@@ -275,6 +277,12 @@ class SklearnTfidfTrainer:
             raise ValidationError(
                 "Single-label classification targets must be scalar values"
             )
+        if len(set(train_targets)) < 2:
+            raise ValidationError("Classification training requires at least two classes")
+        if declared_vocabulary and any(
+            str(value) not in declared_vocabulary for value in all_targets
+        ):
+            raise ValidationError("Classification labels fall outside the declared vocabulary")
         return {"type": "classification", "encoding": "class_label"}
 
     @staticmethod
@@ -378,7 +386,10 @@ class SklearnTfidfTrainer:
                         mean_absolute_error(validation_targets, predictions)
                     ),
                     "root_mean_squared_error": math.sqrt(mse),
-                    "r2": float(r2_score(validation_targets, predictions)),
+                    "r2": (
+                        float(r2_score(validation_targets, predictions))
+                        if len(validation_targets) >= 2 else None
+                    ),
                 }
             elif task_kind == "multilabel_classification":
                 validation_indicators = label_binarizer.transform(validation_targets)

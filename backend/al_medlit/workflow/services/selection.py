@@ -93,11 +93,22 @@ def _filter_value_set(eligibility_filter: dict, key: str) -> set[str] | None:
     return set(value)
 
 
-def _unavailable_selection_item_ids(db: Session, run: models.SelectionRun) -> set[int]:
+def _unavailable_selection_item_ids(
+    db: Session,
+    run: models.SelectionRun | models.FeedbackRun,
+    *,
+    include_submitted: bool = True,
+) -> set[int]:
     """Find submitted or reserved items for the run's pinned dataset and task."""
+    source_dataset_id = db.query(models.DatasetVersion.dataset_id).filter(
+        models.DatasetVersion.id == run.dataset_version_id,
+    ).scalar()
+    related_versions = db.query(models.DatasetVersion.id).filter(
+        models.DatasetVersion.dataset_id == source_dataset_id,
+    )
     round_scope = (
         models.AnnotationRound.project_id == run.project_id,
-        models.AnnotationRound.dataset_version_id == run.dataset_version_id,
+        models.AnnotationRound.dataset_version_id.in_(related_versions),
         models.AnnotationRound.task_version_id == run.task_version_id,
     )
     unavailable = {
@@ -114,6 +125,8 @@ def _unavailable_selection_item_ids(db: Session, run: models.SelectionRun) -> se
         )
         .all()
     }
+    if not include_submitted:
+        return _current_unavailable_items(db, run, unavailable)
     submitted_decisions: dict[tuple[int, int], set[int]] = {}
     for round_id, actor_id, decision_ids in (
         db.query(
@@ -130,7 +143,7 @@ def _unavailable_selection_item_ids(db: Session, run: models.SelectionRun) -> se
     ):
         submitted_decisions.setdefault((round_id, actor_id), set()).update(decision_ids)
     if not submitted_decisions:
-        return unavailable
+        return _current_unavailable_items(db, run, unavailable)
 
     # Membership lives in JSON; match it in Python for both SQLite and PostgreSQL.
     decisions = (
@@ -158,7 +171,19 @@ def _unavailable_selection_item_ids(db: Session, run: models.SelectionRun) -> se
     for decision_id, actor_id, round_id, item_id in decisions:
         if decision_id in submitted_decisions.get((round_id, actor_id), ()):
             unavailable.add(item_id)
-    return unavailable
+    return _current_unavailable_items(db, run, unavailable)
+
+
+def _current_unavailable_items(
+    db: Session, run: models.SelectionRun | models.FeedbackRun, unavailable: set[int],
+) -> set[int]:
+    stable_keys = db.query(models.DatasetItem.stable_key).filter(
+        models.DatasetItem.id.in_(unavailable),
+    )
+    return {item_id for (item_id,) in db.query(models.DatasetItem.id).filter(
+        models.DatasetItem.dataset_version_id == run.dataset_version_id,
+        models.DatasetItem.stable_key.in_(stable_keys),
+    )}
 
 
 def _eligible_selection_items(
@@ -818,6 +843,8 @@ def _materialized_selection_items(
         candidates = _feedback_selection_candidates(db, run, eligible)
         item_by_id = {item.id: item for item in eligible}
         groups = _candidate_groups(candidates)
+        if run.feedback_set_version_id is not None and set(item_by_id) - set(groups):
+            raise ValidationError("Feedback selection requires predictions for every eligible item")
         if run.strategy in {"uncertainty", "disagreement", "error_based"}:
             signal_name = {
                 "uncertainty": "uncertainty",

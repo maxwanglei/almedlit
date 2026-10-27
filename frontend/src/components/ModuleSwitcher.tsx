@@ -213,7 +213,9 @@ export default function ModuleSwitcher({
                   {renderLinks(true)}
                 </nav>
               </div>
-              <div className="module-navigation-drawer-section">
+              <div className="module-navigation-drawer-section" onClick={(event) => {
+                if (event.target instanceof Element && event.target.closest("button")) setMenuOpen(false);
+              }}>
                 <h2>Switch workspace</h2>
                 {workspaceSwitcher}
               </div>

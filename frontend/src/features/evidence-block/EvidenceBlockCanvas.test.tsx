@@ -370,7 +370,7 @@ describe("EvidenceBlockCanvas", () => {
     }]);
     api.undoEvidenceCommand.mockResolvedValue({ affected_annotation_ids: [901] });
     renderCanvas(ASSIGNMENT, [annotation()]);
-    await user.click(await screen.findByRole("button", { name: /Sentences 1–2/ }));
+    await user.click(await screen.findByRole("button", { name: /Sentences 1–2/ }, { timeout: 5000 }));
     await user.click(screen.getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(api.deleteAnnotation).toHaveBeenCalledWith(901, 1));
     expect(screen.queryByRole("alertdialog")).toBeNull();
@@ -621,6 +621,19 @@ describe("EvidenceBlockCanvas", () => {
     expect(api.createAnnotation.mock.calls[0][0]).not.toHaveProperty("start_offset");
   });
 
+  it("finishes a created block edit before selecting the next block", async () => {
+    const user = userEvent.setup();
+    renderCanvas(ASSIGNMENT, [annotation()]);
+    await user.click(await screen.findByRole("button", { name: /Sentence 3, unreviewed/i }));
+    await user.click(screen.getByRole("button", { name: "support" }));
+    await user.type(screen.getByLabelText("Note"), "First block");
+    await user.click(screen.getByRole("button", { name: "Create block" }));
+    await waitFor(() => expect(api.createAnnotation).toHaveBeenCalledOnce());
+    await user.click(screen.getByRole("button", { name: /Sentence 3, unreviewed/i }));
+    expect(screen.getByRole<HTMLButtonElement>("button", { name: "Create block" }).disabled).toBe(false);
+    expect(screen.getByRole<HTMLInputElement>("textbox", { name: "Note" }).value).toBe("");
+  });
+
   it("separates reviewed-region selection and preserves text-input undo", async () => {
     const user = userEvent.setup();
     api.listEvidenceCommands.mockResolvedValue([
@@ -835,6 +848,24 @@ describe("EvidenceBlockCanvas", () => {
     expect(onActiveAssignmentChange).toHaveBeenCalledExactlyOnceWith(replacement);
     expect((screen.getByLabelText("Evidence target") as HTMLSelectElement).value).toBe("102");
     expect((screen.getByLabelText("Note") as HTMLInputElement).disabled).toBe(false);
+  });
+
+  it("clears a stale controlled assignment while choosing an available unassigned target", async () => {
+    api.listEvidenceTargets.mockResolvedValue([TARGETS[0], { ...TARGETS[0], id: 12, name: "Other target", active_version_id: 102, versions: [{ ...TARGETS[0].versions[0], id: 102, target_id: 12 }] }]);
+    const onActiveAssignmentChange = vi.fn();
+    function ControlledCanvas() {
+      const [selectedAssignmentId, setSelectedAssignmentId] = useState<number | null>(ASSIGNMENT.id);
+      return <EvidenceBlockCanvas projectId={1} document={DOCUMENT} task={TASK} assignments={[]}
+        selectedAssignmentId={selectedAssignmentId} annotations={[]} annotatorId="alice" busy={false}
+        setBusy={vi.fn()} setError={vi.fn()} onAnnotationsChanged={vi.fn()} onRefreshAnnotations={async () => undefined}
+        onActiveAssignmentChange={(assignment) => { onActiveAssignmentChange(assignment); setSelectedAssignmentId(assignment?.id ?? null); }} />;
+    }
+    render(<ControlledCanvas />);
+    await screen.findByRole("button", { name: /Sentence 1, unreviewed/i });
+    fireEvent.change(screen.getByLabelText("Evidence target"), { target: { value: "102" } });
+    expect(onActiveAssignmentChange).toHaveBeenCalledWith(null);
+    expect(screen.getByRole<HTMLSelectElement>("combobox", { name: "Evidence target" }).value).toBe("102");
+    expect(screen.getByRole<HTMLInputElement>("textbox", { name: "Note" }).disabled).toBe(true);
   });
 
   it("uses personal task and setup language for evidence review", async () => {

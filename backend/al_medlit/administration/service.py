@@ -692,6 +692,30 @@ def set_user_status(
             actor_user_id=actor_user_id,
             now=now,
         )
+        from al_medlit.model_artifacts import quota as artifact_quota
+        from al_medlit.workflow.models import TrainingRun
+        from al_medlit.workflow.services.training_runs import lock_training_run_for_mutation
+        from al_medlit.workflow.services.workspace_training import (
+            _archive_abandoned_training_candidate,
+        )
+
+        training_run_ids = [run_id for (run_id,) in db.query(TrainingRun.id).filter(
+            TrainingRun.created_by_user_id == user.id,
+            TrainingRun.status.in_(("queued", "running")),
+        ).order_by(TrainingRun.id)]
+        for run_id in training_run_ids:
+            run = lock_training_run_for_mutation(db, run_id)
+            if run.status not in {"queued", "running"}:
+                continue
+            artifact_quota.release_owner_artifact_reservation(
+                db, owner_type="training_run", owner_id=run.id,
+                reason="Training owner deactivated",
+            )
+            run.status = "cancelled"
+            run.completed_at = now
+            run.failure_code = "owner_deactivated"
+            run.failure_reason = "Training owner deactivated"
+            _archive_abandoned_training_candidate(db, run, now=now)
         revoked_action_count = _revoke_unused_actions(db, user.id, now=now)
         user.is_active = False
         user.session_version += 1

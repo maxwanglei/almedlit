@@ -261,6 +261,7 @@ def publish_artifact_package(
     verify_reused_blobs: bool = True,
     prepared_validator: Callable[[Sequence[_PreparedFile]], None] | None = None,
     reservation_id: int | None = None,
+    keep_reservation_open: bool = False,
 ) -> ArtifactPackage:
     """Publish all files and their manifest, leaving commit control to the caller.
 
@@ -303,6 +304,7 @@ def publish_artifact_package(
         )
         manifest_bytes = canonical_json_bytes(manifest)
         manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
+        artifact_quota.lock_workspace_artifact_quota(db, workspace_id=project.workspace_id)
         existing_package = (
             db.query(ArtifactPackage)
             .filter(
@@ -341,12 +343,14 @@ def publish_artifact_package(
                             (manifest_digest, len(manifest_bytes)),
                         ],
                         reservation_id=reservation_id,
+                        keep_reservation_open=keep_reservation_open,
                     )
-                    artifact_quota.link_reservation_artifact_package(
-                        db,
-                        reservation_id=reservation_id,
-                        artifact_package_id=existing_package.id,
-                    )
+                    if not keep_reservation_open or data.package_kind == "model_candidate":
+                        artifact_quota.link_reservation_artifact_package(
+                            db,
+                            reservation_id=reservation_id,
+                            artifact_package_id=existing_package.id,
+                        )
             return existing_package
 
         with db.begin_nested():
@@ -359,6 +363,7 @@ def publish_artifact_package(
                     (manifest_digest, len(manifest_bytes)),
                 ],
                 reservation_id=reservation_id,
+                keep_reservation_open=keep_reservation_open,
             )
             blob_cache: dict[str, ArtifactBlob] = {}
             file_rows: list[tuple[_PreparedFile, ArtifactBlob]] = []
@@ -473,7 +478,9 @@ def publish_artifact_package(
                     updated_at=retained_at,
                 )
             )
-            if reservation_id is not None:
+            if reservation_id is not None and (
+                not keep_reservation_open or data.package_kind == "model_candidate"
+            ):
                 artifact_quota.link_reservation_artifact_package(
                     db,
                     reservation_id=reservation_id,
@@ -1312,6 +1319,7 @@ def sweep_unregistered_artifact_objects(
     limit: int = 200,
     now: datetime | None = None,
     should_stop: Callable[[], bool] | None = None,
+    commit_batches: bool = False,
 ) -> int:
     from al_medlit.storage_reclaim.service import storage_key_is_referenced
     from al_medlit.workspace.models import Workspace
@@ -1321,22 +1329,55 @@ def sweep_unregistered_artifact_objects(
     if workspace_id is not None:
         workspaces = workspaces.filter(Workspace.id == workspace_id)
     reclaimed = 0
-    for (candidate_workspace_id,) in workspaces.yield_per(100):
-        prefix = workspace_blob_prefix(candidate_workspace_id) + "/"
-        for item in storage.list_objects(prefix):
+    bounded_limit = min(max(limit, 1), 10_000)
+    for (candidate_workspace_id,) in workspaces.all():
+        prefixes = [
+            workspace_blob_prefix(candidate_workspace_id) + "/",
+            f"workspaces/{candidate_workspace_id}/inference/",
+            *(
+                f"projects/{project_id}/inference/"
+                for (project_id,) in db.query(Project.id).filter(
+                    Project.workspace_id == candidate_workspace_id,
+                )
+            ),
+        ]
+        candidates = []
+        for prefix in prefixes:
+            for item in storage.list_objects(prefix):
+                if should_stop is not None and should_stop():
+                    return reclaimed
+                if not item.key.startswith(prefix) or _as_utc(item.last_modified) > cutoff:
+                    continue
+                if not storage_key_is_referenced(db, item.key, include_purged_blobs=False):
+                    candidates.append(item.key)
+                    if len(candidates) + reclaimed >= bounded_limit:
+                        break
+            if len(candidates) + reclaimed >= bounded_limit:
+                break
+        if not candidates:
+            if commit_batches:
+                db.commit()
+            continue
+        artifact_quota.lock_workspace_artifact_quota(db, workspace_id=candidate_workspace_id)
+        for key in candidates:
             if should_stop is not None and should_stop():
-                return reclaimed
-            if not item.key.startswith(prefix) or _as_utc(item.last_modified) > cutoff:
-                continue
-            artifact_quota.lock_workspace_artifact_quota(
-                db, workspace_id=candidate_workspace_id,
-            )
-            if storage_key_is_referenced(db, item.key, include_purged_blobs=False):
-                continue
-            storage.delete(item.key)
-            reclaimed += 1
-            if reclaimed >= min(max(limit, 1), 10_000):
-                return reclaimed
+                break
+            if not storage_key_is_referenced(db, key, include_purged_blobs=False):
+                storage.delete(key)
+                reclaimed += 1
+        if commit_batches:
+            db.commit()
+        if reclaimed >= bounded_limit:
+            return reclaimed
+    if workspace_id is None:
+        for item in storage.list_objects("runtime-preflight/"):
+            if should_stop is not None and should_stop():
+                break
+            if item.key.startswith("runtime-preflight/") and _as_utc(item.last_modified) <= cutoff:
+                storage.delete(item.key)
+                reclaimed += 1
+                if reclaimed >= bounded_limit:
+                    break
     return reclaimed
 
 

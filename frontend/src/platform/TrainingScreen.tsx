@@ -305,6 +305,10 @@ export default function TrainingScreen({
     [data.recipes, taskVersion],
   );
   const recipe = data.recipes.find((item) => item.key === recipeKey);
+  const protectedTestSupported = recipeKey === "tfidf_linear_regression" || recipeKey === "tfidf_logistic_regression";
+  useEffect(() => {
+    if (recipeKey && !protectedTestSupported && evaluationSplit === "test") setEvaluationSplit("validation");
+  }, [evaluationSplit, protectedTestSupported, recipeKey]);
   const baseModelRequired = recipeRequiresBaseModel(recipe);
   const availableBaseModels = useMemo(
     () => compatibleBaseModels(data.baseModels, recipe, taskVersion?.task_kind),
@@ -539,6 +543,7 @@ export default function TrainingScreen({
       config: pinnedConfig,
       evaluationPlan: {
         splits: [evaluationSplit],
+        ...(taskVersion?.metrics.length ? { metrics: taskVersion.metrics } : {}),
       },
     });
   }
@@ -844,7 +849,7 @@ export default function TrainingScreen({
                   onChange={(event) => setEvaluationSplit(event.target.value)}
                 >
                   <option value="validation">Validation</option>
-                  <option value="test">Protected test</option>
+                  <option value="test" disabled={!protectedTestSupported}>Protected test</option>
                 </NativeSelect>
               </label>
               <label>
@@ -857,6 +862,7 @@ export default function TrainingScreen({
                 />
               </label>
             </div>
+            {!protectedTestSupported ? <p>Protected test evaluation is available for TF-IDF classification and regression recipes.</p> : null}
             {storage ? (
               <div className="platform-storage-summary">
                 <span>{formatStatus(storage.backend)}</span>

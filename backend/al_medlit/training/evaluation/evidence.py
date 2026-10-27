@@ -412,13 +412,22 @@ class EvidenceEvaluationReport(ContractModel):
         }
 
 
-def blocks_from_bio(labels: tuple[str, ...] | list[str]) -> tuple[EvidenceSpan, ...]:
+def blocks_from_bio(
+    labels: tuple[str, ...] | list[str],
+    *,
+    sentence_ordinals: tuple[int, ...] | None = None,
+) -> tuple[EvidenceSpan, ...]:
     blocks: list[EvidenceSpan] = []
     start: int | None = None
     for ordinal, label in enumerate(labels):
         if label not in {"O", "B", "I"}:
             raise ValueError(f"Unknown BIO label {label!r}")
-        if label == "B":
+        boundary = (
+            sentence_ordinals is not None
+            and ordinal > 0
+            and sentence_ordinals[ordinal] != sentence_ordinals[ordinal - 1] + 1
+        )
+        if label == "B" or (label == "I" and boundary):
             if start is not None:
                 blocks.append(EvidenceSpan(start=start, end=ordinal - 1))
             start = ordinal
@@ -437,11 +446,12 @@ def blocks_from_scores(
     scores: tuple[float, ...] | list[float],
     *,
     threshold: float,
+    sentence_ordinals: tuple[int, ...] | None = None,
 ) -> tuple[EvidenceSpan, ...]:
     if not 0 <= threshold <= 1:
         raise ValueError("Sentence-score threshold must be from 0 to 1")
     labels = tuple("I" if score >= threshold else "O" for score in scores)
-    return blocks_from_bio(labels)
+    return blocks_from_bio(labels, sentence_ordinals=sentence_ordinals)
 
 
 def canonical_prediction_blocks(
@@ -452,9 +462,15 @@ def canonical_prediction_blocks(
     if example.predicted_blocks is not None:
         return tuple(sorted(example.predicted_blocks, key=lambda span: (span.start, span.end)))
     if example.predicted_labels is not None:
-        return blocks_from_bio(example.predicted_labels)
+        return blocks_from_bio(
+            example.predicted_labels, sentence_ordinals=example.sentence_ordinals,
+        )
     assert example.predicted_scores is not None
-    return blocks_from_scores(example.predicted_scores, threshold=sentence_score_threshold)
+    return blocks_from_scores(
+        example.predicted_scores,
+        threshold=sentence_score_threshold,
+        sentence_ordinals=example.sentence_ordinals,
+    )
 
 
 def _maximum_cardinality_matches(

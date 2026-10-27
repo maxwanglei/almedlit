@@ -13,7 +13,7 @@ import {
   type TextInputProps,
 } from "@astryxdesign/core/TextInput";
 
-import { acceptInvite, getInvitePreview } from "@/api/client";
+import { acceptInvite, getInvitePreview, logout } from "@/api/client";
 import BrandLogo from "@/components/BrandLogo";
 import type { InvitePreview } from "@/types/api";
 
@@ -21,7 +21,7 @@ interface AcceptInvitePageProps {
   token: string;
   signedIn: boolean;
   /** Called once membership exists so the shell can reload the session. */
-  onAccepted: () => void;
+  onAccepted: (workspaceId: number) => void;
 }
 
 type AuthTextInputProps = TextInputProps & {
@@ -104,8 +104,8 @@ export default function AcceptInvitePage({
     setError(null);
     try {
       // The shared request helper authenticates with the HttpOnly session cookie.
-      await acceptInvite(token);
-      onAccepted();
+      const accepted = await acceptInvite(token);
+      onAccepted(accepted.workspace_id);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not accept the invite");
     } finally {
@@ -138,21 +138,17 @@ export default function AcceptInvitePage({
 
     setBusy(true);
     try {
-      if (mode === "register") {
-        await acceptInvite(token, {
+      const accepted = await acceptInvite(token, mode === "register" ? {
           username: trimmedUsername,
           password,
           display_name: displayName.trim() || undefined,
           create_account: true,
-        });
-      } else {
-        await acceptInvite(token, {
+        } : {
           username: trimmedUsername,
           password,
           create_account: false,
         });
-      }
-      onAccepted();
+      onAccepted(accepted.workspace_id);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not accept the invite");
     } finally {
@@ -196,6 +192,15 @@ export default function AcceptInvitePage({
               description={error}
             />
           ) : null}
+          <Button
+            label="Switch account"
+            variant="ghost"
+            isDisabled={busy}
+            onClick={() => {
+              setBusy(true);
+              void logout().catch(() => setError("Could not sign out. Try again.")).finally(() => setBusy(false));
+            }}
+          />
           <Button
             label="Accept invite"
             variant="primary"

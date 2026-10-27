@@ -173,7 +173,8 @@ function collectionPlan(
   }
 
   if (scope === "quality" && enabled.has("annotate")) {
-    add("tasks", "taskVersions", "rounds");
+    add("tasks", "taskVersions", "rounds", "datasets", "datasetVersions");
+    if (enabled.has("guidelines") || enabled.has("activity")) add("guidelines", "guidelineRevisions");
     return plan;
   }
 
@@ -1127,6 +1128,7 @@ export function listWorkspaceRoundWorkContexts(
 }
 
 export interface RoundDraft {
+  creationIntentId: string;
   name: string;
   datasetVersionId: number;
   taskVersionId: number;
@@ -1150,10 +1152,17 @@ export interface RoundDraft {
   reason: string;
 }
 
+export interface RoundCreationProgress {
+  selectionRunId: number | null;
+  selectionSetVersionId: number | null;
+  roundId: number | null;
+}
+
 export async function createRound(
   projectId: number,
   draft: RoundDraft,
   onCreated?: (round: AnnotationRound) => void,
+  progress: RoundCreationProgress = { selectionRunId: null, selectionSetVersionId: null, roundId: null },
 ): Promise<AnnotationRound> {
   let selectionSetVersionId: number | null = null;
   if (draft.reannotationMode === "targeted_subset") {
@@ -1162,24 +1171,31 @@ export async function createRound(
         "Select a governed train, validation, test, and pool split before selecting annotation items.",
       );
     }
-    const selectionRun = await post<{ id: number }>("/selection-runs", {
-      project_id: projectId,
-      dataset_version_id: draft.datasetVersionId,
-      task_version_id: draft.taskVersionId,
-      cycle_id: draft.cycleId,
-      feedback_set_version_id: draft.feedbackSetVersionId,
-      split_map_id: draft.splitMapId,
-      strategy: draft.selectionStrategy,
-      parameters: { limit: draft.selectionLimit },
-      eligibility_filter: {},
-    });
-    const selectionSet = await post<{ id: number }>(
-      `/projects/${projectId}/selection-runs/${selectionRun.id}/materialize`,
-      {},
-    );
-    selectionSetVersionId = selectionSet.id;
+    if (progress.selectionRunId === null) {
+      const selectionRun = await post<{ id: number }>("/selection-runs", {
+        project_id: projectId,
+        dataset_version_id: draft.datasetVersionId,
+        task_version_id: draft.taskVersionId,
+        cycle_id: draft.cycleId,
+        feedback_set_version_id: draft.feedbackSetVersionId,
+        split_map_id: draft.splitMapId,
+        strategy: draft.selectionStrategy,
+        parameters: { limit: draft.selectionLimit },
+        eligibility_filter: {},
+      });
+      progress.selectionRunId = selectionRun.id;
+    }
+    if (progress.selectionSetVersionId === null) {
+      const selectionSet = await post<{ id: number }>(
+        `/projects/${projectId}/selection-runs/${progress.selectionRunId}/materialize`,
+        {},
+      );
+      progress.selectionSetVersionId = selectionSet.id;
+    }
+    selectionSetVersionId = progress.selectionSetVersionId;
   }
   const annotationRound = await post<AnnotationRound>("/rounds", {
+    request_key: draft.creationIntentId,
     project_id: projectId,
     name: draft.name.trim(),
     dataset_version_id: draft.datasetVersionId,
@@ -1194,7 +1210,12 @@ export async function createRound(
     open_to_all_annotators: draft.openToAllAnnotators,
     reason: draft.reason.trim() || null,
   });
+  progress.roundId = annotationRound.id;
   onCreated?.(annotationRound);
+  if (annotationRound.status === "open") return annotationRound;
+  if (annotationRound.status === "closed" || annotationRound.status === "cancelled") {
+    throw new Error("This round creation attempt is already closed or cancelled. Open a new round form to create another round.");
+  }
   return post<AnnotationRound>(
     `/rounds/${annotationRound.id}/transition?${projectQuery(projectId)}`,
     { status: "open" },

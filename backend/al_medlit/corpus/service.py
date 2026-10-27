@@ -4,11 +4,12 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 
 from sqlalchemy import func
-from sqlalchemy.exc import InterfaceError, OperationalError
+from sqlalchemy.exc import IntegrityError, InterfaceError, OperationalError
 from sqlalchemy.orm import Session, defer, selectinload
 
 from al_medlit.auth.models import User
 from al_medlit.auth.tenancy import assignment_access_clause, resource_access_clause
+from al_medlit.core.database import begin_savepoint
 from al_medlit.core.exceptions import ConflictError, NotFoundError, ValidationError
 from al_medlit.corpus.models import (
     Document,
@@ -50,8 +51,14 @@ def create_document(
         raise ValidationError(f"Project {payload['project_id']} not found")
 
     doc = Document(**payload)
-    db.add(doc)
-    db.flush()
+    try:
+        with begin_savepoint(db):
+            db.add(doc)
+            db.flush()
+    except IntegrityError as exc:
+        raise ConflictError(
+            "A document with this external ID already exists in the project"
+        ) from exc
     structure_version = _build_structure_version(
         db,
         doc,
