@@ -298,10 +298,10 @@ def resolve_round_labels(
     if any(submission.annotation_round_id != annotation_round.id for submission in submissions):
         raise ValidationError("All submissions must belong to the selected round")
 
-    latest_by_item: dict[tuple[int, int], tuple[int, models.RoundAnnotationDecision]] = {}
-    accepted_kinds = (
-        {"adjudication"} if data.source_kind == "adjudicated" else {"annotation", "correction"}
-    )
+    latest_by_item: dict[tuple[int, int, bool], tuple[int, models.RoundAnnotationDecision]] = {}
+    accepted_kinds = {"annotation", "correction"}
+    if data.source_kind == "adjudicated":
+        accepted_kinds.add("adjudication")
     decisions_by_id = _scoped_many(
         db, models.RoundAnnotationDecision,
         (decision_id for submission in submissions for decision_id in submission.decision_ids),
@@ -315,7 +315,11 @@ def resolve_round_labels(
                 or decision.decision_kind not in accepted_kinds
             ):
                 continue
-            latest_by_item[(decision.round_item_id, decision.annotator_user_id)] = (
+            latest_by_item[(
+                decision.round_item_id,
+                decision.annotator_user_id,
+                decision.decision_kind == "adjudication",
+            )] = (
                 submission.id, decision
             )
     selected_decisions = [item[1] for item in latest_by_item.values()]
@@ -328,6 +332,7 @@ def resolve_round_labels(
         db, models.TaskVersion, annotation_round.task_version_id, data.project_id, "Task version"
     )
     output_by_key: dict[str, list[tuple[str, Any]]] = {}
+    adjudicated_by_key: dict[str, models.RoundAnnotationDecision] = {}
     round_items = _scoped_many(
         db, models.RoundItem, (decision.round_item_id for decision in selected_decisions),
         data.project_id, "Round item",
@@ -343,14 +348,22 @@ def resolve_round_labels(
         dataset_item = dataset_items[round_item.dataset_item_id]
         if dataset_item.dataset_version_id != annotation_round.dataset_version_id:
             raise ValidationError("Submitted item does not belong to the pinned dataset")
+        if decision.decision_kind == "adjudication":
+            current = adjudicated_by_key.get(dataset_item.stable_key)
+            if current is None or decision.id > current.id:
+                adjudicated_by_key[dataset_item.stable_key] = decision
+            continue
         output_by_key.setdefault(dataset_item.stable_key, []).append(
             (_task_output_hash(task_version, decision.output), decision.output)
         )
 
     labels: dict[str, Any] = {}
     disagreements: list[str] = []
-    for stable_key, outputs in sorted(output_by_key.items()):
-        unique = {output_hash: output for output_hash, output in outputs}
+    for stable_key in sorted(output_by_key.keys() | adjudicated_by_key.keys()):
+        if stable_key in adjudicated_by_key:
+            labels[stable_key] = adjudicated_by_key[stable_key].output
+            continue
+        unique = {output_hash: output for output_hash, output in output_by_key[stable_key]}
         if len(unique) != 1:
             disagreements.append(stable_key)
             continue
@@ -363,6 +376,7 @@ def resolve_round_labels(
 
     return {
         "labels": labels,
+        "source_kind": "adjudicated" if adjudicated_by_key else "human",
         "dataset_version_id": annotation_round.dataset_version_id,
         "task_version_id": annotation_round.task_version_id,
         "source_submission_ids": sorted({item[0] for item in latest_by_item.values()}),

@@ -258,7 +258,7 @@ def _resolve_labels(
             schemas.RoundLabelSetCreate(
                 project_id=project_id,
                 name=name,
-                source_kind="human",
+                source_kind="adjudicated",
                 submission_ids=submission_ids,
                 publication_mode="submitted_snapshot",
             ),
@@ -272,7 +272,7 @@ def _resolve_labels(
                 "Submitted annotations must match the selected dataset and task versions"
             )
         ref.update(
-            source_kind="human",
+            source_kind=resolved["source_kind"],
             submission_ids=resolved["source_submission_ids"],
             source_decision_ids=resolved["source_decision_ids"],
             label_content_hash=_canonical_hash(resolved["labels"]),

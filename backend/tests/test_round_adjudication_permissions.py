@@ -75,6 +75,7 @@ def test_unassigned_manager_can_adjudicate_finalize_and_publish_actual_disagreem
     annotation_round, items = _round(client, scope)
     assert scope.manager.id not in annotation_round["annotator_user_ids"]
     submissions = []
+    ordinary_decision_ids = []
     for actor, output in zip(scope.annotators, ("relevant", "irrelevant"), strict=True):
         decision_ids = []
         for index, item in enumerate(items):
@@ -83,6 +84,7 @@ def test_unassigned_manager_can_adjudicate_finalize_and_publish_actual_disagreem
             )
             assert decision.status_code == 201, decision.text
             decision_ids.append(decision.json()["id"])
+        ordinary_decision_ids.extend(decision_ids)
         submission = _submit(client, scope, actor, annotation_round, decision_ids)
         assert submission.status_code == 201, submission.text
         submissions.append(submission.json()["id"])
@@ -111,6 +113,12 @@ def test_unassigned_manager_can_adjudicate_finalize_and_publish_actual_disagreem
         client, scope, scope.manager, annotation_round, [adjudication.json()["id"]],
     )
     assert finalized.status_code == 201, finalized.text
+    strict_human = client.post(
+        f"/api/rounds/{annotation_round['id']}/label-sets", json={
+            **publication, "submission_ids": [*submissions, finalized.json()["id"]],
+        }, headers=_headers(scope.manager),
+    )
+    assert strict_human.status_code == 409, strict_human.text
     published = client.post(
         f"/api/rounds/{annotation_round['id']}/label-sets", json={
             **publication, "source_kind": "adjudicated",
@@ -118,10 +126,12 @@ def test_unassigned_manager_can_adjudicate_finalize_and_publish_actual_disagreem
         }, headers=_headers(scope.manager),
     )
     assert published.status_code == 201, published.text
-    assert published.json()["label_count"] == 1
-    assert list(published.json()["labels"].values()) == ["relevant"]
-    assert published.json()["source_submission_ids"] == [finalized.json()["id"]]
-    assert published.json()["source_decision_ids"] == [adjudication.json()["id"]]
+    assert published.json()["label_count"] == 2
+    assert list(published.json()["labels"].values()) == ["relevant", "relevant"]
+    assert published.json()["source_submission_ids"] == [*submissions, finalized.json()["id"]]
+    assert published.json()["source_decision_ids"] == [
+        *ordinary_decision_ids, adjudication.json()["id"],
+    ]
     repeated = client.post(
         f"/api/rounds/{annotation_round['id']}/label-sets", json={
             **publication, "source_kind": "adjudicated",
@@ -146,12 +156,72 @@ def test_unassigned_manager_can_adjudicate_finalize_and_publish_actual_disagreem
     )
     assert revised.status_code == 201, revised.text
     assert revised.json()["id"] != published.json()["id"]
-    assert list(revised.json()["labels"].values()) == ["irrelevant"]
+    assert sorted(revised.json()["labels"].values()) == ["irrelevant", "relevant"]
     assert db.query(models.RoundAnnotationDecision).count() == 6
     db.expire_all()
     assert db.get(models.AnnotationRound, annotation_round["id"]).status == (
         "closed" if publication_mode == "closed_round" else "open"
     )
+
+
+def test_adjudicated_publication_retains_consensus_without_adjudications(client, scope):
+    annotation_round, items = _round(client, scope)
+    submission_ids = []
+    decision_ids = []
+    for actor in scope.annotators:
+        actor_decisions = []
+        for index, item in enumerate(items):
+            decision = _decision(
+                client, scope, actor, item,
+                kind="correction" if index else "annotation",
+                output="irrelevant" if index else "relevant",
+            )
+            assert decision.status_code == 201, decision.text
+            actor_decisions.append(decision.json()["id"])
+        submitted = _submit(client, scope, actor, annotation_round, actor_decisions)
+        assert submitted.status_code == 201, submitted.text
+        submission_ids.append(submitted.json()["id"])
+        decision_ids.extend(actor_decisions)
+    published = client.post(
+        f"/api/rounds/{annotation_round['id']}/label-sets", json={
+            "project_id": scope.project.id, "name": "Consensus adjudicated layer",
+            "source_kind": "adjudicated", "submission_ids": submission_ids,
+            "publication_mode": "submitted_snapshot",
+        }, headers=_headers(scope.manager),
+    )
+    assert published.status_code == 201, published.text
+    assert published.json()["label_count"] == 2
+    assert sorted(published.json()["labels"].values()) == ["irrelevant", "relevant"]
+    assert published.json()["source_submission_ids"] == submission_ids
+    assert published.json()["source_decision_ids"] == decision_ids
+
+
+def test_adjudication_of_one_item_does_not_hide_another_disagreement(client, scope):
+    annotation_round, items = _round(client, scope)
+    submission_ids = []
+    for actor, output in zip(scope.annotators, ("relevant", "irrelevant"), strict=True):
+        decision_ids = []
+        for item in items:
+            decision = _decision(client, scope, actor, item, output=output)
+            assert decision.status_code == 201, decision.text
+            decision_ids.append(decision.json()["id"])
+        submitted = _submit(client, scope, actor, annotation_round, decision_ids)
+        assert submitted.status_code == 201, submitted.text
+        submission_ids.append(submitted.json()["id"])
+    adjudication = _decision(client, scope, scope.manager, items[0], kind="adjudication")
+    assert adjudication.status_code == 201, adjudication.text
+    submitted = _submit(client, scope, scope.manager, annotation_round, [adjudication.json()["id"]])
+    assert submitted.status_code == 201, submitted.text
+    published = client.post(
+        f"/api/rounds/{annotation_round['id']}/label-sets", json={
+            "project_id": scope.project.id, "name": "Incomplete adjudication",
+            "source_kind": "adjudicated",
+            "submission_ids": [*submission_ids, submitted.json()["id"]],
+            "publication_mode": "submitted_snapshot",
+        }, headers=_headers(scope.manager),
+    )
+    assert published.status_code == 409, published.text
+    assert "disagree" in published.json()["detail"]
 
 
 @pytest.mark.parametrize("kind", ["annotation", "correction"])
